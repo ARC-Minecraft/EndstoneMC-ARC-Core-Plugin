@@ -17,6 +17,15 @@ RARITY_COLORS = {
 }
 DEFAULT_RARITY = "普通"
 
+# 稀有度比较顺序（数值越大越高）
+RARITY_ORDER = {
+    "普通": 0,
+    "稀有": 1,
+    "史诗": 2,
+    "传奇": 3,
+    "神话": 4,
+}
+
 
 class TitleSystem:
     """头衔系统：头衔定义（稀有度、介绍、奖励）、解锁时间、佩戴与聊天展示。"""
@@ -177,6 +186,29 @@ class TitleSystem:
                 result.append(t)
                 seen.add(t)
         return result
+
+    def rarity_rank(self, rarity: str) -> int:
+        """稀有度排序用权重，未知稀有度视为最低档。"""
+        if not rarity:
+            return RARITY_ORDER[DEFAULT_RARITY]
+        return RARITY_ORDER.get(rarity.strip(), RARITY_ORDER[DEFAULT_RARITY])
+
+    def pick_highest_rarity_title(self, title_names: List[str]) -> Optional[str]:
+        """从已解锁头衔名列表中选出稀有度最高的一条；同稀有度时保留先出现的。"""
+        if not title_names:
+            return None
+        best_name: Optional[str] = None
+        best_rank = -1
+        for title_name in title_names:
+            if not title_name:
+                continue
+            defn = self.get_title_definition(title_name.strip())
+            rarity = (defn.get("rarity") if defn else None) or DEFAULT_RARITY
+            rank = self.rarity_rank(rarity)
+            if rank > best_rank:
+                best_rank = rank
+                best_name = title_name.strip()
+        return best_name
 
     def get_title_rarity_color(self, title: str) -> str:
         """根据头衔稀有度返回 MC 颜色码，如 §f、§9。"""

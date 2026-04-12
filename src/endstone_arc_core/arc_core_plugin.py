@@ -583,6 +583,7 @@ class ARCCorePlugin(Plugin):
             self.logger.error(f"{ColorFormat.RED}[ARC Core]Check pending invite rewards on join error: {str(e)}")
 
         self.title_system.on_player_join(event.player)
+        self._auto_equip_highest_title_if_needed(event.player)
         self._update_player_name_tag(event.player)
 
         if self.force_login and not self.if_player_logined(event.player):
@@ -671,9 +672,13 @@ class ARCCorePlugin(Plugin):
         return
 
     def _is_frame_block(self, block) -> bool:
-        """是否为展示框或发光展示框（minecraft:frame / minecraft:glow_frame）"""
-        bid = (getattr(block, 'identifier', None) or getattr(block, 'type', None) or '')
-        return str(bid).lower() in ('minecraft:frame', 'minecraft:glow_frame')
+        """是否属于与 allow_frame 联动的方块（见 PUBLIC_LAND_INTERACT_BLOCK_BLACKLIST，默认含展示框与各材质展示架）"""
+        bid = str(
+            getattr(block, 'identifier', None) or getattr(block, 'type', None) or ''
+        ).lower()
+        if not bid:
+            return False
+        return bid in self.land_system.get_public_land_interact_block_blacklist()
 
     @event_handler
     def on_block_place(self, event: BlockPlaceEvent):
@@ -1363,6 +1368,16 @@ class ARCCorePlugin(Plugin):
             # 每日签到：上次签到日期（YYYY-MM-DD，空表示从未签到）
             if not self._add_column_if_not_exists('player_basic_info', 'last_checkin_date', 'TEXT'):
                 success = False
+
+            # 是否已完成进服自动佩戴最高稀有度头衔（0 否 1 是）
+            if not self._add_column_if_not_exists('player_basic_info', 'default_title_auto_equipped', 'INTEGER DEFAULT 0'):
+                success = False
+
+            # 签到：累计次数、最近一次签到时刻（ISO，用于当日先后排序）
+            if not self._add_column_if_not_exists('player_basic_info', 'total_checkin_count', 'INTEGER DEFAULT 0'):
+                success = False
+            if not self._add_column_if_not_exists('player_basic_info', 'last_checkin_at', 'TEXT'):
+                success = False
             
             return success
         except Exception as e:
@@ -1384,7 +1399,10 @@ class ARCCorePlugin(Plugin):
             'remaining_free_land_blocks': f'INTEGER DEFAULT {default_free_blocks}',  # 剩余免费领地格子数
             'inviter_xuid': 'TEXT',  # 邀请人 XUID，允许为空
             'pending_invite_reward_times': 'INTEGER DEFAULT 0',  # 待领取邀请奖励次数
-            'last_checkin_date': 'TEXT'  # 上次签到日期 YYYY-MM-DD
+            'last_checkin_date': 'TEXT',  # 上次签到日期 YYYY-MM-DD
+            'default_title_auto_equipped': 'INTEGER DEFAULT 0',  # 是否已做过进服自动佩戴头衔
+            'total_checkin_count': 'INTEGER DEFAULT 0',  # 累计签到次数
+            'last_checkin_at': 'TEXT'  # 最近一次签到时间 ISO8601
         }
         result = self.database_manager.create_table('player_basic_info', fields)
         
@@ -1421,7 +1439,9 @@ class ARCCorePlugin(Plugin):
                 'is_op': 1 if player.is_op else 0,  # 根据玩家当前OP状态设置
                 'remaining_free_land_blocks': default_free_blocks,  # 设置默认免费格子数
                 'inviter_xuid': None,  # 初始无邀请人
-                'pending_invite_reward_times': 0  # 初始无待领取邀请奖励
+                'pending_invite_reward_times': 0,  # 初始无待领取邀请奖励
+                'default_title_auto_equipped': 0,
+                'total_checkin_count': 0,
             }
             return self.database_manager.insert('player_basic_info', player_data)
         except Exception as e:
@@ -1497,7 +1517,8 @@ class ARCCorePlugin(Plugin):
                         'uuid': str(player.unique_id),
                         'xuid': str(player.xuid),
                         'name': player.name,
-                        'password': None
+                        'password': None,
+                        'default_title_auto_equipped': 0
                     }
                 return None
             return result
@@ -1784,12 +1805,12 @@ class ARCCorePlugin(Plugin):
             arc_menu = ActionForm(
                 title=self.language_manager.GetText('MAIN_MENU_TITLE'),
             )
+            arc_menu.add_button(self.language_manager.GetText('CHECKIN_MENU_BUTTON'), on_click=self.show_daily_checkin_panel)
+            arc_menu.add_button(self.language_manager.GetText('MAIN_MENU_MY_INFO_NAME'), on_click=self.show_my_info_panel)
             arc_menu.add_button(self.language_manager.GetText('NEWBIE_GUIDE_BUTTON'), on_click=self.show_newbie_welcome_panel)
             arc_menu.add_button(self.language_manager.GetText('BANK_MENU_NAME'), on_click=self.show_bank_main_menu)
             arc_menu.add_button(self.language_manager.GetText('TELEPORT_MENU_NAME'), on_click=self.show_teleport_menu)
             arc_menu.add_button(self.language_manager.GetText('LAND_MENU_NAME'), on_click=self.show_land_main_menu)
-            arc_menu.add_button(self.language_manager.GetText('MAIN_MENU_MY_INFO_NAME'), on_click=self.show_my_info_panel)
-            arc_menu.add_button(self.language_manager.GetText('CHECKIN_MENU_BUTTON'), on_click=self.show_daily_checkin_panel)
             if self.server.plugin_manager.get_plugin('ushop'):
                 arc_menu.add_button(self.language_manager.GetText('SHOP_MENU_NAME'), on_click=self.show_shop_menu)
             if self.server.plugin_manager.get_plugin('arc_button_shop'):
@@ -1934,6 +1955,49 @@ class ARCCorePlugin(Plugin):
         if desc:
             return line1 + "\n§r§f" + desc
         return line1
+
+    def _auto_equip_highest_title_if_needed(self, player: Player) -> None:
+        """进服一次：若未标记完成且当前未佩戴，则佩戴已解锁中稀有度最高的头衔并写标记；已有佩戴则仅同步标记。"""
+        try:
+            player_xuid = str(player.xuid)
+            row = self.database_manager.query_one(
+                "SELECT default_title_auto_equipped FROM player_basic_info WHERE xuid = ?",
+                (player_xuid,),
+            )
+            if row is None:
+                return
+            try:
+                flag = int(row.get("default_title_auto_equipped", 0) or 0)
+            except (ValueError, TypeError):
+                flag = 0
+            if flag != 0:
+                return
+            equipped = self.title_system.get_equipped_title(player)
+            if equipped:
+                self.database_manager.update(
+                    table="player_basic_info",
+                    data={"default_title_auto_equipped": 1},
+                    where="xuid = ?",
+                    params=(player_xuid,),
+                )
+                return
+            unlocked = self.title_system.get_unlocked_titles(player)
+            if not unlocked:
+                return
+            best_title = self.title_system.pick_highest_rarity_title(unlocked)
+            if not best_title:
+                return
+            if not self.title_system.set_equipped_title(player, best_title):
+                return
+            self.database_manager.update(
+                table="player_basic_info",
+                data={"default_title_auto_equipped": 1},
+                where="xuid = ?",
+                params=(player_xuid,),
+            )
+        except Exception as e:
+            if self.logger:
+                self.logger.error(f"{ColorFormat.RED}[ARC Core]Auto equip title on join error: {str(e)}")
 
     def _update_player_name_tag(self, player: Player) -> None:
         """将玩家 name_tag 设为 [头衔]名字 或 名字（未佩戴时）。进服与头衔变动时调用。"""
@@ -2378,6 +2442,37 @@ class ARCCorePlugin(Plugin):
             result.append({"item_id": item_id, "item_count": item_count, "weight": weight})
         return result
 
+    def _save_checkin_reward_list_entries(self, entries: list) -> None:
+        """将奖励条目写回 CHECKIN_REWARD_LIST（每项 [物品ID, 数量, 权重]）。"""
+        payload = [[e["item_id"], int(e["item_count"]), int(e["weight"])] for e in entries]
+        self.setting_manager.SetSetting(
+            "CHECKIN_REWARD_LIST", json.dumps(payload, ensure_ascii=False)
+        )
+
+    def _get_checkin_pick_range(self) -> tuple:
+        """随机物品抽取条数区间 [最小, 最大]；未配置 MIN/MAX 时沿用 CHECKIN_REWARD_PICK_COUNT。"""
+        raw_min = self.setting_manager.GetSetting("CHECKIN_REWARD_PICK_MIN")
+        raw_max = self.setting_manager.GetSetting("CHECKIN_REWARD_PICK_MAX")
+
+        def parse_int_safe(raw_value, default_value: int) -> int:
+            try:
+                return int(str(raw_value).strip())
+            except (ValueError, TypeError, AttributeError):
+                return default_value
+
+        min_empty = raw_min is None or str(raw_min).strip() == ""
+        max_empty = raw_max is None or str(raw_max).strip() == ""
+        if min_empty and max_empty:
+            legacy = parse_int_safe(self.setting_manager.GetSetting("CHECKIN_REWARD_PICK_COUNT"), 0)
+            pick_min = max(0, legacy)
+            pick_max = max(0, legacy)
+        else:
+            pick_min = max(0, parse_int_safe(raw_min, 0))
+            pick_max = max(0, parse_int_safe(raw_max, pick_min))
+        if pick_min > pick_max:
+            pick_min, pick_max = pick_max, pick_min
+        return pick_min, pick_max
+
     def get_checkin_config(self) -> Dict[str, Any]:
         raw_money = self.setting_manager.GetSetting("CHECKIN_DAILY_MONEY")
         try:
@@ -2386,16 +2481,15 @@ class ARCCorePlugin(Plugin):
             daily_money = 0.0
         daily_money = self._round_money(daily_money)
 
-        raw_pick = self.setting_manager.GetSetting("CHECKIN_REWARD_PICK_COUNT")
-        try:
-            pick_count = int(raw_pick)
-        except (ValueError, TypeError):
-            pick_count = 0
-        if pick_count < 0:
-            pick_count = 0
+        pick_min, pick_max = self._get_checkin_pick_range()
 
         reward_list = self._parse_checkin_reward_list_raw(self.setting_manager.GetSetting("CHECKIN_REWARD_LIST"))
-        return {"daily_money": daily_money, "pick_count": pick_count, "reward_list": reward_list}
+        return {
+            "daily_money": daily_money,
+            "pick_min": pick_min,
+            "pick_max": pick_max,
+            "reward_list": reward_list,
+        }
 
     @staticmethod
     def _weighted_sample_checkin_rewards(entries: list, pick_count: int) -> list:
@@ -2419,6 +2513,120 @@ class ARCCorePlugin(Plugin):
                     break
             chosen.append(pool.pop(pick_idx))
         return chosen
+
+    def _broadcast_chat_lines(self, message: str) -> None:
+        """将多行文本按行分别广播，避免聊天栏把换行挤成一行看不清。"""
+        if not (message or "").strip():
+            return
+        for line in message.replace("\r\n", "\n").split("\n"):
+            stripped = line.strip()
+            if stripped:
+                self.server.broadcast_message(stripped)
+
+    def _broadcast_checkin_rankings(self, player_display_name: str, today: str) -> None:
+        """签到成功后全服广播：完成提示、今日先后榜、累计次数榜（各最多 10 人）。"""
+        rank_limit = 10
+        try:
+            self.server.broadcast_message(
+                self.language_manager.GetText("CHECKIN_CHAT_ANNOUNCE").format(player_display_name)
+            )
+        except Exception as e:
+            if self.logger:
+                self.logger.error(f"{ColorFormat.RED}[ARC Core]checkin broadcast announce error: {e}")
+            return
+        try:
+            count_row = self.database_manager.query_one(
+                "SELECT COUNT(*) AS c FROM player_basic_info WHERE last_checkin_date = ?",
+                (today,),
+            )
+            n_today = int(count_row.get("c") or 0) if count_row else 0
+            order_by_time = (
+                "(last_checkin_at IS NULL OR trim(last_checkin_at) = ''), last_checkin_at "
+            )
+            sep = self.language_manager.GetText("CHECKIN_CHAT_RANK_SEPARATOR")
+            slot_key = "CHECKIN_CHAT_TODAY_RANK_SLOT"
+            if n_today <= rank_limit and n_today > 0:
+                today_rows = self.database_manager.query_all(
+                    "SELECT name FROM player_basic_info WHERE last_checkin_date = ? "
+                    "ORDER BY " + order_by_time + "ASC",
+                    (today,),
+                )
+                order_parts = []
+                for idx, row in enumerate(today_rows, start=1):
+                    display_name = (row.get("name") or "?").strip() or "?"
+                    order_parts.append(
+                        self.language_manager.GetText(slot_key).format(idx, display_name)
+                    )
+                self._broadcast_chat_lines(
+                    self.language_manager.GetText("CHECKIN_CHAT_TODAY_RANK_ALL").format(
+                        n_today, sep.join(order_parts)
+                    )
+                )
+            elif n_today > rank_limit:
+                early_rows = self.database_manager.query_all(
+                    "SELECT name FROM player_basic_info WHERE last_checkin_date = ? "
+                    "ORDER BY " + order_by_time + "ASC LIMIT ?",
+                    (today, rank_limit),
+                )
+                late_rows = self.database_manager.query_all(
+                    "SELECT name FROM player_basic_info WHERE last_checkin_date = ? "
+                    "ORDER BY " + order_by_time + "DESC LIMIT ?",
+                    (today, rank_limit),
+                )
+                early_parts = []
+                for idx, row in enumerate(early_rows, start=1):
+                    display_name = (row.get("name") or "?").strip() or "?"
+                    early_parts.append(
+                        self.language_manager.GetText(slot_key).format(idx, display_name)
+                    )
+                late_parts = []
+                for idx, row in enumerate(late_rows, start=1):
+                    display_name = (row.get("name") or "?").strip() or "?"
+                    late_parts.append(
+                        self.language_manager.GetText(slot_key).format(idx, display_name)
+                    )
+                self._broadcast_chat_lines(
+                    self.language_manager.GetText("CHECKIN_CHAT_TODAY_RANK_EARLY").format(
+                        sep.join(early_parts)
+                    )
+                )
+                self._broadcast_chat_lines(
+                    self.language_manager.GetText("CHECKIN_CHAT_TODAY_RANK_LATE").format(
+                        sep.join(late_parts)
+                    )
+                )
+        except Exception as e:
+            if self.logger:
+                self.logger.error(f"{ColorFormat.RED}[ARC Core]checkin today rank broadcast error: {e}")
+        try:
+            total_rows = self.database_manager.query_all(
+                "SELECT name, total_checkin_count FROM player_basic_info "
+                "WHERE COALESCE(total_checkin_count, 0) > 0 "
+                "ORDER BY total_checkin_count DESC, xuid ASC LIMIT ?",
+                (rank_limit,),
+            )
+            if total_rows:
+                times_unit = self.language_manager.GetText("CHECKIN_RANK_TIMES_SUFFIX")
+                total_parts = []
+                for idx, row in enumerate(total_rows, start=1):
+                    display_name = (row.get("name") or "?").strip() or "?"
+                    try:
+                        cnt = int(row.get("total_checkin_count") or 0)
+                    except (ValueError, TypeError):
+                        cnt = 0
+                    total_parts.append(
+                        self.language_manager.GetText("CHECKIN_CHAT_TOTAL_RANK_SLOT").format(
+                            idx, display_name, cnt, times_unit
+                        )
+                    )
+                self._broadcast_chat_lines(
+                    self.language_manager.GetText("CHECKIN_CHAT_TOTAL_RANK").format(
+                        self.language_manager.GetText("CHECKIN_CHAT_RANK_SEPARATOR").join(total_parts)
+                    )
+                )
+        except Exception as e:
+            if self.logger:
+                self.logger.error(f"{ColorFormat.RED}[ARC Core]checkin total rank broadcast error: {e}")
 
     def show_daily_checkin_panel(self, player: Player):
         """每日签到：同一天仅一次，发放配置中的金钱与加权随机物品。"""
@@ -2445,8 +2653,10 @@ class ARCCorePlugin(Plugin):
 
         cfg = self.get_checkin_config()
         daily_money = cfg["daily_money"]
-        pick_count = cfg["pick_count"]
+        pick_min = cfg["pick_min"]
+        pick_max = cfg["pick_max"]
         reward_list = cfg["reward_list"]
+        pick_count = random.randint(pick_min, pick_max) if pick_max >= pick_min else 0
         picked = self._weighted_sample_checkin_rewards(reward_list, pick_count)
 
         if daily_money > 0:
@@ -2466,18 +2676,20 @@ class ARCCorePlugin(Plugin):
                 pass
             item_lines.append(f"{item_id} x{cnt}")
 
-        ok = self.database_manager.update(
-            table="player_basic_info",
-            data={"last_checkin_date": today},
-            where="xuid = ?",
-            params=(player_xuid,),
+        now_iso = datetime.now().replace(microsecond=0).isoformat()
+        ok = self.database_manager.execute(
+            "UPDATE player_basic_info SET last_checkin_date = ?, last_checkin_at = ?, "
+            "total_checkin_count = COALESCE(total_checkin_count, 0) + 1, name = ? WHERE xuid = ?",
+            (today, now_iso, player.name, player_xuid),
         )
         if not ok:
             self.report_arc_error(
                 "CHK1",
-                f"checkin update last_checkin_date failed xuid={player_xuid!r} date={today!r}",
+                f"checkin update stats failed xuid={player_xuid!r} date={today!r}",
                 player,
             )
+        else:
+            self._broadcast_checkin_rankings(player.name, today)
 
         if daily_money > 0:
             money_line = self.language_manager.GetText("CHECKIN_SUCCESS_MONEY_LINE").format(
@@ -2497,29 +2709,50 @@ class ARCCorePlugin(Plugin):
         player.send_form(result_panel)
 
     def show_checkin_config_panel(self, player: Player):
-        """OP：配置每日签到金钱、随机条数、奖励池 JSON。"""
+        """OP：签到配置入口（存款/条数 与 物品奖励列表分步配置）。"""
         cfg = self.get_checkin_config()
-        reward_list_json = json.dumps(
-            [
-                [e["item_id"], e["item_count"], e["weight"]]
-                for e in cfg["reward_list"]
-            ],
-            ensure_ascii=False,
+        hub_content = self.language_manager.GetText("CHECKIN_CONFIG_HUB_CONTENT").format(
+            self._format_money_display(cfg["daily_money"]),
+            cfg["pick_min"],
+            cfg["pick_max"],
+            len(cfg["reward_list"]),
         )
+        hub = ActionForm(
+            title=self.language_manager.GetText("CHECKIN_CONFIG_TITLE"),
+            content=hub_content,
+            on_close=self.show_op_main_panel,
+        )
+        hub.add_button(
+            self.language_manager.GetText("CHECKIN_CONFIG_MONEY_PICK_BUTTON"),
+            on_click=self.show_checkin_money_pick_modal,
+        )
+        hub.add_button(
+            self.language_manager.GetText("CHECKIN_CONFIG_REWARD_LIST_BUTTON"),
+            on_click=self.show_checkin_reward_list_panel,
+        )
+        hub.add_button(
+            self.language_manager.GetText("RETURN_BUTTON_TEXT"),
+            on_click=self.show_op_main_panel,
+        )
+        player.send_form(hub)
+
+    def show_checkin_money_pick_modal(self, player: Player):
+        """OP：编辑签到存款与随机抽取条数区间（每日在最小～最大之间随机）。"""
+        cfg = self.get_checkin_config()
         money_input = TextInput(
             label=self.language_manager.GetText("CHECKIN_CONFIG_MONEY_LABEL"),
             placeholder="0",
             default_value=str(cfg["daily_money"]),
         )
-        pick_input = TextInput(
-            label=self.language_manager.GetText("CHECKIN_CONFIG_PICK_LABEL"),
+        pick_min_input = TextInput(
+            label=self.language_manager.GetText("CHECKIN_CONFIG_PICK_MIN_LABEL"),
             placeholder="0",
-            default_value=str(cfg["pick_count"]),
+            default_value=str(cfg["pick_min"]),
         )
-        list_input = TextInput(
-            label=self.language_manager.GetText("CHECKIN_CONFIG_LIST_LABEL"),
-            placeholder='[["minecraft:diamond",1,1],["minecraft:iron_ingot",3,5]]',
-            default_value=reward_list_json,
+        pick_max_input = TextInput(
+            label=self.language_manager.GetText("CHECKIN_CONFIG_PICK_MAX_LABEL"),
+            placeholder="0",
+            default_value=str(cfg["pick_max"]),
         )
 
         def try_save(p: Player, json_str: str):
@@ -2527,46 +2760,272 @@ class ARCCorePlugin(Plugin):
                 data = json.loads(json_str)
             except Exception:
                 p.send_message(self.language_manager.GetText("CHECKIN_CONFIG_SAVE_FAIL"))
-                return self.show_op_main_panel(p)
+                return self.show_checkin_config_panel(p)
             if not data or len(data) < 3:
                 p.send_message(self.language_manager.GetText("CHECKIN_CONFIG_SAVE_FAIL"))
-                return self.show_op_main_panel(p)
+                return self.show_checkin_config_panel(p)
             try:
                 money_v = self._round_money(float(str(data[0]).strip()))
             except (ValueError, TypeError):
                 money_v = 0.0
             try:
-                pick_v = int(str(data[1]).strip())
+                pick_min_v = int(str(data[1]).strip())
             except (ValueError, TypeError):
-                pick_v = 0
-            if pick_v < 0:
-                pick_v = 0
-            list_raw = str(data[2]).strip()
-            parsed = self._parse_checkin_reward_list_raw(list_raw)
-            if pick_v > 0 and not parsed:
+                pick_min_v = 0
+            try:
+                pick_max_v = int(str(data[2]).strip())
+            except (ValueError, TypeError):
+                pick_max_v = 0
+            if pick_min_v < 0:
+                pick_min_v = 0
+            if pick_max_v < 0:
+                pick_max_v = 0
+            if pick_min_v > pick_max_v:
+                pick_min_v, pick_max_v = pick_max_v, pick_min_v
+            reward_entries = self.get_checkin_config()["reward_list"]
+            if pick_max_v > 0 and not reward_entries:
                 p.send_message(self.language_manager.GetText("CHECKIN_CONFIG_LIST_INVALID"))
-                return self.show_op_main_panel(p)
-
+                return self.show_checkin_config_panel(p)
             self.setting_manager.SetSetting("CHECKIN_DAILY_MONEY", money_v)
-            self.setting_manager.SetSetting("CHECKIN_REWARD_PICK_COUNT", pick_v)
-            normalized_list = json.dumps(
-                [[e["item_id"], e["item_count"], e["weight"]] for e in parsed],
-                ensure_ascii=False,
-            )
-            self.setting_manager.SetSetting("CHECKIN_REWARD_LIST", normalized_list if parsed else "[]")
-
-            panel = ActionForm(
-                title=self.language_manager.GetText("CHECKIN_CONFIG_TITLE"),
-                content=self.language_manager.GetText("CHECKIN_CONFIG_SAVED"),
-                on_close=self.show_op_main_panel,
-            )
-            panel.add_button(self.language_manager.GetText("RETURN_BUTTON_TEXT"), on_click=self.show_op_main_panel)
-            p.send_form(panel)
+            self.setting_manager.SetSetting("CHECKIN_REWARD_PICK_MIN", pick_min_v)
+            self.setting_manager.SetSetting("CHECKIN_REWARD_PICK_MAX", pick_max_v)
+            self.setting_manager.SetSetting("CHECKIN_REWARD_PICK_COUNT", pick_max_v)
+            p.send_message(self.language_manager.GetText("CHECKIN_CONFIG_SAVED"))
+            self.show_checkin_config_panel(p)
 
         form = ModalForm(
-            title=self.language_manager.GetText("CHECKIN_CONFIG_TITLE"),
-            controls=[money_input, pick_input, list_input],
-            on_close=self.show_op_main_panel,
+            title=self.language_manager.GetText("CHECKIN_CONFIG_MONEY_PICK_MODAL_TITLE"),
+            controls=[money_input, pick_min_input, pick_max_input],
+            on_close=self.show_checkin_config_panel,
+            on_submit=try_save,
+        )
+        player.send_form(form)
+
+    def show_checkin_reward_list_panel(self, player: Player):
+        """OP：查看/增删改签到物品奖励（带编号）。"""
+        reward_entries = self.get_checkin_config()["reward_list"]
+        if reward_entries:
+            lines = []
+            for idx, e in enumerate(reward_entries, start=1):
+                lines.append(
+                    self.language_manager.GetText("CHECKIN_REWARD_LIST_LINE").format(
+                        idx, e["item_id"], e["item_count"], e["weight"]
+                    )
+                )
+            list_content = "\n".join(lines)
+        else:
+            list_content = self.language_manager.GetText("CHECKIN_REWARD_LIST_EMPTY")
+        panel = ActionForm(
+            title=self.language_manager.GetText("CHECKIN_REWARD_LIST_TITLE"),
+            content=list_content,
+            on_close=self.show_checkin_config_panel,
+        )
+        panel.add_button(
+            self.language_manager.GetText("CHECKIN_REWARD_ADD_BUTTON"),
+            on_click=self.show_checkin_reward_add_modal,
+        )
+        for entry_index, e in enumerate(reward_entries):
+            btn_label = self.language_manager.GetText("CHECKIN_REWARD_LIST_ITEM_BUTTON").format(
+                entry_index + 1, e["item_id"], e["item_count"]
+            )
+            panel.add_button(
+                btn_label,
+                on_click=lambda pl, i=entry_index: self.show_checkin_reward_entry_menu(pl, i),
+            )
+        panel.add_button(
+            self.language_manager.GetText("RETURN_BUTTON_TEXT"),
+            on_click=self.show_checkin_config_panel,
+        )
+        player.send_form(panel)
+
+    def show_checkin_reward_entry_menu(self, player: Player, entry_index: int):
+        """OP：单条条目 — 编辑或删除。"""
+        reward_entries = self.get_checkin_config()["reward_list"]
+        if entry_index < 0 or entry_index >= len(reward_entries):
+            self.show_checkin_reward_list_panel(player)
+            return
+        e = reward_entries[entry_index]
+        display_num = entry_index + 1
+        sub = ActionForm(
+            title=self.language_manager.GetText("CHECKIN_REWARD_ENTRY_MENU_TITLE"),
+            content=self.language_manager.GetText("CHECKIN_REWARD_ENTRY_MENU_CONTENT").format(
+                display_num, e["item_id"], e["item_count"], e["weight"]
+            ),
+            on_close=self.show_checkin_reward_list_panel,
+        )
+        sub.add_button(
+            self.language_manager.GetText("CHECKIN_REWARD_EDIT_BUTTON"),
+            on_click=lambda pl, i=entry_index: self.show_checkin_reward_edit_modal(pl, i),
+        )
+        sub.add_button(
+            self.language_manager.GetText("CHECKIN_REWARD_DELETE_BUTTON"),
+            on_click=lambda pl, i=entry_index: self.show_checkin_reward_delete_confirm(pl, i),
+        )
+        sub.add_button(
+            self.language_manager.GetText("RETURN_BUTTON_TEXT"),
+            on_click=self.show_checkin_reward_list_panel,
+        )
+        player.send_form(sub)
+
+    def show_checkin_reward_delete_confirm(self, player: Player, entry_index: int):
+        """OP：确认删除某条奖励。"""
+        reward_entries = self.get_checkin_config()["reward_list"]
+        if entry_index < 0 or entry_index >= len(reward_entries):
+            self.show_checkin_reward_list_panel(player)
+            return
+        e = reward_entries[entry_index]
+        display_num = entry_index + 1
+        confirm = ActionForm(
+            title=self.language_manager.GetText("CHECKIN_REWARD_DELETE_CONFIRM_TITLE"),
+            content=self.language_manager.GetText("CHECKIN_REWARD_DELETE_CONFIRM_CONTENT").format(
+                display_num, e["item_id"], e["item_count"]
+            ),
+            on_close=self.show_checkin_reward_list_panel,
+        )
+
+        def do_delete(pl: Player, del_index: int = entry_index):
+            current = self.get_checkin_config()["reward_list"]
+            if del_index < 0 or del_index >= len(current):
+                self.show_checkin_reward_list_panel(pl)
+                return
+            new_list = [current[j] for j in range(len(current)) if j != del_index]
+            self._save_checkin_reward_list_entries(new_list)
+            pl.send_message(self.language_manager.GetText("CHECKIN_REWARD_LIST_SAVED"))
+            self.show_checkin_reward_list_panel(pl)
+
+        confirm.add_button(
+            self.language_manager.GetText("CHECKIN_REWARD_DELETE_CONFIRM_BUTTON"),
+            on_click=lambda pl, i=entry_index: do_delete(pl, i),
+        )
+        confirm.add_button(
+            self.language_manager.GetText("RETURN_BUTTON_TEXT"),
+            on_click=self.show_checkin_reward_list_panel,
+        )
+        player.send_form(confirm)
+
+    def show_checkin_reward_add_modal(self, player: Player):
+        """OP：新增一条 [物品ID, 数量, 权重]，权重可填默认 1。"""
+        item_input = TextInput(
+            label=self.language_manager.GetText("CHECKIN_REWARD_ITEM_ID_LABEL"),
+            placeholder="minecraft:diamond",
+            default_value="",
+        )
+        count_input = TextInput(
+            label=self.language_manager.GetText("CHECKIN_REWARD_ITEM_COUNT_LABEL"),
+            placeholder="1",
+            default_value="1",
+        )
+
+        def try_add(p: Player, json_str: str):
+            try:
+                data = json.loads(json_str)
+            except Exception:
+                p.send_message(self.language_manager.GetText("CHECKIN_REWARD_ADD_INVALID"))
+                return self.show_checkin_reward_list_panel(p)
+            if not data or len(data) < 2:
+                p.send_message(self.language_manager.GetText("CHECKIN_REWARD_ADD_INVALID"))
+                return self.show_checkin_reward_list_panel(p)
+            item_id = str(data[0]).strip()
+            try:
+                item_count = int(str(data[1]).strip())
+            except (ValueError, TypeError):
+                item_count = 0
+            weight = 1
+            if len(data) >= 3 and str(data[2]).strip() != "":
+                try:
+                    weight = int(str(data[2]).strip())
+                except (ValueError, TypeError):
+                    weight = 1
+            if not item_id or item_count <= 0:
+                p.send_message(self.language_manager.GetText("CHECKIN_REWARD_ADD_INVALID"))
+                return self.show_checkin_reward_list_panel(p)
+            if weight <= 0:
+                weight = 1
+            current = self.get_checkin_config()["reward_list"][:]
+            current.append(
+                {"item_id": item_id, "item_count": item_count, "weight": weight}
+            )
+            self._save_checkin_reward_list_entries(current)
+            p.send_message(self.language_manager.GetText("CHECKIN_REWARD_LIST_SAVED"))
+            self.show_checkin_reward_list_panel(p)
+
+        weight_input = TextInput(
+            label=self.language_manager.GetText("CHECKIN_REWARD_WEIGHT_LABEL"),
+            placeholder="1",
+            default_value="1",
+        )
+        form = ModalForm(
+            title=self.language_manager.GetText("CHECKIN_REWARD_ADD_TITLE"),
+            controls=[item_input, count_input, weight_input],
+            on_close=self.show_checkin_reward_list_panel,
+            on_submit=try_add,
+        )
+        player.send_form(form)
+
+    def show_checkin_reward_edit_modal(self, player: Player, entry_index: int):
+        """OP：编辑指定编号的奖励条目。"""
+        reward_entries = self.get_checkin_config()["reward_list"]
+        if entry_index < 0 or entry_index >= len(reward_entries):
+            self.show_checkin_reward_list_panel(player)
+            return
+        e = reward_entries[entry_index]
+
+        item_input = TextInput(
+            label=self.language_manager.GetText("CHECKIN_REWARD_ITEM_ID_LABEL"),
+            placeholder="minecraft:diamond",
+            default_value=str(e["item_id"]),
+        )
+        count_input = TextInput(
+            label=self.language_manager.GetText("CHECKIN_REWARD_ITEM_COUNT_LABEL"),
+            placeholder="1",
+            default_value=str(e["item_count"]),
+        )
+        weight_input = TextInput(
+            label=self.language_manager.GetText("CHECKIN_REWARD_WEIGHT_LABEL"),
+            placeholder="1",
+            default_value=str(e["weight"]),
+        )
+
+        def try_save(p: Player, json_str: str):
+            try:
+                data = json.loads(json_str)
+            except Exception:
+                p.send_message(self.language_manager.GetText("CHECKIN_REWARD_ADD_INVALID"))
+                return self.show_checkin_reward_list_panel(p)
+            if not data or len(data) < 2:
+                p.send_message(self.language_manager.GetText("CHECKIN_REWARD_ADD_INVALID"))
+                return self.show_checkin_reward_list_panel(p)
+            item_id = str(data[0]).strip()
+            try:
+                item_count = int(str(data[1]).strip())
+            except (ValueError, TypeError):
+                item_count = 0
+            try:
+                weight = int(str(data[2]).strip()) if len(data) >= 3 else int(e["weight"])
+            except (ValueError, TypeError):
+                weight = 1
+            if not item_id or item_count <= 0:
+                p.send_message(self.language_manager.GetText("CHECKIN_REWARD_ADD_INVALID"))
+                return self.show_checkin_reward_list_panel(p)
+            if weight <= 0:
+                weight = 1
+            current = self.get_checkin_config()["reward_list"][:]
+            if entry_index < 0 or entry_index >= len(current):
+                self.show_checkin_reward_list_panel(p)
+                return
+            current[entry_index] = {
+                "item_id": item_id,
+                "item_count": item_count,
+                "weight": weight,
+            }
+            self._save_checkin_reward_list_entries(current)
+            p.send_message(self.language_manager.GetText("CHECKIN_REWARD_LIST_SAVED"))
+            self.show_checkin_reward_list_panel(p)
+
+        form = ModalForm(
+            title=self.language_manager.GetText("CHECKIN_REWARD_EDIT_TITLE"),
+            controls=[item_input, count_input, weight_input],
+            on_close=self.show_checkin_reward_list_panel,
             on_submit=try_save,
         )
         player.send_form(form)
@@ -3492,118 +3951,110 @@ class ARCCorePlugin(Plugin):
         player.send_form(tphere_menu)
 
     def send_tpa_request(self, sender: Player, target: Player):
-        """发送TPA请求（请求传送到目标玩家处）"""
-        import time
-        
-        # 检查费用
-        if self.teleport_system.teleport_cost_player > 0:
-            player_money = self.get_player_money(sender)
-            if player_money < self.teleport_system.teleport_cost_player:
-                sender.send_message(self.language_manager.GetText('TELEPORT_COST_NOT_ENOUGH_MONEY').format(
-                    self._format_money_display(self.teleport_system.teleport_cost_player),
-                    self._format_money_display(player_money)
-                ))
-                return
-            
-            # 扣除费用
-            if self.decrease_player_money(sender, self.teleport_system.teleport_cost_player):
-                sender.send_message(self.language_manager.GetText('TELEPORT_COST_DEDUCTED').format(
-                    self._format_money_display(self.teleport_system.teleport_cost_player),
-                    self._format_money_display(self.get_player_money(sender))
-                ))
-            else:
-                self.report_arc_error(
-                    "TP5",
-                    f"send_tpa_request decrease failed target={target.name!r} cost={self.teleport_system.teleport_cost_player!r}",
-                    sender,
-                )
-                return
-        
+        """发送TPA请求（请求传送到目标玩家处）；费用在对方接受时从发起者扣除。"""
         if not self.teleport_system.add_request(target.name, 'tpa', sender.name):
             sender.send_message(self.language_manager.GetText('TELEPORT_REQUEST_ALREADY_EXISTS').format(target.name))
             return
         sender.send_message(self.language_manager.GetText('TPA_REQUEST_SENT').format(target.name))
         target.send_message(self.language_manager.GetText('TPA_REQUEST_RECEIVED').format(sender.name))
+        self._send_incoming_teleport_request_form(target)
 
     def send_tphere_request(self, sender: Player, target: Player):
-        """发送TPHERE请求（请求目标玩家传送过来）"""
-        import time
-        
-        # 检查费用
-        if self.teleport_system.teleport_cost_player > 0:
-            player_money = self.get_player_money(sender)
-            if player_money < self.teleport_system.teleport_cost_player:
-                sender.send_message(self.language_manager.GetText('TELEPORT_COST_NOT_ENOUGH_MONEY').format(
-                    self._format_money_display(self.teleport_system.teleport_cost_player),
-                    self._format_money_display(player_money)
-                ))
-                return
-            
-            # 扣除费用
-            if self.decrease_player_money(sender, self.teleport_system.teleport_cost_player):
-                sender.send_message(self.language_manager.GetText('TELEPORT_COST_DEDUCTED').format(
-                    self._format_money_display(self.teleport_system.teleport_cost_player),
-                    self._format_money_display(self.get_player_money(sender))
-                ))
-            else:
-                self.report_arc_error(
-                    "TP6",
-                    f"send_tphere_request decrease failed target={target.name!r} cost={self.teleport_system.teleport_cost_player!r}",
-                    sender,
-                )
-                return
-        
+        """发送TPHERE请求（请求目标玩家传送过来）；费用在对方接受时从发起者扣除。"""
         if not self.teleport_system.add_request(target.name, 'tphere', sender.name):
             sender.send_message(self.language_manager.GetText('TELEPORT_REQUEST_ALREADY_EXISTS').format(target.name))
             return
         sender.send_message(self.language_manager.GetText('TPHERE_REQUEST_SENT').format(target.name))
         target.send_message(self.language_manager.GetText('TPHERE_REQUEST_RECEIVED').format(sender.name))
+        self._send_incoming_teleport_request_form(target)
+
+    def _incoming_teleport_request_form_content(self, request: Dict[str, Any]) -> str:
+        sender_name = request.get('sender') or ''
+        if request.get('type') == 'tphere':
+            return self.language_manager.GetText('TPHERE_INCOMING_REQUEST_FORM_CONTENT').format(sender_name)
+        return self.language_manager.GetText('TPA_INCOMING_REQUEST_FORM_CONTENT').format(sender_name)
+
+    def _send_incoming_teleport_request_form(self, target_player: Player, on_close=None):
+        """向被请求方弹出接受/拒绝表单（从菜单进入时可传 on_close 返回上一级）。"""
+        pending_requests = self.get_pending_requests_for_player(target_player)
+        if not pending_requests:
+            return
+        request = pending_requests[0]
+        request_menu = ActionForm(
+            title=self.language_manager.GetText('INCOMING_TP_REQUEST_TITLE'),
+            content=self._incoming_teleport_request_form_content(request),
+            on_close=on_close,
+        )
+        request_menu.add_button(
+            self.language_manager.GetText('ACCEPT_REQUEST_BUTTON'),
+            on_click=lambda p=target_player: self.accept_teleport_request(p),
+        )
+        request_menu.add_button(
+            self.language_manager.GetText('DENY_REQUEST_BUTTON'),
+            on_click=lambda p=target_player: self.deny_teleport_request(p),
+        )
+        target_player.send_form(request_menu)
 
     def get_pending_requests_for_player(self, player: Player) -> list:
         """获取玩家的待处理请求"""
         return self.teleport_system.get_pending_requests_for_player(player.name)
 
     def show_pending_requests_menu(self, player: Player):
-        """显示待处理请求菜单"""
+        """显示待处理请求菜单（与收到请求时的弹窗文案一致）"""
         pending_requests = self.get_pending_requests_for_player(player)
         if not pending_requests:
             player.send_message(self.language_manager.GetText('NO_PENDING_REQUESTS'))
             self.show_player_teleport_request_menu(player)
             return
-
-        request = pending_requests[0]  # 目前只处理一个请求
-        request_menu = ActionForm(
-            title=self.language_manager.GetText('PENDING_REQUEST_MENU_TITLE'),
-            content=self.language_manager.GetText('PENDING_REQUEST_CONTENT').format(
-                request['sender'],
-                self.language_manager.GetText(f'{request["type"].upper()}_REQUEST_DESCRIPTION')
-            ),
-            on_close=self.show_player_teleport_request_menu
-        )
-        
-        request_menu.add_button(
-            self.language_manager.GetText('ACCEPT_REQUEST_BUTTON'),
-            on_click=lambda p=player: self.accept_teleport_request(p)
-        )
-        
-        request_menu.add_button(
-            self.language_manager.GetText('DENY_REQUEST_BUTTON'),
-            on_click=lambda p=player: self.deny_teleport_request(p)
-        )
-        
-        player.send_form(request_menu)
+        self._send_incoming_teleport_request_form(player, on_close=self.show_player_teleport_request_menu)
 
     def accept_teleport_request(self, player: Player):
-        """接受传送请求"""
+        """接受传送请求：此时从发起者扣除玩家互传费用（若配置大于 0）。"""
         request = self.teleport_system.get_request(player.name)
         if not request:
             player.send_message(self.language_manager.GetText('NO_PENDING_REQUESTS'))
+            return
+        if request.get('expire_time', 0) <= time.time():
+            self.teleport_system.remove_request(player.name)
+            player.send_message(self.language_manager.GetText('TP_REQUEST_EXPIRED'))
             return
         sender = self.server.get_player(request['sender'])
         if not sender:
             player.send_message(self.language_manager.GetText('REQUEST_SENDER_OFFLINE'))
             self.teleport_system.remove_request(player.name)
             return
+        teleport_cost = self.teleport_system.teleport_cost_player
+        if teleport_cost > 0:
+            sender_money = self.get_player_money(sender)
+            if sender_money < teleport_cost:
+                player.send_message(
+                    self.language_manager.GetText('TP_REQUEST_ACCEPT_SENDER_NO_MONEY_TARGET').format(sender.name)
+                )
+                sender.send_message(
+                    self.language_manager.GetText('TELEPORT_COST_NOT_ENOUGH_MONEY').format(
+                        self._format_money_display(teleport_cost),
+                        self._format_money_display(sender_money),
+                    )
+                )
+                self.teleport_system.remove_request(player.name)
+                return
+            if not self.decrease_player_money(sender, teleport_cost):
+                self.report_arc_error(
+                    "TP7",
+                    f"accept_teleport_request decrease failed sender={sender.name!r} cost={teleport_cost!r}",
+                    sender,
+                )
+                player.send_message(
+                    self.language_manager.GetText('TP_REQUEST_ACCEPT_SENDER_NO_MONEY_TARGET').format(sender.name)
+                )
+                self.teleport_system.remove_request(player.name)
+                return
+            sender.send_message(
+                self.language_manager.GetText('TELEPORT_COST_DEDUCTED').format(
+                    self._format_money_display(teleport_cost),
+                    self._format_money_display(self.get_player_money(sender)),
+                )
+            )
         if request['type'] == 'tpa':
             self.start_teleport_to_player_countdown(sender, player)
             player.send_message(self.language_manager.GetText('TPA_REQUEST_ACCEPTED_BY_TARGET').format(sender.name))

@@ -44,10 +44,11 @@ TELEPORT_COST_PLAYER=100
 
 # 每日签到（主菜单按钮；last_checkin_date 与服务器本地日期 YYYY-MM-DD 不同则可签到）
 CHECKIN_DAILY_MONEY=100
-# 从奖励池中按权重不放回抽取的条目数（0 表示只发钱不发随机物）
-CHECKIN_REWARD_PICK_COUNT=2
-# JSON 数组：每项 [物品ID, 数量, 权重]，例如 [["minecraft:diamond",1,1],["minecraft:iron_ingot",3,5],["minecraft:oak_plank",64,10]]
-CHECKIN_REWARD_LIST=[["minecraft:diamond",1,1],["minecraft:iron_ingot",3,5],["minecraft:oak_plank",64,10]]
+# 每日从奖励池中按权重不放回随机抽取的条数区间（含端点）；例如 1～3 表示每天随机 1、2 或 3 条
+CHECKIN_REWARD_PICK_MIN=1
+CHECKIN_REWARD_PICK_MAX=3
+# JSON 数组：每项 [物品ID, 数量, 权重]；权重越大越容易被抽到。物品名参考基岩版 /give（可加命名空间如 mod:id）
+CHECKIN_REWARD_LIST=[["diamond",1,1],["netherite_scrap",1,2],["ancient_debris",1,2],["emerald",2,3],["enchanted_golden_apple",1,1],["golden_apple",1,5],["experience_bottle",4,12],["ender_pearl",4,8],["gold_ingot",8,5],["iron_ingot",8,10],["copper_ingot",16,25],["raw_iron",16,40],["raw_gold",8,28],["amethyst_shard",8,22],["lapis_lazuli",16,32],["redstone",16,32],["quartz",16,28],["glowstone",8,30],["shroomlight",4,18],["crying_obsidian",4,10],["oak_log",64,50],["spruce_log",32,48],["birch_log",32,48],["jungle_log",32,46],["acacia_log",32,46],["dark_oak_log",32,46],["mangrove_log",32,44],["cherry_log",32,44],["bamboo",32,55],["cobblestone",64,50],["stone",48,52],["deepslate",48,48],["cobbled_deepslate",64,50],["sand",64,70],["gravel",64,65],["clay_ball",32,60],["brick",32,48],["glass",32,58],["glass_pane",32,55],["lfg_ff:clear_glass",64,25],["pearlescent_froglight",8,25],["verdant_froglight",8,25],["ochre_froglight",8,25],["lantern",4,50],["soul_lantern",4,42],["torch",16,100],["soul_torch",16,55],["campfire",1,35],["chest",2,40],["crafting_table",1,45],["furnace",1,40],["ladder",16,50],["bread",8,100],["apple",8,100],["baked_potato",16,88],["cooked_beef",16,78],["cooked_porkchop",8,78],["cooked_chicken",8,80],["cooked_mutton",8,75],["pumpkin_pie",8,85],["cookie",16,92],["melon_slice",16,95],["carrot",16,98],["beetroot",16,95],["sweet_berries",16,92],["glow_berries",16,58],["honey_bottle",4,38],["sugar_cane",16,80],["white_wool",8,100],["string",16,68],["feather",16,72],["egg",16,85],["leather",8,52],["bone",16,58],["arrow",32,72],["flint",8,58],["slime_ball",8,32],["spider_eye",8,48],["coal",16,65],["charcoal",16,60],["book",4,52],["paper",32,68],["name_tag",1,10],["lead",4,35],["saddle",1,14],["bucket",1,25],["water_bucket",1,18],["shears",1,22],["fishing_rod",1,20],["flower_pot",4,58],["painting",1,48],["moss_block",16,45],["vine",16,52],["lily_pad",8,55],["nether_brick",32,38],["soul_sand",16,42],["magma_cream",4,25],["blaze_powder",2,15],["villager_spawn_egg",1,10],["iron_golem_spawn_egg",1,10],["cat_spawn_egg",1,25],["wolf_spawn_egg",1,25],["cow_spawn_egg",3,25],["sheep_spawn_egg",3,25],["chicken_spawn_egg",3,25],["pig_spawn_egg",3,25],["happy_ghast_spawn_egg",1,5],["horse_spawn_egg",1,25],["bee_spawn_egg",2,30],["fox_spawn_egg",2,28],["rabbit_spawn_egg",2,35]]
 
 # 邀请奖励
 INVITE_REWARD_ITEM_NAME=minecraft:diamond
@@ -57,6 +58,9 @@ INVITE_REWARD_FREE_LAND_BLOCKS=10
 
 # 公共领地内白名单保护生物（逗号分隔，在此列表中的生物在公共领地内不可被伤害）
 PUBLIC_LAND_PROTECTED_ENTITIES=minecraft:villager_v2,minecraft:iron_golem,minecraft:snow_golem
+
+# 领地未开放「展示框」时禁止交互/破坏的方块（逗号分隔）；留空则使用内置默认（展示框、发光展示框及各材质展示架）
+PUBLIC_LAND_INTERACT_BLOCK_BLACKLIST=minecraft:frame,minecraft:glow_frame,minecraft:oak_shelf,minecraft:spruce_shelf,minecraft:birch_shelf,minecraft:jungle_shelf,minecraft:acacia_shelf,minecraft:dark_oak_shelf,minecraft:mangrove_shelf,minecraft:cherry_shelf,minecraft:pale_oak_shelf,minecraft:bamboo_shelf,minecraft:crimson_shelf,minecraft:warped_shelf
 
 # 头衔系统（聊天前显示佩戴的头衔，如 [管理员]玩家名: 消息）
 # 默认头衔（逗号分隔，所有玩家拥有）

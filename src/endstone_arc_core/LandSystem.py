@@ -9,6 +9,24 @@ class LandSystem:
 
     PUBLIC_LAND_OWNER_XUID = "0"  # 公共领地的 owner_xuid 固定值
 
+    # 未开放展示框（allow_frame）时禁止交互/破坏的方块；配置项留空则使用此集合
+    _DEFAULT_PUBLIC_LAND_INTERACT_BLOCK_BLACKLIST = frozenset({
+        "minecraft:frame",
+        "minecraft:glow_frame",
+        "minecraft:oak_shelf",
+        "minecraft:spruce_shelf",
+        "minecraft:birch_shelf",
+        "minecraft:jungle_shelf",
+        "minecraft:acacia_shelf",
+        "minecraft:dark_oak_shelf",
+        "minecraft:mangrove_shelf",
+        "minecraft:cherry_shelf",
+        "minecraft:pale_oak_shelf",
+        "minecraft:bamboo_shelf",
+        "minecraft:crimson_shelf",
+        "minecraft:warped_shelf",
+    })
+
     def __init__(self, database_manager, setting_manager, logger=None):
         self.db = database_manager
         self.setting_manager = setting_manager
@@ -668,6 +686,22 @@ class LandSystem:
         if not raw or not str(raw).strip():
             return set()
         return {s.strip() for s in str(raw).split(",") if s.strip()}
+
+    def get_public_land_interact_block_blacklist(self) -> Set[str]:
+        """与展示框权限（allow_frame）联动的方块黑名单；配置为逗号分隔方块 ID，留空则使用内置默认。"""
+        raw = self.setting_manager.GetSetting("PUBLIC_LAND_INTERACT_BLOCK_BLACKLIST")
+        if raw is None or not str(raw).strip():
+            return set(self._DEFAULT_PUBLIC_LAND_INTERACT_BLOCK_BLACKLIST)
+        result: Set[str] = set()
+        for part in str(raw).split(","):
+            part = part.strip()
+            if not part:
+                continue
+            normalized = part.lower()
+            if ":" not in normalized:
+                normalized = "minecraft:" + normalized
+            result.add(normalized)
+        return result if result else set(self._DEFAULT_PUBLIC_LAND_INTERACT_BLOCK_BLACKLIST)
 
     # ─── 子领地 ───────────────────────────────────────────────────────────────
 
