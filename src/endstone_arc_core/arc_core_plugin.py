@@ -2063,6 +2063,16 @@ class ARCCorePlugin(Plugin):
                     pass
         return ok
 
+    def api_get_newbie_guide_text(self) -> str:
+        """供其他插件调用：返回新手引导文本全文（与 `plugins/ARCCore/newbie_welcome.txt`、主菜单新手引导一致）。"""
+        try:
+            if self.newbie_welcome_file.exists():
+                raw_text = self.newbie_welcome_file.read_text(encoding="utf-8")
+                return raw_text.strip() if raw_text else ""
+        except Exception:
+            pass
+        return ""
+
     def _grant_title_unlock_reward(self, player: Player, title: str) -> None:
         """若头衔定义中有解锁奖励，则给该玩家发放金钱与物品（仅当玩家在线时）。"""
         defn = self.title_system.get_title_definition(title)
