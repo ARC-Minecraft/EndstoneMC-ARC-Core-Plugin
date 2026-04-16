@@ -117,6 +117,7 @@ class ARCCorePlugin(Plugin):
             self.title_system,
             self.language_manager,
             self.api_unlock_title,
+            MAIN_PATH,
         )
         self.entity_display_name_manager = EntityDisplayNameManager(Path(MAIN_PATH), logger=None)
         self.kill_reward_config = KillRewardConfig(Path(MAIN_PATH), logger=None)
@@ -1271,7 +1272,7 @@ class ARCCorePlugin(Plugin):
         if old_richest_xuid:
             try:
                 self.title_system.revoke_title_by_xuid(old_richest_xuid, richest_title_name)
-                old_name = self.get_player_name_by_xuid(old_richest_xuid)
+                old_name = self.get_player_name_by_xuid(old_richest_xuid, return_with_title=False)
                 if old_name:
                     old_online = self.server.get_player(old_name)
                     if old_online is not None:
@@ -1282,7 +1283,7 @@ class ARCCorePlugin(Plugin):
         # 新首富发放头衔（在线则走 api_unlock_title 以便自动佩戴逻辑；离线则仅写入解锁记录）
         if new_richest_xuid:
             try:
-                new_name = self.get_player_name_by_xuid(new_richest_xuid)
+                new_name = self.get_player_name_by_xuid(new_richest_xuid, return_with_title=False)
                 new_online = self.server.get_player(new_name) if new_name else None
                 if new_online is not None:
                     self.api_unlock_title(new_online, richest_title_name)
@@ -1681,18 +1682,31 @@ class ARCCorePlugin(Plugin):
             self._safe_log('error', f"{ColorFormat.RED}[ARC Core]Get offline player OP status by UUID error: {str(e)}")
             return None
 
-    def get_player_name_by_xuid(self, player_xuid: str) -> Optional[str]:
+    def get_player_name_by_xuid(
+        self, player_xuid: str, return_with_title: bool = True
+    ) -> Optional[str]:
         """
-        通过XUID获取玩家名称
-        :param player_xuid: 玩家XUID字符串
-        :return: 玩家名称，如果未找到则返回None
+        通过 XUID 获取玩家名称。
+        :param player_xuid: 玩家 XUID
+        :param return_with_title: 为 True（默认）时，若数据库中有记录且玩家佩戴头衔，则返回带 MC 颜色与 [头衔] 前缀的展示名，适合 UI / 广播；为 False 时始终返回库中裸名，适合 server.get_player、游戏指令参数、对外 API 等。
         """
         try:
             result = self.database_manager.query_one(
                 "SELECT name FROM player_basic_info WHERE xuid = ?",
-                (player_xuid,)
+                (player_xuid,),
             )
-            return result['name'] if result else None
+            if not result or result.get("name") is None:
+                return None
+            raw = str(result["name"]).strip()
+            if not raw:
+                return None
+            if not return_with_title:
+                return raw
+            try:
+                equipped = self.title_system.get_equipped_title_by_xuid(str(player_xuid).strip())
+            except Exception:
+                equipped = None
+            return self.title_system.format_player_display_label(raw, equipped)
         except Exception as e:
             self.logger.error(f"{ColorFormat.RED}[ARC Core]Get player name by XUID error: {str(e)}")
             return None
@@ -1732,6 +1746,15 @@ class ARCCorePlugin(Plugin):
         except Exception as e:
             self.logger.error(f"{ColorFormat.RED}[ARC Core]Get player XUID by name error: {str(e)}")
             return None
+
+    def _rank_display_name_from_row(self, row: Dict[str, Any]) -> str:
+        """排行榜等展示用：row 含 xuid、name 时优先返回带头衔的展示名。"""
+        xuid_s = str(row.get("xuid") or "").strip()
+        raw = (row.get("name") or "?").strip() or "?"
+        if not xuid_s:
+            return raw
+        labeled = self.get_player_name_by_xuid(xuid_s, return_with_title=True)
+        return labeled if labeled else raw
 
     # Spawn protect
     def init_spawn_locations_table(self) -> bool:
@@ -2547,13 +2570,13 @@ class ARCCorePlugin(Plugin):
             slot_key = "CHECKIN_CHAT_TODAY_RANK_SLOT"
             if n_today <= rank_limit and n_today > 0:
                 today_rows = self.database_manager.query_all(
-                    "SELECT name FROM player_basic_info WHERE last_checkin_date = ? "
+                    "SELECT xuid, name FROM player_basic_info WHERE last_checkin_date = ? "
                     "ORDER BY " + order_by_time + "ASC",
                     (today,),
                 )
                 order_parts = []
                 for idx, row in enumerate(today_rows, start=1):
-                    display_name = (row.get("name") or "?").strip() or "?"
+                    display_name = self._rank_display_name_from_row(row)
                     order_parts.append(
                         self.language_manager.GetText(slot_key).format(idx, display_name)
                     )
@@ -2564,24 +2587,24 @@ class ARCCorePlugin(Plugin):
                 )
             elif n_today > rank_limit:
                 early_rows = self.database_manager.query_all(
-                    "SELECT name FROM player_basic_info WHERE last_checkin_date = ? "
+                    "SELECT xuid, name FROM player_basic_info WHERE last_checkin_date = ? "
                     "ORDER BY " + order_by_time + "ASC LIMIT ?",
                     (today, rank_limit),
                 )
                 late_rows = self.database_manager.query_all(
-                    "SELECT name FROM player_basic_info WHERE last_checkin_date = ? "
+                    "SELECT xuid, name FROM player_basic_info WHERE last_checkin_date = ? "
                     "ORDER BY " + order_by_time + "DESC LIMIT ?",
                     (today, rank_limit),
                 )
                 early_parts = []
                 for idx, row in enumerate(early_rows, start=1):
-                    display_name = (row.get("name") or "?").strip() or "?"
+                    display_name = self._rank_display_name_from_row(row)
                     early_parts.append(
                         self.language_manager.GetText(slot_key).format(idx, display_name)
                     )
                 late_parts = []
                 for idx, row in enumerate(late_rows, start=1):
-                    display_name = (row.get("name") or "?").strip() or "?"
+                    display_name = self._rank_display_name_from_row(row)
                     late_parts.append(
                         self.language_manager.GetText(slot_key).format(idx, display_name)
                     )
@@ -2600,7 +2623,7 @@ class ARCCorePlugin(Plugin):
                 self.logger.error(f"{ColorFormat.RED}[ARC Core]checkin today rank broadcast error: {e}")
         try:
             total_rows = self.database_manager.query_all(
-                "SELECT name, total_checkin_count FROM player_basic_info "
+                "SELECT xuid, name, total_checkin_count FROM player_basic_info "
                 "WHERE COALESCE(total_checkin_count, 0) > 0 "
                 "ORDER BY total_checkin_count DESC, xuid ASC LIMIT ?",
                 (rank_limit,),
@@ -2609,7 +2632,7 @@ class ARCCorePlugin(Plugin):
                 times_unit = self.language_manager.GetText("CHECKIN_RANK_TIMES_SUFFIX")
                 total_parts = []
                 for idx, row in enumerate(total_rows, start=1):
-                    display_name = (row.get("name") or "?").strip() or "?"
+                    display_name = self._rank_display_name_from_row(row)
                     try:
                         cnt = int(row.get("total_checkin_count") or 0)
                     except (ValueError, TypeError):
@@ -2689,7 +2712,8 @@ class ARCCorePlugin(Plugin):
                 player,
             )
         else:
-            self._broadcast_checkin_rankings(player.name, today)
+            announcer = self.get_player_name_by_xuid(player_xuid, return_with_title=True) or player.name
+            self._broadcast_checkin_rankings(announcer, today)
 
         if daily_money > 0:
             money_line = self.language_manager.GetText("CHECKIN_SUCCESS_MONEY_LINE").format(
@@ -4853,12 +4877,14 @@ class ARCCorePlugin(Plugin):
         )
         
         for shared_uuid in land_info['shared_users']:
-            user_name = self.get_player_name_by_xuid(shared_uuid)
-            if user_name:
-                remove_auth_panel.add_button(
-                    self.language_manager.GetText('LAND_AUTH_REMOVE_TARGET_BUTTON').format(user_name),
-                    on_click=lambda p=player, l_id=land_id, uuid=shared_uuid, name=user_name: self.remove_land_auth(p, l_id, uuid, name)
-                )
+            raw_name = self.get_player_name_by_xuid(shared_uuid, return_with_title=False)
+            if not raw_name:
+                continue
+            display_name = self.get_player_name_by_xuid(shared_uuid, return_with_title=True) or raw_name
+            remove_auth_panel.add_button(
+                self.language_manager.GetText('LAND_AUTH_REMOVE_TARGET_BUTTON').format(display_name),
+                on_click=lambda p=player, l_id=land_id, uuid=shared_uuid, name=raw_name: self.remove_land_auth(p, l_id, uuid, name)
+            )
         
         player.send_form(remove_auth_panel)
 
@@ -5988,13 +6014,24 @@ class ARCCorePlugin(Plugin):
                          on_click=self.show_op_achievement_create_panel)
         panel.add_button(self.language_manager.GetText("OP_ACHIEVEMENT_LIST_BUTTON"),
                          on_click=self.show_op_achievement_list_panel)
+        panel.add_button(self.language_manager.GetText("OP_ACHIEVEMENT_APPLY_DEFAULT_BUTTON"),
+                         on_click=self._do_op_apply_default_kill_achievements)
         panel.add_button(self.language_manager.GetText('RETURN_BUTTON_TEXT'),
                          on_click=self.show_op_main_panel)
         player.send_form(panel)
 
+    def _do_op_apply_default_kill_achievements(self, player: Player):
+        bundle_size = AchievementSystem.get_default_kill_bundle_size()
+        ok = self.achievement_system.apply_default_kill_achievement_bundle(self.title_system)
+        if ok:
+            player.send_message(self.language_manager.GetText("OP_ACHIEVEMENT_APPLY_DEFAULT_DONE").format(bundle_size))
+        else:
+            player.send_message(self.language_manager.GetText("OP_ACHIEVEMENT_SAVE_FAIL"))
+        self.show_op_achievement_manage_panel(player)
+
     def show_op_achievement_list_panel(self, player: Player):
-        defs = self.achievement_system.list_definitions()
-        if not defs:
+        achievement_rows = self.achievement_system.list_achievements()
+        if not achievement_rows:
             player.send_message(self.language_manager.GetText("OP_ACHIEVEMENT_EMPTY_HINT"))
             return self.show_op_achievement_manage_panel(player)
 
@@ -6003,40 +6040,31 @@ class ARCCorePlugin(Plugin):
             content=self.language_manager.GetText("OP_ACHIEVEMENT_LIST_CONTENT"),
             on_close=self.show_op_achievement_manage_panel,
         )
-        for d in defs:
-            achievement_id = d.get("id")
-            name = d.get("name") or ""
-            stat_key = d.get("stat_key") or ""
-            required_count = d.get("required_count") or 0
-            unlock_title = d.get("unlock_title") or ""
-            enabled = int(d.get("enabled") or 0) == 1
+        for achievement_row in achievement_rows:
+            name = str(achievement_row.get("name") or "").strip()
+            unlock_title = str(achievement_row.get("unlock_title") or "").strip()
+            enabled = int(achievement_row.get("enabled") or 0) == 1
+            condition_count = len(self.achievement_system.list_conditions(unlock_title))
             status = "§aON§r" if enabled else "§cOFF§r"
-            label = f"{status} #{achievement_id} {name}\n{stat_key} >= {required_count} -> {unlock_title}"
-            panel.add_button(label, on_click=lambda p, a_id=achievement_id: self.show_op_achievement_edit_panel(p, a_id))
+            label = f"{status} {name}\n头衔: {unlock_title} | 条件数: {condition_count} | 逻辑: all"
+            panel.add_button(
+                label,
+                on_click=lambda p, ut=unlock_title: self.show_op_achievement_edit_panel(p, ut),
+            )
         panel.add_button(self.language_manager.GetText('RETURN_BUTTON_TEXT'),
                          on_click=self.show_op_achievement_manage_panel)
         player.send_form(panel)
 
     def show_op_achievement_create_panel(self, player: Player):
-        """创建成就：name / stat_key / required_count / unlock_title / enabled(0/1)。"""
+        """创建成就基础信息。"""
         name_input = TextInput(
             label=self.language_manager.GetText("OP_ACHIEVEMENT_FIELD_NAME"),
-            placeholder="例如：屠夫成就",
+            placeholder="例如：僵尸杀手",
             default_value="",
-        )
-        stat_key_input = TextInput(
-            label=self.language_manager.GetText("OP_ACHIEVEMENT_FIELD_STAT_KEY"),
-            placeholder="kill_total | kill:minecraft:zombie | block_break_total | block_break:minecraft:stone",
-            default_value="kill_total",
-        )
-        required_input = TextInput(
-            label=self.language_manager.GetText("OP_ACHIEVEMENT_FIELD_REQUIRED"),
-            placeholder="例如：100",
-            default_value="100",
         )
         title_input = TextInput(
             label=self.language_manager.GetText("OP_ACHIEVEMENT_FIELD_UNLOCK_TITLE"),
-            placeholder="例如：屠夫",
+            placeholder="例如：僵尸杀手",
             default_value="",
         )
         enabled_input = TextInput(
@@ -6044,10 +6072,9 @@ class ARCCorePlugin(Plugin):
             placeholder="1=启用 0=禁用",
             default_value="1",
         )
-
         form = ModalForm(
             title=self.language_manager.GetText("OP_ACHIEVEMENT_CREATE_TITLE"),
-            controls=[name_input, stat_key_input, required_input, title_input, enabled_input],
+            controls=[name_input, title_input, enabled_input],
             on_close=self.show_op_achievement_manage_panel,
             on_submit=self._do_op_achievement_create,
         )
@@ -6060,145 +6087,323 @@ class ARCCorePlugin(Plugin):
             player.send_message(self.language_manager.GetText("OP_ACHIEVEMENT_SAVE_FAIL"))
             return self.show_op_achievement_manage_panel(player)
 
-        if not data or len(data) < 5:
+        if not data or len(data) < 3:
             player.send_message(self.language_manager.GetText("OP_ACHIEVEMENT_SAVE_FAIL"))
             return self.show_op_achievement_manage_panel(player)
 
         name = str(data[0] or "").strip()
-        stat_key = str(data[1] or "").strip()
-        required_count = data[2]
-        unlock_title = str(data[3] or "").strip()
-        enabled = str(data[4] or "1").strip() not in ["0", "false", "False", "off", "OFF"]
+        unlock_title = str(data[1] or "").strip()
+        enabled = str(data[2] or "1").strip() not in ["0", "false", "False", "off", "OFF"]
 
-        try:
-            required_count_int = int(required_count)
-        except Exception:
-            required_count_int = 0
-
-        ok = self.achievement_system.upsert_definition(
+        ok = self.achievement_system.create_achievement(
             name=name,
-            stat_key=stat_key,
-            required_count=required_count_int,
             unlock_title=unlock_title,
             enabled=enabled,
-            achievement_id=None,
         )
         if ok:
             player.send_message(self.language_manager.GetText("OP_ACHIEVEMENT_SAVE_SUCCESS"))
+            self.show_op_achievement_edit_panel(player, unlock_title)
         else:
             player.send_message(self.language_manager.GetText("OP_ACHIEVEMENT_SAVE_FAIL"))
-        self.show_op_achievement_manage_panel(player)
+            self.show_op_achievement_manage_panel(player)
 
-    def show_op_achievement_edit_panel(self, player: Player, achievement_id: int):
-        d = self.achievement_system.get_definition(achievement_id)
-        if not d:
+    def show_op_achievement_edit_panel(self, player: Player, unlock_title: str):
+        achievement_row = self.achievement_system.get_achievement(unlock_title)
+        if not achievement_row:
             player.send_message(self.language_manager.GetText("OP_ACHIEVEMENT_NOT_FOUND"))
             return self.show_op_achievement_list_panel(player)
 
-        name = (d.get("name") or "").strip()
-        stat_key = (d.get("stat_key") or "").strip()
-        required_count = int(d.get("required_count") or 0)
-        unlock_title = (d.get("unlock_title") or "").strip()
-        enabled = int(d.get("enabled") or 0) == 1
+        name = str(achievement_row.get("name") or "").strip()
+        current_unlock_title = str(achievement_row.get("unlock_title") or "").strip()
+        enabled = int(achievement_row.get("enabled") or 0) == 1
+        condition_rows = self.achievement_system.list_conditions(current_unlock_title)
 
         panel = ActionForm(
-            title=self.language_manager.GetText("OP_ACHIEVEMENT_EDIT_TITLE").format(achievement_id),
-            content=f"{name}\n{stat_key} >= {required_count} -> {unlock_title}\n" + (self.language_manager.GetText("OP_ACHIEVEMENT_STATUS_ON") if enabled else self.language_manager.GetText("OP_ACHIEVEMENT_STATUS_OFF")),
+            title=f"编辑成就: {name}",
+            content=(
+                f"头衔: {current_unlock_title}\n"
+                f"状态: {'启用' if enabled else '禁用'}\n"
+                "逻辑: all\n"
+                f"条件数: {len(condition_rows)}\n"
+                "说明: 全部条件满足后才会解锁。"
+            ),
             on_close=self.show_op_achievement_list_panel,
         )
-        panel.add_button(self.language_manager.GetText("OP_ACHIEVEMENT_EDIT_FIELDS_BUTTON"),
-                         on_click=lambda p, a_id=achievement_id: self._show_op_achievement_edit_modal(p, a_id))
+        panel.add_button(
+            "编辑基础信息",
+            on_click=lambda p, ut=current_unlock_title: self._show_op_achievement_edit_meta_modal(p, ut),
+        )
+        for condition_row in condition_rows:
+            condition_id = int(condition_row.get("id") or 0)
+            condition_type = str(condition_row.get("condition_type") or "").strip()
+            target_id = str(condition_row.get("target_id") or "").strip()
+            required_count = int(condition_row.get("required_count") or 0)
+            if condition_type == self.achievement_system.condition_type_kill_entity_sum:
+                ids_joined = ", ".join(condition_row.get("target_ids") or [])
+                condition_text = f"击杀总和 [{ids_joined}] >= {required_count}"
+            elif condition_type == self.achievement_system.condition_type_kill_entity:
+                if target_id == "*":
+                    condition_text = f"累计击杀任意生物 >= {required_count}"
+                else:
+                    condition_text = f"击杀 {target_id} >= {required_count}"
+            else:
+                condition_text = f"{condition_type}:{target_id} >= {required_count}"
+            panel.add_button(
+                f"条件 #{condition_id}\n{condition_text}",
+                on_click=lambda p, ut=current_unlock_title, c_id=condition_id: self.show_op_achievement_condition_panel(p, ut, c_id),
+            )
+        panel.add_button(
+            "新增条件",
+            on_click=lambda p, ut=current_unlock_title: self._show_op_achievement_create_condition_modal(p, ut),
+        )
         toggle_text = self.language_manager.GetText("OP_ACHIEVEMENT_DISABLE_BUTTON") if enabled else self.language_manager.GetText("OP_ACHIEVEMENT_ENABLE_BUTTON")
-        panel.add_button(toggle_text, on_click=lambda p, a_id=achievement_id, en=enabled: self._do_op_achievement_toggle(p, a_id, not en))
-        panel.add_button(self.language_manager.GetText("OP_ACHIEVEMENT_DELETE_BUTTON"),
-                         on_click=lambda p, a_id=achievement_id: self._do_op_achievement_delete(p, a_id))
+        panel.add_button(
+            toggle_text,
+            on_click=lambda p, ut=current_unlock_title, en=enabled: self._do_op_achievement_toggle(p, ut, not en),
+        )
+        panel.add_button(
+            self.language_manager.GetText("OP_ACHIEVEMENT_DELETE_BUTTON"),
+            on_click=lambda p, ut=current_unlock_title: self._do_op_achievement_delete(p, ut),
+        )
         panel.add_button(self.language_manager.GetText('RETURN_BUTTON_TEXT'),
                          on_click=self.show_op_achievement_list_panel)
         player.send_form(panel)
 
-    def _show_op_achievement_edit_modal(self, player: Player, achievement_id: int):
-        d = self.achievement_system.get_definition(achievement_id)
-        if not d:
+    def _show_op_achievement_edit_meta_modal(self, player: Player, unlock_title: str):
+        achievement_row = self.achievement_system.get_achievement(unlock_title)
+        if not achievement_row:
             player.send_message(self.language_manager.GetText("OP_ACHIEVEMENT_NOT_FOUND"))
             return self.show_op_achievement_list_panel(player)
 
         name_input = TextInput(
             label=self.language_manager.GetText("OP_ACHIEVEMENT_FIELD_NAME"),
             placeholder="",
-            default_value=str(d.get("name") or ""),
-        )
-        stat_key_input = TextInput(
-            label=self.language_manager.GetText("OP_ACHIEVEMENT_FIELD_STAT_KEY"),
-            placeholder="kill_total | kill:minecraft:zombie | block_break_total | block_break:minecraft:stone",
-            default_value=str(d.get("stat_key") or ""),
-        )
-        required_input = TextInput(
-            label=self.language_manager.GetText("OP_ACHIEVEMENT_FIELD_REQUIRED"),
-            placeholder="",
-            default_value=str(int(d.get("required_count") or 0)),
+            default_value=str(achievement_row.get("name") or ""),
         )
         title_input = TextInput(
             label=self.language_manager.GetText("OP_ACHIEVEMENT_FIELD_UNLOCK_TITLE"),
             placeholder="",
-            default_value=str(d.get("unlock_title") or ""),
+            default_value=str(achievement_row.get("unlock_title") or ""),
         )
         enabled_input = TextInput(
             label=self.language_manager.GetText("OP_ACHIEVEMENT_FIELD_ENABLED"),
             placeholder="1=启用 0=禁用",
-            default_value="1" if int(d.get("enabled") or 0) == 1 else "0",
+            default_value="1" if int(achievement_row.get("enabled") or 0) == 1 else "0",
         )
         form = ModalForm(
-            title=self.language_manager.GetText("OP_ACHIEVEMENT_EDIT_MODAL_TITLE").format(achievement_id),
-            controls=[name_input, stat_key_input, required_input, title_input, enabled_input],
-            on_close=self.show_op_achievement_edit_panel,
-            on_submit=lambda p, json_str: self._do_op_achievement_save_edit(p, json_str, achievement_id),
+            title=f"编辑成就信息: {unlock_title}",
+            controls=[name_input, title_input, enabled_input],
+            on_close=lambda p, ut=unlock_title: self.show_op_achievement_edit_panel(p, ut),
+            on_submit=lambda p, json_str, ut=unlock_title: self._do_op_achievement_save_meta(p, json_str, ut),
         )
         player.send_form(form)
 
-    def _do_op_achievement_save_edit(self, player: Player, json_str: str, achievement_id: int):
+    def _do_op_achievement_save_meta(self, player: Player, json_str: str, old_unlock_title: str):
         try:
             data = json.loads(json_str)
         except Exception:
             player.send_message(self.language_manager.GetText("OP_ACHIEVEMENT_SAVE_FAIL"))
-            return self.show_op_achievement_edit_panel(player, achievement_id)
+            return self.show_op_achievement_edit_panel(player, old_unlock_title)
 
-        if not data or len(data) < 5:
+        if not data or len(data) < 3:
             player.send_message(self.language_manager.GetText("OP_ACHIEVEMENT_SAVE_FAIL"))
-            return self.show_op_achievement_edit_panel(player, achievement_id)
+            return self.show_op_achievement_edit_panel(player, old_unlock_title)
 
         name = str(data[0] or "").strip()
-        stat_key = str(data[1] or "").strip()
+        new_unlock_title = str(data[1] or "").strip()
+        enabled = str(data[2] or "1").strip() not in ["0", "false", "False", "off", "OFF"]
+
+        ok = self.achievement_system.update_achievement(
+            old_unlock_title=old_unlock_title,
+            name=name,
+            new_unlock_title=new_unlock_title,
+            enabled=enabled,
+        )
+        if ok:
+            player.send_message(self.language_manager.GetText("OP_ACHIEVEMENT_SAVE_SUCCESS"))
+            self.show_op_achievement_edit_panel(player, new_unlock_title)
+        else:
+            player.send_message(self.language_manager.GetText("OP_ACHIEVEMENT_SAVE_FAIL"))
+            self.show_op_achievement_edit_panel(player, old_unlock_title)
+
+    def _show_op_achievement_create_condition_modal(self, player: Player, unlock_title: str):
+        entity_input = TextInput(
+            label="生物ID",
+            placeholder="例如: minecraft:zombie 或 *",
+            default_value="minecraft:zombie",
+        )
+        required_input = TextInput(
+            label=self.language_manager.GetText("OP_ACHIEVEMENT_FIELD_REQUIRED"),
+            placeholder="例如：100",
+            default_value="100",
+        )
+        form = ModalForm(
+            title=f"新增条件: {unlock_title}",
+            controls=[entity_input, required_input],
+            on_close=lambda p, ut=unlock_title: self.show_op_achievement_edit_panel(p, ut),
+            on_submit=lambda p, json_str, ut=unlock_title: self._do_op_achievement_create_condition(p, json_str, ut),
+        )
+        player.send_form(form)
+
+    def _do_op_achievement_create_condition(self, player: Player, json_str: str, unlock_title: str):
         try:
-            required_count_int = int(data[2])
+            data = json.loads(json_str)
+        except Exception:
+            player.send_message(self.language_manager.GetText("OP_ACHIEVEMENT_SAVE_FAIL"))
+            return self.show_op_achievement_edit_panel(player, unlock_title)
+
+        if not data or len(data) < 2:
+            player.send_message(self.language_manager.GetText("OP_ACHIEVEMENT_SAVE_FAIL"))
+            return self.show_op_achievement_edit_panel(player, unlock_title)
+
+        target_id = str(data[0] or "").strip()
+        try:
+            required_count_int = int(data[1])
         except Exception:
             required_count_int = 0
-        unlock_title = str(data[3] or "").strip()
-        enabled = str(data[4] or "1").strip() not in ["0", "false", "False", "off", "OFF"]
 
-        ok = self.achievement_system.upsert_definition(
-            name=name,
-            stat_key=stat_key,
-            required_count=required_count_int,
+        ok = self.achievement_system.create_condition(
             unlock_title=unlock_title,
-            enabled=enabled,
-            achievement_id=int(achievement_id),
+            condition_type=self.achievement_system.condition_type_kill_entity,
+            target_id=target_id,
+            required_count=required_count_int,
         )
         if ok:
             player.send_message(self.language_manager.GetText("OP_ACHIEVEMENT_SAVE_SUCCESS"))
         else:
             player.send_message(self.language_manager.GetText("OP_ACHIEVEMENT_SAVE_FAIL"))
-        self.show_op_achievement_edit_panel(player, achievement_id)
+        self.show_op_achievement_edit_panel(player, unlock_title)
 
-    def _do_op_achievement_toggle(self, player: Player, achievement_id: int, enabled: bool):
-        ok = self.achievement_system.set_enabled(int(achievement_id), bool(enabled))
+    def show_op_achievement_condition_panel(self, player: Player, unlock_title: str, condition_id: int):
+        condition_row = self.achievement_system.get_condition(condition_id)
+        if not condition_row:
+            player.send_message(self.language_manager.GetText("OP_ACHIEVEMENT_NOT_FOUND"))
+            return self.show_op_achievement_edit_panel(player, unlock_title)
+
+        target_id = str(condition_row.get("target_id") or "").strip()
+        required_count = int(condition_row.get("required_count") or 0)
+        condition_type = str(condition_row.get("condition_type") or "").strip()
+        if condition_type == self.achievement_system.condition_type_kill_entity_sum:
+            ids_joined = ", ".join(condition_row.get("target_ids") or [])
+            condition_text = f"击杀总和 [{ids_joined}] >= {required_count}"
+        elif target_id == "*":
+            condition_text = f"累计击杀任意生物 >= {required_count}"
+        else:
+            condition_text = f"击杀 {target_id} >= {required_count}"
+
+        panel = ActionForm(
+            title=f"条件 #{condition_id}",
+            content=condition_text,
+            on_close=lambda p, ut=unlock_title: self.show_op_achievement_edit_panel(p, ut),
+        )
+        panel.add_button(
+            "编辑条件",
+            on_click=lambda p, ut=unlock_title, c_id=condition_id: self._show_op_achievement_edit_condition_modal(p, ut, c_id),
+        )
+        panel.add_button(
+            self.language_manager.GetText("OP_ACHIEVEMENT_DELETE_BUTTON"),
+            on_click=lambda p, ut=unlock_title, c_id=condition_id: self._do_op_achievement_delete_condition(p, ut, c_id),
+        )
+        panel.add_button(
+            self.language_manager.GetText('RETURN_BUTTON_TEXT'),
+            on_click=lambda p, ut=unlock_title: self.show_op_achievement_edit_panel(p, ut),
+        )
+        player.send_form(panel)
+
+    def _show_op_achievement_edit_condition_modal(self, player: Player, unlock_title: str, condition_id: int):
+        condition_row = self.achievement_system.get_condition(condition_id)
+        if not condition_row:
+            player.send_message(self.language_manager.GetText("OP_ACHIEVEMENT_NOT_FOUND"))
+            return self.show_op_achievement_edit_panel(player, unlock_title)
+
+        condition_type = str(condition_row.get("condition_type") or "").strip()
+        if condition_type == self.achievement_system.condition_type_kill_entity_sum:
+            default_ids = ", ".join(condition_row.get("target_ids") or [])
+            entity_input = TextInput(
+                label="生物ID（英文逗号分隔，击杀数相加）",
+                placeholder="minecraft:zombie, minecraft:skeleton",
+                default_value=default_ids,
+            )
+        else:
+            entity_input = TextInput(
+                label="生物ID",
+                placeholder="例如: minecraft:zombie 或 *",
+                default_value=str(condition_row.get("target_id") or ""),
+            )
+        required_input = TextInput(
+            label=self.language_manager.GetText("OP_ACHIEVEMENT_FIELD_REQUIRED"),
+            placeholder="",
+            default_value=str(int(condition_row.get("required_count") or 0)),
+        )
+        form = ModalForm(
+            title=f"编辑条件 #{condition_id}",
+            controls=[entity_input, required_input],
+            on_close=lambda p, ut=unlock_title, c_id=condition_id: self.show_op_achievement_condition_panel(p, ut, c_id),
+            on_submit=lambda p, json_str, ut=unlock_title, c_id=condition_id: self._do_op_achievement_save_condition(p, json_str, ut, c_id),
+        )
+        player.send_form(form)
+
+    def _do_op_achievement_save_condition(self, player: Player, json_str: str, unlock_title: str, condition_id: int):
+        condition_row = self.achievement_system.get_condition(condition_id)
+        try:
+            data = json.loads(json_str)
+        except Exception:
+            player.send_message(self.language_manager.GetText("OP_ACHIEVEMENT_SAVE_FAIL"))
+            return self.show_op_achievement_condition_panel(player, unlock_title, condition_id)
+
+        if not data or len(data) < 2:
+            player.send_message(self.language_manager.GetText("OP_ACHIEVEMENT_SAVE_FAIL"))
+            return self.show_op_achievement_condition_panel(player, unlock_title, condition_id)
+
+        try:
+            required_count_int = int(data[1])
+        except Exception:
+            required_count_int = 0
+
+        condition_type = str((condition_row or {}).get("condition_type") or "").strip()
+        if condition_type == self.achievement_system.condition_type_kill_entity_sum:
+            ids_raw = str(data[0] or "")
+            target_ids_list = [x.strip() for x in ids_raw.split(",") if x.strip()]
+            ok = self.achievement_system.update_condition(
+                condition_id=condition_id,
+                condition_type=self.achievement_system.condition_type_kill_entity_sum,
+                target_id="",
+                required_count=required_count_int,
+                target_ids=target_ids_list,
+            )
+        else:
+            target_id = str(data[0] or "").strip()
+            ok = self.achievement_system.update_condition(
+                condition_id=condition_id,
+                condition_type=self.achievement_system.condition_type_kill_entity,
+                target_id=target_id,
+                required_count=required_count_int,
+            )
+        if ok:
+            player.send_message(self.language_manager.GetText("OP_ACHIEVEMENT_SAVE_SUCCESS"))
+            self.show_op_achievement_condition_panel(player, unlock_title, condition_id)
+        else:
+            player.send_message(self.language_manager.GetText("OP_ACHIEVEMENT_SAVE_FAIL"))
+            self.show_op_achievement_condition_panel(player, unlock_title, condition_id)
+
+    def _do_op_achievement_delete_condition(self, player: Player, unlock_title: str, condition_id: int):
+        ok = self.achievement_system.delete_condition(int(condition_id))
+        if ok:
+            player.send_message(self.language_manager.GetText("OP_ACHIEVEMENT_DELETE_SUCCESS"))
+        else:
+            player.send_message(self.language_manager.GetText("OP_ACHIEVEMENT_DELETE_FAIL"))
+        self.show_op_achievement_edit_panel(player, unlock_title)
+
+    def _do_op_achievement_toggle(self, player: Player, unlock_title: str, enabled: bool):
+        ok = self.achievement_system.set_achievement_enabled(unlock_title, bool(enabled))
         if ok:
             player.send_message(self.language_manager.GetText("OP_ACHIEVEMENT_SAVE_SUCCESS"))
         else:
             player.send_message(self.language_manager.GetText("OP_ACHIEVEMENT_SAVE_FAIL"))
-        self.show_op_achievement_edit_panel(player, achievement_id)
+        self.show_op_achievement_edit_panel(player, unlock_title)
 
-    def _do_op_achievement_delete(self, player: Player, achievement_id: int):
-        ok = self.achievement_system.delete_definition(int(achievement_id))
+    def _do_op_achievement_delete(self, player: Player, unlock_title: str):
+        ok = self.achievement_system.delete_achievement(unlock_title)
         if ok:
             player.send_message(self.language_manager.GetText("OP_ACHIEVEMENT_DELETE_SUCCESS"))
         else:
@@ -6999,7 +7204,7 @@ class ARCCorePlugin(Plugin):
             if old_richest != new_richest and self.current_richest_xuid:
                 try:
                     self.title_system.revoke_title_by_xuid(self.current_richest_xuid, old_richest)
-                    old_name = self.get_player_name_by_xuid(self.current_richest_xuid)
+                    old_name = self.get_player_name_by_xuid(self.current_richest_xuid, return_with_title=False)
                     if old_name:
                         pl = self.server.get_player(old_name)
                         if pl is not None:
@@ -7420,12 +7625,14 @@ class ARCCorePlugin(Plugin):
             on_close=lambda p=player, l_id=land_id, pg=from_page: self.show_op_land_auth_manage_panel(p, l_id, pg)
         )
         for shared_xuid in land_info['shared_users']:
-            user_name = self.get_player_name_by_xuid(shared_xuid)
-            if user_name:
-                remove_panel.add_button(
-                    self.language_manager.GetText('LAND_AUTH_REMOVE_TARGET_BUTTON').format(user_name),
-                    on_click=lambda p=player, l_id=land_id, uid=shared_xuid, name=user_name, pg=from_page: self.op_remove_land_auth(p, l_id, uid, name, pg)
-                )
+            raw_name = self.get_player_name_by_xuid(shared_xuid, return_with_title=False)
+            if not raw_name:
+                continue
+            display_name = self.get_player_name_by_xuid(shared_xuid, return_with_title=True) or raw_name
+            remove_panel.add_button(
+                self.language_manager.GetText('LAND_AUTH_REMOVE_TARGET_BUTTON').format(display_name),
+                on_click=lambda p=player, l_id=land_id, uid=shared_xuid, name=raw_name, pg=from_page: self.op_remove_land_auth(p, l_id, uid, name, pg)
+            )
         player.send_form(remove_panel)
 
     def op_add_land_auth(self, player: Player, land_id: int, target_player: Player, from_page: int):
@@ -7652,7 +7859,7 @@ class ARCCorePlugin(Plugin):
         money_data = {}
         for entry in self.economy.get_all_money_raw():
             try:
-                player_name = self.get_player_name_by_xuid(entry['xuid'])
+                player_name = self.get_player_name_by_xuid(entry['xuid'], return_with_title=False)
                 if player_name:
                     money_data[player_name] = entry['money']
             except Exception:
@@ -7670,7 +7877,7 @@ class ARCCorePlugin(Plugin):
     def api_get_richest_player_money_data(self) -> list:
         result = self.economy.get_richest_one()
         if result:
-            player_name = self.get_player_name_by_xuid(result['xuid'])
+            player_name = self.get_player_name_by_xuid(result['xuid'], return_with_title=False)
             if player_name:
                 return [player_name, self._round_money(result['money'])]
         return ["", 0.0]
@@ -7678,7 +7885,7 @@ class ARCCorePlugin(Plugin):
     def api_get_poorest_player_money_data(self) -> list:
         result = self.economy.get_poorest_one()
         if result:
-            player_name = self.get_player_name_by_xuid(result['xuid'])
+            player_name = self.get_player_name_by_xuid(result['xuid'], return_with_title=False)
             if player_name:
                 return [player_name, self._round_money(result['money'])]
         return ["", 0.0]

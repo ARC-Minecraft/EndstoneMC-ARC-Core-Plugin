@@ -282,6 +282,29 @@ class TitleSystem:
             return None
         return row["title"]
 
+    def get_equipped_title_by_xuid(self, xuid: str) -> Optional[str]:
+        """按 xuid 查询当前佩戴头衔；无记录或未佩戴返回 None。"""
+        xs = (xuid or "").strip()
+        if not xs:
+            return None
+        row = self.database_manager.query_one(
+            "SELECT title FROM " + self._table_equipped + " WHERE xuid = ?",
+            (xs,),
+        )
+        if not row or row.get("title") is None:
+            return None
+        t = row["title"]
+        return str(t).strip() if t else None
+
+    def format_player_display_label(self, raw_player_name: str, equipped_title: Optional[str]) -> str:
+        """展示用：有佩戴头衔时为 §l[稀有色][头衔]名字§r（与聊天前缀风格一致），否则为裸名。"""
+        name = (raw_player_name or "").strip() or "?"
+        et = (equipped_title or "").strip() if equipped_title else ""
+        if not et:
+            return name
+        color = self.get_title_rarity_color(et)
+        return "§l" + color + "[" + et + "]" + name + "§r"
+
     def set_equipped_title(self, player: Player, title: Optional[str]) -> bool:
         """设置佩戴头衔。仅当 title 在解锁列表中或为 None 时才允许。"""
         xuid = self._xuid(player)
