@@ -90,3 +90,27 @@ class EntityDisplayNameManager:
         if ":" in et:
             return et.split(":", 1)[1]
         return et
+
+    def get_display_name_or_identifier(self, entity_type_id: str) -> str:
+        """
+        有配置翻译时返回显示名；未配置时返回完整类型 ID（如 minecraft:creeper），不截断命名空间。
+        """
+        if not entity_type_id:
+            return ""
+        et = str(entity_type_id).strip()
+        if et == "*":
+            return "*"
+        if ":" in et:
+            ns, short = et.split(":", 1)
+            key = f"entity.{ns}.{short}.name"
+        else:
+            short = et
+            key = f"entity.minecraft.{short}.name"
+        if key in self._cache and self._cache[key]:
+            return self._cache[key]
+        et_lower = et.lower()
+        if et_lower in self._cache and self._cache[et_lower]:
+            return self._cache[et_lower]
+        if et in self._cache and self._cache[et]:
+            return self._cache[et]
+        return et

@@ -9,9 +9,9 @@ from endstone import Player
 
 # 稀有度 -> MC 颜色码（§0-§f）
 RARITY_COLORS = {
-    "普通": "§f",
+    "普通": "§h",
     "稀有": "§9",
-    "史诗": "§d",
+    "史诗": "§u",
     "传奇": "§6",
     "神话": "§c",
 }
@@ -297,13 +297,13 @@ class TitleSystem:
         return str(t).strip() if t else None
 
     def format_player_display_label(self, raw_player_name: str, equipped_title: Optional[str]) -> str:
-        """展示用：有佩戴头衔时为 §l[稀有色][头衔]名字§r（与聊天前缀风格一致），否则为裸名。"""
+        """展示用：有佩戴头衔时为 [稀有色][头衔]§r名字（稀有色不延伸到名字），否则为裸名。"""
         name = (raw_player_name or "").strip() or "?"
         et = (equipped_title or "").strip() if equipped_title else ""
         if not et:
             return name
         color = self.get_title_rarity_color(et)
-        return "§l" + color + "[" + et + "]" + name + "§r"
+        return color + "[" + et + "]" + "§r" + name
 
     def set_equipped_title(self, player: Player, title: Optional[str]) -> bool:
         """设置佩戴头衔。仅当 title 在解锁列表中或为 None 时才允许。"""
@@ -334,13 +334,26 @@ class TitleSystem:
         if unlocked_at is None:
             unlocked_at = datetime.now().isoformat()
         try:
-            self.database_manager.execute(
-                "INSERT OR REPLACE INTO " + self._table_unlock_time + " (xuid, title, unlocked_at) VALUES (?, ?, ?)",
-                (xuid, title, unlocked_at)
+            return bool(
+                self.database_manager.execute(
+                    "INSERT OR REPLACE INTO " + self._table_unlock_time + " (xuid, title, unlocked_at) VALUES (?, ?, ?)",
+                    (xuid, title, unlocked_at),
+                )
             )
-            return True
         except Exception:
             return False
+
+    def has_unlocked_title_by_xuid(self, xuid: str, title: str) -> bool:
+        """查询玩家是否已在头衔解锁表中拥有该头衔。"""
+        xs = str(xuid or "").strip()
+        tt = str(title or "").strip()
+        if not xs or not tt:
+            return False
+        row = self.database_manager.query_one(
+            "SELECT 1 FROM " + self._table_unlock_time + " WHERE xuid = ? AND title = ?",
+            (xs, tt),
+        )
+        return row is not None
 
     def revoke_title_by_xuid(self, xuid: str, title: str) -> bool:
         """按 xuid 撤销玩家头衔（从解锁记录移除；若正在佩戴则取消佩戴）。"""
@@ -404,10 +417,10 @@ class TitleSystem:
                 self.set_equipped_title(player, None)
 
     def format_chat_message(self, player: Player, original_message: str) -> str:
-        """根据佩戴头衔格式化聊天（含稀有度颜色）。返回形如 §l§f[头衔]玩家名§r(时间)：\\n消息。"""
+        """根据佩戴头衔格式化聊天（含稀有度颜色）。返回形如 §f[头衔]§r名字: 消息。"""
         equipped = self.get_equipped_title(player)
         name = player.name
         if equipped:
             color = self.get_title_rarity_color(equipped)
-            return "§l" + color + "[" + equipped + "]" + name + "§r: " + original_message
+            return color + "[" + equipped + "]" + "§r" + name + ": " + original_message
         return name + ": " + original_message

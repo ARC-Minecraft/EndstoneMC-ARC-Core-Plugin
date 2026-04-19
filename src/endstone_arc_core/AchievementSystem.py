@@ -123,6 +123,7 @@ class AchievementSystem:
             )
             self._migrate_legacy_definitions_to_db()
             self._ensure_json_definition_file()
+            self._migrate_achievement_json_if_hidden_default()
             return True
         except Exception:
             return False
@@ -214,6 +215,7 @@ class AchievementSystem:
                 name = str(achievement_data.get("name") or "").strip()
                 unlock_title = str(achievement_data.get("unlock_title") or "").strip()
                 enabled = bool(achievement_data.get("enabled", True))
+                if_hidden = bool(achievement_data.get("if_hidden", False))
                 logic_value = self._normalize_logic(achievement_data.get("logic"))
                 raw_conditions = achievement_data.get("conditions")
                 if not isinstance(raw_conditions, list):
@@ -242,6 +244,7 @@ class AchievementSystem:
                         "name": name,
                         "unlock_title": unlock_title,
                         "enabled": enabled,
+                        "if_hidden": if_hidden,
                         "logic": logic_value,
                         "conditions": normalized_conditions,
                     }
@@ -407,12 +410,41 @@ class AchievementSystem:
                     "name": name,
                     "unlock_title": unlock_title,
                     "enabled": enabled,
+                    "if_hidden": False,
                     "logic": self.logic_all,
                     "conditions": condition_group_dict.get(unlock_title, []),
                 }
             )
 
         self._save_json_config({"version": 1, "achievements": achievement_list})
+
+    def _migrate_achievement_json_if_hidden_default(self) -> None:
+        """旧版 achievements.json 无 if_hidden 字段时写入未隐藏（直接读原始 JSON，避免归一化后误判）。"""
+        try:
+            if not self._achievement_json_path.exists():
+                return
+            raw_text = self._achievement_json_path.read_text(encoding="utf-8")
+            raw_data = json.loads(raw_text)
+            if not isinstance(raw_data, dict):
+                return
+            achievement_list = raw_data.get("achievements") or []
+            if not isinstance(achievement_list, list):
+                return
+            changed = False
+            for achievement_data in achievement_list:
+                if isinstance(achievement_data, dict) and "if_hidden" not in achievement_data:
+                    achievement_data["if_hidden"] = False
+                    changed = True
+            if changed:
+                raw_data["achievements"] = achievement_list
+                self._main_path.mkdir(parents=True, exist_ok=True)
+                self._achievement_json_path.write_text(
+                    json.dumps(raw_data, ensure_ascii=False, indent=2),
+                    encoding="utf-8",
+                )
+                self._invalidate_kill_hot_index()
+        except Exception:
+            pass
 
     def _build_stat_key(self, condition_type: str, target_id: str) -> str:
         condition_type = (condition_type or "").strip()
@@ -463,6 +495,86 @@ class AchievementSystem:
         )
         return row is not None
 
+    def list_unlocked_titles_for_xuid(self, xuid: str) -> Set[str]:
+        xuid_s = str(xuid or "").strip()
+        if not xuid_s:
+            return set()
+        try:
+            rows = self.database_manager.query_all(
+                "SELECT unlock_title FROM " + self._table_unlocked + " WHERE xuid = ?",
+                (xuid_s,),
+            )
+            titles = {
+                str(r.get("unlock_title") or "").strip()
+                for r in rows or []
+                if str(r.get("unlock_title") or "").strip()
+            }
+            # 头衔已在 player_title_unlock_time 中但成就表未写入时补录（旧逻辑曾依赖 unlock API 返回值）
+            for achievement_data in self.list_achievements():
+                ut = str(achievement_data.get("unlock_title") or "").strip()
+                if not ut or ut in titles:
+                    continue
+                try:
+                    if self.title_system.has_unlocked_title_by_xuid(xuid_s, ut):
+                        self._mark_unlocked(xuid_s, ut)
+                        titles.add(ut)
+                except Exception:
+                    pass
+            return titles
+        except Exception:
+            return set()
+
+    def player_has_unlocked_title(self, xuid: str, unlock_title: str) -> bool:
+        xs = str(xuid or "").strip()
+        ut = str(unlock_title or "").strip()
+        if not xs or not ut:
+            return False
+        if self._is_unlocked(xs, ut):
+            return True
+        try:
+            if self.title_system.has_unlocked_title_by_xuid(xs, ut):
+                self._mark_unlocked(xs, ut)
+                return True
+        except Exception:
+            pass
+        return False
+
+    def set_achievement_if_hidden(self, unlock_title: str, if_hidden: bool) -> bool:
+        unlock_title = (unlock_title or "").strip()
+        if not unlock_title:
+            return False
+        config_data = self._load_json_config()
+        achievement_list = config_data.get("achievements") or []
+        for achievement_data in achievement_list:
+            if str(achievement_data.get("unlock_title") or "").strip() == unlock_title:
+                achievement_data["if_hidden"] = bool(if_hidden)
+                config_data["achievements"] = achievement_list
+                return self._save_json_config(config_data)
+        return False
+
+    def list_unlocked_achievements_for_player_ui(self, xuid: str) -> List[Dict[str, Any]]:
+        """已解锁列表：含隐藏成就在解锁后可见。"""
+        unlocked_set = self.list_unlocked_titles_for_xuid(xuid)
+        result: List[Dict[str, Any]] = []
+        for achievement_data in self.list_achievements():
+            ut = str(achievement_data.get("unlock_title") or "").strip()
+            if ut and ut in unlocked_set:
+                result.append(achievement_data)
+        return result
+
+    def list_locked_achievements_for_player_ui(self, xuid: str) -> List[Dict[str, Any]]:
+        """未解锁列表：隐藏且未解锁的不展示。"""
+        unlocked_set = self.list_unlocked_titles_for_xuid(xuid)
+        result: List[Dict[str, Any]] = []
+        for achievement_data in self.list_achievements():
+            ut = str(achievement_data.get("unlock_title") or "").strip()
+            if not ut or ut in unlocked_set:
+                continue
+            if bool(achievement_data.get("if_hidden", False)):
+                continue
+            result.append(achievement_data)
+        return result
+
     def _mark_unlocked(self, xuid: str, unlock_title: str) -> None:
         now_iso = datetime.now().isoformat()
         self.database_manager.execute(
@@ -497,19 +609,18 @@ class AchievementSystem:
         if not self._achievement_conditions_met(xuid, achievement_data):
             return
         self.title_system.ensure_title_definition(unlock_title)
-        unlock_ok = False
         try:
-            unlock_ok = bool(self.unlock_title_func(player, unlock_title))
+            self.unlock_title_func(player, unlock_title)
         except Exception:
-            unlock_ok = False
-        if unlock_ok:
-            self._mark_unlocked(xuid, unlock_title)
-            try:
-                msg = self.language_manager.GetText("ACHIEVEMENT_UNLOCKED_HINT")
-                if msg:
-                    player.send_message(msg.format(unlock_title))
-            except Exception:
-                pass
+            pass
+        # 条件已达成即写入成就解锁表；头衔发放失败不应导致成就进度丢失
+        self._mark_unlocked(xuid, unlock_title)
+        try:
+            msg = self.language_manager.GetText("ACHIEVEMENT_UNLOCKED_HINT")
+            if msg:
+                player.send_message(msg.format(unlock_title))
+        except Exception:
+            pass
 
     def _check_and_unlock_for_kill_related_titles(self, player: Player, unlock_titles: Set[str]) -> None:
         for unlock_title in unlock_titles:
@@ -572,7 +683,9 @@ class AchievementSystem:
                 return achievement_data
         return None
 
-    def create_achievement(self, name: str, unlock_title: str, enabled: bool = True) -> bool:
+    def create_achievement(
+        self, name: str, unlock_title: str, enabled: bool = True, if_hidden: bool = False
+    ) -> bool:
         name = (name or "").strip()
         unlock_title = (unlock_title or "").strip()
         if not name or not unlock_title:
@@ -587,6 +700,7 @@ class AchievementSystem:
                 "name": name,
                 "unlock_title": unlock_title,
                 "enabled": bool(enabled),
+                "if_hidden": bool(if_hidden),
                 "logic": self.logic_all,
                 "conditions": [],
             }
@@ -600,6 +714,7 @@ class AchievementSystem:
         name: str,
         new_unlock_title: str,
         enabled: bool,
+        if_hidden: bool = False,
     ) -> bool:
         old_unlock_title = (old_unlock_title or "").strip()
         new_unlock_title = (new_unlock_title or "").strip()
@@ -622,6 +737,7 @@ class AchievementSystem:
         achievement_list[target_index]["name"] = name
         achievement_list[target_index]["unlock_title"] = new_unlock_title
         achievement_list[target_index]["enabled"] = bool(enabled)
+        achievement_list[target_index]["if_hidden"] = bool(if_hidden)
         achievement_list[target_index]["logic"] = self.logic_all
 
         config_data["achievements"] = achievement_list
@@ -920,6 +1036,7 @@ class AchievementSystem:
                     achievement_list[idx]["name"] = name
                     achievement_list[idx]["unlock_title"] = unlock_title
                     achievement_list[idx]["enabled"] = True
+                    achievement_list[idx]["if_hidden"] = False
                     achievement_list[idx]["logic"] = self.logic_all
                     achievement_list[idx]["conditions"] = [cond_obj]
                 else:
@@ -928,6 +1045,7 @@ class AchievementSystem:
                             "name": name,
                             "unlock_title": unlock_title,
                             "enabled": True,
+                            "if_hidden": False,
                             "logic": self.logic_all,
                             "conditions": [cond_obj],
                         }

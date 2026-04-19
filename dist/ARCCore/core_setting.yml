@@ -19,6 +19,8 @@ LAND_PRICE=50
 LAND_SELL_REFUND_COEFFICIENT=0.9
 LAND_MIN_SIZE=5
 DEFAULT_FREE_LAND_BLOCKS=1500
+# 仅允许在领地内放置的方块（逗号分隔方块 ID）；列表中的方块无法在荒野放置；在领地内需为拥有者或授权玩家（与既有建造权限一致）。留空表示不限制
+LAND_ONLY_PLACE_BLOCKS=
 
 # 广播间隔
 BROADCAST_INTERVAL=120

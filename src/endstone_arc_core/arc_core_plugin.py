@@ -27,6 +27,9 @@ from endstone_arc_core.KillRewardConfig import KillRewardConfig, normalize_entit
 from endstone_arc_core.arc_error_log import append_arc_error_log, format_context_lines
 
 MAIN_PATH = 'plugins/ARCCore'
+# 领地无权限操作日志目录（按日期分文件），位于弧光核心数据目录下
+LAND_INTERACT_LOG_DIR_NAME = 'land_inteteact_log'
+
 
 class ARCCorePlugin(Plugin):
     api_version = "0.10"
@@ -165,6 +168,8 @@ class ARCCorePlugin(Plugin):
             self.land_min_size = int(self.land_min_size)
         except (ValueError, TypeError):
             self.land_min_size = 5  # 默认最小尺寸为5
+        self._land_only_place_block_ids = frozenset()
+        self._refresh_land_only_place_blocks()
         self.player_new_land_creation_info = {}  # {name: {'dimension': str, 'min_x': int, 'max_x': int, 'min_y': int, 'max_y': int, 'min_z': int, 'max_z': int}}
         self.player_land_pos1 = {}  # {name: {'dimension': str, 'x': int, 'y': int, 'z': int}} 暂存/landpos1
 
@@ -183,6 +188,7 @@ class ARCCorePlugin(Plugin):
         self.position_thread = None
         self.position_thread_running = False
         self.position_thread_lock = threading.Lock()
+        self._land_interact_log_lock = threading.Lock()
         self.position_check_interval = 0.5  # 每0.5秒检查一次，比原来的1.25秒更快
 
 
@@ -364,11 +370,11 @@ class ARCCorePlugin(Plugin):
         self.dtwt_plugin = self.server.plugin_manager.get_plugin('arc_dtwt')
         print('[ARC Core]DTWT plugin loaded:', self.dtwt_plugin is not None)
 
-        # 首富头衔：启动时做一次同步
+        # 首富头衔：启动时加载缓存并与财富榜核对（xuid 未变则不撤销，避免清掉已佩戴的首富头衔）
         try:
             self._ensure_richest_title_definition()
             self._load_current_richest_xuid_from_db()
-            self._update_richest_title_if_needed(force=True)
+            self._update_richest_title_if_needed()
         except Exception:
             pass
 
@@ -604,13 +610,12 @@ class ARCCorePlugin(Plugin):
             time_str = f"{now.year}.{now.month}.{now.day}-{now.hour}:{now.minute:02d}"
             equipped = self.title_system.get_equipped_title(event.player)
             name = event.player.name
-            player_prefix = self.language_manager.GetText('TITLE_CHAT_PLAYER_PREFIX')
-            # §l 加粗 "[头衔]玩家名" 部分，头衔按稀有度上色，§r 重置后时间为细体
-            rarity_color = self.title_system.get_title_rarity_color(equipped) if equipped else "§f"
+            # §颜色[头衔]§r名字：稀有色仅作用在括号段，§r 后时间为默认样式
             if equipped:
-                line1 = f"§l{rarity_color}[{equipped}]{player_prefix}{name}§r({time_str})："
+                rarity_color = self.title_system.get_title_rarity_color(equipped)
+                line1 = f"{rarity_color}[{equipped}]§r{name}({time_str})："
             else:
-                line1 = f"§l{player_prefix}{name}§r({time_str})："
+                line1 = f"{name}({time_str})："
             formatted = line1 + "\n" + raw_message
             event.is_cancelled = True
             self.server.broadcast_message(formatted)
@@ -649,6 +654,13 @@ class ARCCorePlugin(Plugin):
         if not self.land_operation_check(event.player, event.block.location.dimension.name,
                                     (event.block.location.x, event.block.location.y, event.block.location.z)):
             event.is_cancelled = True
+            self._append_land_permission_denied_log(
+                "block_break",
+                event.player,
+                event.block.location.dimension.name,
+                (event.block.location.x, event.block.location.y, event.block.location.z),
+                target_description=str(target_desc),
+            )
         if not event.is_cancelled and self._is_frame_block(event.block):
             land_id = self.get_land_at_pos(
                 event.block.location.dimension.name,
@@ -660,6 +672,15 @@ class ARCCorePlugin(Plugin):
                 if land_info and not land_info.get('allow_frame', False):
                     event.is_cancelled = True
                     event.player.send_message(self.language_manager.GetText('LAND_FRAME_PROTECT_HINT'))
+                    self._append_land_permission_denied_log(
+                        "frame_block_break",
+                        event.player,
+                        event.block.location.dimension.name,
+                        (event.block.location.x, event.block.location.y, event.block.location.z),
+                        land_id=land_id,
+                        target_description=str(target_desc),
+                        note="allow_frame_disabled",
+                    )
         if not self.spawn_protect_check(event.player, event.block.location.dimension.name,
                                     (event.block.location.x, event.block.location.y, event.block.location.z)):
             event.is_cancelled = True
@@ -681,21 +702,127 @@ class ARCCorePlugin(Plugin):
             return False
         return bid in self.land_system.get_public_land_interact_block_blacklist()
 
+    def _arc_block_type_descriptor(self, block) -> Optional[str]:
+        """从 Block 解析类型 ID（官方 Block API 以 type 为准；identifier / data.type 作补充）"""
+        if block is None:
+            return None
+        raw_type = getattr(block, 'type', None)
+        if raw_type is not None:
+            text = str(raw_type).strip()
+            if text:
+                return text
+        ident = getattr(block, 'identifier', None)
+        if ident is not None:
+            text = str(ident).strip()
+            if text:
+                return text
+        data = getattr(block, 'data', None)
+        if data is not None:
+            dt = getattr(data, 'type', None)
+            if dt is not None:
+                text = str(dt).strip()
+                if text:
+                    return text
+        return None
+
+    @staticmethod
+    def _arc_is_air_block_type(desc: Optional[str]) -> bool:
+        if not desc:
+            return True
+        normalized = str(desc).lower().strip()
+        return normalized in ('air', 'minecraft:air')
+
+    def _arc_block_place_event_location(self, event: BlockPlaceEvent):
+        """放置坐标优先取 block_placed（与官方 BlockPlaceEvent 一致），否则 BlockEvent.block。"""
+        placed = getattr(event, 'block_placed', None)
+        if placed is not None and getattr(placed, 'location', None) is not None:
+            return placed.location
+        fallback = getattr(event, 'block', None)
+        if fallback is not None and getattr(fallback, 'location', None) is not None:
+            return fallback.location
+        return None
+
+    def _arc_placed_block_type_from_place_event(self, event: BlockPlaceEvent) -> str:
+        """
+        BlockPlaceEvent：block_placed 为「放置后的方块」；若绑定层仍为空气则依次尝试
+        block_placed_state、主手物品 ItemType.id、BlockEvent.block。
+        """
+        placed = getattr(event, 'block_placed', None)
+        desc = self._arc_block_type_descriptor(placed)
+        if desc is not None and not self._arc_is_air_block_type(desc):
+            return desc
+
+        placed_state = getattr(event, 'block_placed_state', None)
+        if placed_state is not None:
+            st_type = getattr(placed_state, 'type', None)
+            if st_type is not None:
+                text = str(st_type).strip()
+                if text and not self._arc_is_air_block_type(text):
+                    return text
+            state_block = getattr(placed_state, 'block', None)
+            desc = self._arc_block_type_descriptor(state_block)
+            if desc is not None and not self._arc_is_air_block_type(desc):
+                return desc
+
+        player = getattr(event, 'player', None)
+        if player is not None:
+            inv = getattr(player, 'inventory', None)
+            if inv is not None:
+                stack = getattr(inv, 'item_in_main_hand', None)
+                if stack is not None:
+                    item_type = getattr(stack, 'type', None)
+                    if item_type is not None:
+                        item_id = getattr(item_type, 'id', None)
+                        if item_id:
+                            return str(item_id)
+                        if isinstance(item_type, str) and item_type.strip():
+                            return item_type.strip()
+
+        eb = getattr(event, 'block', None)
+        desc = self._arc_block_type_descriptor(eb)
+        if desc is not None:
+            return desc
+        return 'block'
+
     @event_handler
     def on_block_place(self, event: BlockPlaceEvent):
-        block_loc = event.block.location
-        target_desc = getattr(event.block, 'identifier', getattr(event.block, 'type', 'block'))
+        block_loc = self._arc_block_place_event_location(event)
+        if block_loc is None:
+            return
+        target_desc = self._arc_placed_block_type_from_place_event(event)
         self._send_op_debug_message(
             event.player, 'BlockPlace', str(target_desc),
             block_loc.dimension.name, block_loc.x, block_loc.y, block_loc.z
         )
         if event.player.is_op:
             return
-        if not self.land_operation_check(event.player, event.block.location.dimension.name,
-                                    (event.block.location.x, event.block.location.y, event.block.location.z)):
+        dimension_name = block_loc.dimension.name
+        place_pos = (block_loc.x, block_loc.y, block_loc.z)
+        if not self.land_only_place_wilderness_check(
+            event.player,
+            dimension_name,
+            place_pos,
+            target_desc,
+        ):
             event.is_cancelled = True
-        if not self.spawn_protect_check(event.player, event.block.location.dimension.name,
-                                    (event.block.location.x, event.block.location.y, event.block.location.z)):
+            self._append_land_permission_denied_log(
+                "block_place_land_only",
+                event.player,
+                dimension_name,
+                place_pos,
+                target_description=str(target_desc),
+                note="wilderness",
+            )
+        if not self.land_operation_check(event.player, dimension_name, place_pos):
+            event.is_cancelled = True
+            self._append_land_permission_denied_log(
+                "block_place",
+                event.player,
+                dimension_name,
+                place_pos,
+                target_description=str(target_desc),
+            )
+        if not self.spawn_protect_check(event.player, dimension_name, place_pos):
             event.is_cancelled = True
         return
     
@@ -764,8 +891,18 @@ class ARCCorePlugin(Plugin):
             pos = (block_location.x, block_location.y, block_location.z)
 
             # 检查是否在领地内且不是领地主人
+            block_target_desc = str(
+                getattr(block, 'identifier', getattr(block, 'type', 'block'))
+            )
             if not self.land_interact_check(event.player, dimension, pos):
                 event.is_cancelled = True
+                self._append_land_permission_denied_log(
+                    "block_interact",
+                    event.player,
+                    dimension,
+                    pos,
+                    target_description=block_target_desc,
+                )
             elif self._is_frame_block(block):
                 land_id = self.get_land_at_pos(dimension, int(block_location.x), int(block_location.z), int(block_location.y))
                 if land_id is not None:
@@ -773,6 +910,15 @@ class ARCCorePlugin(Plugin):
                     if land_info and not land_info.get('allow_frame', False):
                         event.is_cancelled = True
                         event.player.send_message(self.language_manager.GetText('LAND_FRAME_PROTECT_HINT'))
+                        self._append_land_permission_denied_log(
+                            "frame_interact",
+                            event.player,
+                            dimension,
+                            pos,
+                            land_id=land_id,
+                            target_description=block_target_desc,
+                            note="allow_frame_disabled",
+                        )
         except Exception as e:
             pass
             # self.logger.error(f"[ARC Core] on_player_interact error: {str(e)}")
@@ -848,6 +994,14 @@ class ARCCorePlugin(Plugin):
                 if not self._check_land_permission(event.player, land_info):
                     event.is_cancelled = True
                     event.player.send_message(self.language_manager.GetText('LAND_ACTOR_INTERACTION_DENIED'))
+                    self._append_land_permission_denied_log(
+                        "actor_interact",
+                        event.player,
+                        dimension,
+                        (float(ax), float(ay), float(az)),
+                        land_id=land_id,
+                        target_description=str(target_desc),
+                    )
 
     @event_handler
     def on_actor_damage(self, event: ActorDamageEvent):
@@ -891,6 +1045,15 @@ class ARCCorePlugin(Plugin):
                 if not land_info.get('allow_actor_damage', False):
                     event.is_cancelled = True
                     attacker.send_message(self.language_manager.GetText('LAND_ACTOR_DAMAGE_DENIED'))
+                    self._append_land_permission_denied_log(
+                        "actor_damage",
+                        attacker,
+                        dimension,
+                        (float(ax), float(ay), float(az)),
+                        land_id=land_id,
+                        target_description=str(target_desc),
+                        note="public_land_actor_damage_disabled",
+                    )
                     return
                 protected = self._get_public_land_protected_entities()
                 # print("entity",event.actor.type, "public land protected entities", protected)
@@ -898,19 +1061,30 @@ class ARCCorePlugin(Plugin):
                 if damaged_entity_type and damaged_entity_type in protected:
                     event.is_cancelled = True
                     attacker.send_message(self.language_manager.GetText('LAND_ACTOR_DAMAGE_DENIED'))
+                    self._append_land_permission_denied_log(
+                        "actor_damage",
+                        attacker,
+                        dimension,
+                        (float(ax), float(ay), float(az)),
+                        land_id=land_id,
+                        target_description=str(target_desc),
+                        note="public_land_protected_entity",
+                    )
                 return
-            # 非公共领地：未开放生物伤害时仅主人/授权用户可造成伤害
+            # 非公共领地：未开放生物伤害时仅主人/授权用户可造成伤害（与方块互动等统一走权限判定）
             if not land_info.get('allow_actor_damage', False):
-                attacker_xuid = self.get_player_xuid_by_name(attacker.name)
-                if attacker_xuid is None:
+                if not self._check_land_permission(attacker, land_info):
                     event.is_cancelled = True
                     attacker.send_message(self.language_manager.GetText('LAND_ACTOR_DAMAGE_DENIED'))
-                    return
-                owner_xuid = land_info['owner_xuid']
-                shared_users = land_info.get('shared_users', [])
-                if owner_xuid != attacker_xuid and attacker_xuid not in shared_users:
-                    event.is_cancelled = True
-                    attacker.send_message(self.language_manager.GetText('LAND_ACTOR_DAMAGE_DENIED'))
+                    self._append_land_permission_denied_log(
+                        "actor_damage",
+                        attacker,
+                        dimension,
+                        (float(ax), float(ay), float(az)),
+                        land_id=land_id,
+                        target_description=str(target_desc),
+                        note="private_land_no_actor_damage_permission",
+                    )
 
     @event_handler
     def on_actor_death(self, event: ActorDeathEvent):
@@ -975,6 +1149,91 @@ class ARCCorePlugin(Plugin):
         except Exception as e:
             self.logger.error(f"Check land permission error: {str(e)}")
             return False
+
+    def _append_land_permission_denied_log(
+        self,
+        action_kind: str,
+        player: Player,
+        dimension: str,
+        pos: tuple,
+        *,
+        land_id: Optional[int] = None,
+        target_description: str = "",
+        note: str = "",
+    ) -> None:
+        """无权限领地操作被拒绝时写入日志：plugins/ARCCore/land_inteteact_log/YYYY-MM-DD.txt"""
+        try:
+            if not player or not dimension:
+                return
+            x = pos[0] if len(pos) > 0 else 0.0
+            y = pos[1] if len(pos) > 1 else None
+            z = pos[2] if len(pos) > 2 else 0.0
+            if land_id is None:
+                if y is not None:
+                    land_id = self.get_land_at_pos(
+                        dimension, int(math.floor(x)), int(math.floor(z)), int(math.floor(y))
+                    )
+                else:
+                    land_id = self.get_land_at_pos(
+                        dimension, int(math.floor(x)), int(math.floor(z))
+                    )
+            player_name = getattr(player, "name", "") or "?"
+            player_xuid = str(getattr(player, "xuid", "") or "")
+            ts = datetime.now().isoformat(timespec="seconds")
+            pos_y = "-" if y is None else str(y)
+            line = (
+                f"{ts}\t{action_kind}\tplayer={player_name}\txuid={player_xuid}\t"
+                f"dim={dimension}\tpos=({x},{pos_y},{z})\tland_id={land_id if land_id is not None else '-'}\t"
+                f"target={target_description or '-'}"
+            )
+            if note:
+                line += f"\tnote={note}"
+            line += "\n"
+            log_dir = Path(MAIN_PATH) / LAND_INTERACT_LOG_DIR_NAME
+            log_dir.mkdir(parents=True, exist_ok=True)
+            date_filename = datetime.now().strftime("%Y-%m-%d") + ".txt"
+            log_path = log_dir / date_filename
+            payload = line.encode("utf-8")
+            with self._land_interact_log_lock:
+                with open(log_path, "ab") as log_file:
+                    log_file.write(payload)
+        except Exception:
+            pass
+
+    def _refresh_land_only_place_blocks(self):
+        """从 LAND_ONLY_PLACE_BLOCKS 解析「仅允许在领地内放置」的方块 ID 集合（与 PUBLIC_LAND_INTERACT_BLOCK_BLACKLIST 相同的规范化规则）"""
+        raw = self.setting_manager.GetSetting("LAND_ONLY_PLACE_BLOCKS")
+        if raw is None or not str(raw).strip():
+            self._land_only_place_block_ids = frozenset()
+            return
+        parsed = set()
+        for part in str(raw).split(","):
+            part = part.strip()
+            if not part:
+                continue
+            normalized = part.lower()
+            if ":" not in normalized:
+                normalized = "minecraft:" + normalized
+            parsed.add(normalized)
+        self._land_only_place_block_ids = frozenset(parsed)
+
+    def land_only_place_wilderness_check(
+        self, player: Player, dimension: str, pos: tuple, block_identifier: str
+    ) -> bool:
+        """配置的方块禁止在荒野放置；是否允许建造/授权由 land_operation_check 判定。"""
+        bid = str(block_identifier or "").lower().strip()
+        if not bid:
+            return True
+        if ":" not in bid:
+            bid = "minecraft:" + bid
+        if bid not in self._land_only_place_block_ids:
+            return True
+        x, y, z = pos[0], (pos[1] if len(pos) > 1 else None), pos[2]
+        land_id = self.get_land_at_pos(dimension, x, z, y)
+        if land_id is None:
+            player.send_message(self.language_manager.GetText("LAND_ONLY_PLACE_WILDERNESS_HINT"))
+            return False
+        return True
 
     def land_operation_check(self, player: Player, dimension: str, pos: tuple):
         x, y, z = pos[0], (pos[1] if len(pos) > 1 else None), pos[2]
@@ -1255,8 +1514,8 @@ class ARCCorePlugin(Plugin):
         except Exception:
             return None
 
-    def _update_richest_title_if_needed(self, force: bool = False) -> None:
-        """金钱变化后调用：首富变化才迁移头衔；不变化则不做任何事。"""
+    def _update_richest_title_if_needed(self) -> None:
+        """金钱变化后调用：首富变化才迁移头衔；不变化则不做任何事（含插件启动：禁止因 force 重复撤销同一首富）。"""
         richest_title_name = self._get_richest_title_name()
         if not richest_title_name:
             return
@@ -1265,7 +1524,7 @@ class ARCCorePlugin(Plugin):
         new_richest_xuid = self._query_current_richest_xuid()
         old_richest_xuid = self.current_richest_xuid
 
-        if not force and new_richest_xuid == old_richest_xuid:
+        if new_richest_xuid == old_richest_xuid:
             return
 
         # 旧首富移除头衔（并取消佩戴）
@@ -1942,6 +2201,12 @@ class ARCCorePlugin(Plugin):
             on_click=self.show_title_manage_panel
         )
 
+        # 我的成就
+        my_info_panel.add_button(
+            self.language_manager.GetText('MY_ACHIEVEMENTS_BUTTON'),
+            on_click=self.show_my_achievements_hub
+        )
+
         # 返回主菜单
         my_info_panel.add_button(
             self.language_manager.GetText('RETURN_BUTTON_TEXT'),
@@ -1949,6 +2214,194 @@ class ARCCorePlugin(Plugin):
         )
 
         player.send_form(my_info_panel)
+
+    def show_my_achievements_hub(self, player: Player):
+        """我的成就：已解锁 / 未解锁。"""
+        panel = ActionForm(
+            title=self.language_manager.GetText('MY_ACHIEVEMENTS_HUB_TITLE'),
+            content=self.language_manager.GetText('MY_ACHIEVEMENTS_HUB_CONTENT'),
+            on_close=self.show_my_info_panel,
+        )
+        panel.add_button(
+            self.language_manager.GetText('MY_ACHIEVEMENTS_UNLOCKED_LIST_BUTTON'),
+            on_click=self.show_my_achievements_unlocked_list,
+        )
+        panel.add_button(
+            self.language_manager.GetText('MY_ACHIEVEMENTS_LOCKED_LIST_BUTTON'),
+            on_click=self.show_my_achievements_locked_list,
+        )
+        panel.add_button(
+            self.language_manager.GetText('RETURN_BUTTON_TEXT'),
+            on_click=self.show_my_info_panel,
+        )
+        player.send_form(panel)
+
+    def show_my_achievements_unlocked_list(self, player: Player):
+        rows = self.achievement_system.list_unlocked_achievements_for_player_ui(str(player.xuid))
+        panel = ActionForm(
+            title=self.language_manager.GetText('MY_ACHIEVEMENTS_UNLOCKED_TITLE'),
+            content=self.language_manager.GetText('MY_ACHIEVEMENTS_UNLOCKED_CONTENT'),
+            on_close=self.show_my_achievements_hub,
+        )
+        for achievement_row in rows:
+            unlock_title = str(achievement_row.get("unlock_title") or "").strip()
+            name = str(achievement_row.get("name") or unlock_title).strip()
+            enabled = bool(achievement_row.get("enabled", True))
+            if_hidden = bool(achievement_row.get("if_hidden", False))
+            hidden_tag = self.language_manager.GetText('MY_ACHIEVEMENTS_TAG_HIDDEN') if if_hidden else ""
+            status = self.language_manager.GetText('MY_ACHIEVEMENTS_STATUS_UNLOCKED')
+            disabled_tag = "" if enabled else self.language_manager.GetText('MY_ACHIEVEMENTS_TAG_DISABLED')
+            label = self.language_manager.GetText('MY_ACHIEVEMENTS_BUTTON_LABEL').format(
+                name,
+                unlock_title,
+                hidden_tag + disabled_tag + status,
+            )
+            panel.add_button(
+                label,
+                on_click=lambda p, ut=unlock_title: self.show_my_achievement_detail(p, ut, "unlocked"),
+            )
+        panel.add_button(
+            self.language_manager.GetText('RETURN_BUTTON_TEXT'),
+            on_click=self.show_my_achievements_hub,
+        )
+        player.send_form(panel)
+
+    def show_my_achievements_locked_list(self, player: Player):
+        rows = self.achievement_system.list_locked_achievements_for_player_ui(str(player.xuid))
+        panel = ActionForm(
+            title=self.language_manager.GetText('MY_ACHIEVEMENTS_LOCKED_TITLE'),
+            content=self.language_manager.GetText('MY_ACHIEVEMENTS_LOCKED_CONTENT'),
+            on_close=self.show_my_achievements_hub,
+        )
+        for achievement_row in rows:
+            unlock_title = str(achievement_row.get("unlock_title") or "").strip()
+            name = str(achievement_row.get("name") or unlock_title).strip()
+            enabled = bool(achievement_row.get("enabled", True))
+            status = self.language_manager.GetText('MY_ACHIEVEMENTS_STATUS_LOCKED')
+            disabled_tag = "" if enabled else self.language_manager.GetText('MY_ACHIEVEMENTS_TAG_DISABLED')
+            label = self.language_manager.GetText('MY_ACHIEVEMENTS_BUTTON_LABEL').format(
+                name,
+                unlock_title,
+                disabled_tag + status,
+            )
+            panel.add_button(
+                label,
+                on_click=lambda p, ut=unlock_title: self.show_my_achievement_detail(p, ut, "locked"),
+            )
+        panel.add_button(
+            self.language_manager.GetText('RETURN_BUTTON_TEXT'),
+            on_click=self.show_my_achievements_hub,
+        )
+        player.send_form(panel)
+
+    def _achievement_entity_label_for_player(self, entity_type_id: str) -> str:
+        raw = str(entity_type_id or "").strip()
+        if raw == "*":
+            return self.language_manager.GetText('ACHIEVEMENT_ENTITY_ANY_LABEL')
+        return self.entity_display_name_manager.get_display_name_or_identifier(raw)
+
+    def _format_player_achievement_condition_line(self, condition_data: dict) -> str:
+        if not isinstance(condition_data, dict):
+            return ""
+        achievement_system = self.achievement_system
+        ct = str(condition_data.get("condition_type") or condition_data.get("type") or "").strip()
+        try:
+            req = int(condition_data.get("required_count") or 0)
+        except (TypeError, ValueError):
+            req = 0
+        if ct == achievement_system.condition_type_kill_entity_sum:
+            target_ids = achievement_system._normalize_target_ids_list(condition_data.get("target_ids"))
+            labels = [self._achievement_entity_label_for_player(x) for x in target_ids if str(x).strip()]
+            sep = self.language_manager.GetText('ACHIEVEMENT_CONDITION_NAME_LIST_SEP')
+            joined = sep.join(labels)
+            return self.language_manager.GetText('ACHIEVEMENT_CONDITION_KILL_SUM').format(req, joined)
+        if ct == achievement_system.condition_type_kill_entity:
+            tid = str(condition_data.get("target_id") or "").strip()
+            if tid == "*":
+                return self.language_manager.GetText('ACHIEVEMENT_CONDITION_KILL_ANY').format(req)
+            label = self._achievement_entity_label_for_player(tid)
+            return self.language_manager.GetText('ACHIEVEMENT_CONDITION_KILL_ONE').format(label, req)
+        return self.language_manager.GetText('ACHIEVEMENT_CONDITION_UNKNOWN').format(ct, req)
+
+    def _build_my_achievement_detail_body(
+        self,
+        achievement_data: dict,
+        is_unlocked: bool,
+    ) -> str:
+        name = str(achievement_data.get("name") or "").strip()
+        unlock_title = str(achievement_data.get("unlock_title") or "").strip()
+        enabled = bool(achievement_data.get("enabled", True))
+        if_hidden = bool(achievement_data.get("if_hidden", False))
+        lines = []
+        lines.append(self.language_manager.GetText('ACHIEVEMENT_DETAIL_LINE_NAME').format(name))
+        lines.append(self.language_manager.GetText('ACHIEVEMENT_DETAIL_LINE_UNLOCK_TITLE').format(unlock_title))
+        if if_hidden:
+            lines.append(self.language_manager.GetText('ACHIEVEMENT_DETAIL_LINE_HIDDEN_TAG'))
+        st_key = (
+            'ACHIEVEMENT_DETAIL_STATUS_UNLOCKED_LINE'
+            if is_unlocked
+            else 'ACHIEVEMENT_DETAIL_STATUS_LOCKED_LINE'
+        )
+        lines.append(self.language_manager.GetText(st_key))
+        if not enabled:
+            lines.append(self.language_manager.GetText('ACHIEVEMENT_DETAIL_DISABLED_LINE'))
+        lines.append("")
+        lines.append(self.language_manager.GetText('ACHIEVEMENT_DETAIL_CONDITIONS_HEADER'))
+        cond_list = achievement_data.get("conditions") or []
+        if not cond_list:
+            lines.append(self.language_manager.GetText('ACHIEVEMENT_DETAIL_NO_CONDITIONS'))
+        else:
+            idx = 1
+            for cond in cond_list:
+                line = self._format_player_achievement_condition_line(cond)
+                lines.append(self.language_manager.GetText('ACHIEVEMENT_DETAIL_CONDITION_BULLET').format(idx, line))
+                idx += 1
+        defn = self.title_system.get_title_definition(unlock_title)
+        if defn:
+            rarity = str(defn.get("rarity") or "").strip()
+            desc = str(defn.get("description") or "").strip()
+            reward_money = defn.get("reward_money")
+            if rarity:
+                lines.append("")
+                lines.append(self.language_manager.GetText('ACHIEVEMENT_DETAIL_LINE_RARITY').format(rarity))
+            if desc:
+                lines.append(self.language_manager.GetText('ACHIEVEMENT_DETAIL_LINE_DESC').format(desc))
+            try:
+                rm = float(reward_money or 0)
+                if rm > 0:
+                    lines.append(
+                        self.language_manager.GetText('ACHIEVEMENT_DETAIL_LINE_REWARD_MONEY').format(
+                            self._format_money_display(rm)
+                        )
+                    )
+            except (TypeError, ValueError):
+                pass
+        return "\n".join(lines)
+
+    def show_my_achievement_detail(self, player: Player, unlock_title: str, return_mode: str):
+        achievement_row = self.achievement_system.get_achievement(unlock_title)
+        if not achievement_row:
+            player.send_message(self.language_manager.GetText('MY_ACHIEVEMENT_NOT_FOUND'))
+            if return_mode == "locked":
+                return self.show_my_achievements_locked_list(player)
+            return self.show_my_achievements_unlocked_list(player)
+
+        is_unlocked = self.achievement_system.player_has_unlocked_title(str(player.xuid), unlock_title)
+        body = self._build_my_achievement_detail_body(achievement_row, is_unlocked)
+        back_cb = (
+            self.show_my_achievements_locked_list
+            if return_mode == "locked"
+            else self.show_my_achievements_unlocked_list
+        )
+        panel = ActionForm(
+            title=self.language_manager.GetText('MY_ACHIEVEMENT_DETAIL_TITLE').format(
+                str(achievement_row.get("name") or unlock_title).strip()
+            ),
+            content=body,
+            on_close=back_cb,
+        )
+        panel.add_button(self.language_manager.GetText('RETURN_BUTTON_TEXT'), on_click=back_cb)
+        player.send_form(panel)
 
     def show_title_manage_panel(self, player: Player):
         """头衔管理：选择佩戴的头衔或取消佩戴"""
@@ -2556,82 +3009,50 @@ class ARCCorePlugin(Plugin):
             if stripped:
                 self.server.broadcast_message(stripped)
 
-    def _broadcast_checkin_rankings(self, player_display_name: str, today: str) -> None:
-        """签到成功后全服广播：完成提示、今日先后榜、累计次数榜（各最多 10 人）。"""
+    def _build_checkin_rank_texts(self, today: str):
+        """
+        构建签到排行榜文本：
+        - 今日最早签到前 10 名（使用 CHECKIN_CHAT_TODAY_RANK_EARLY）
+        - 累计签到前 10 名（使用 CHECKIN_CHAT_TOTAL_RANK）
+        返回 (today_text or None, total_text or None)
+        """
         rank_limit = 10
+        today_text = None
+        total_text = None
+
         try:
-            self.server.broadcast_message(
-                self.language_manager.GetText("CHECKIN_CHAT_ANNOUNCE").format(player_display_name)
-            )
-        except Exception as e:
-            if self.logger:
-                self.logger.error(f"{ColorFormat.RED}[ARC Core]checkin broadcast announce error: {e}")
-            return
-        try:
-            count_row = self.database_manager.query_one(
-                "SELECT COUNT(*) AS c FROM player_basic_info WHERE last_checkin_date = ?",
-                (today,),
-            )
-            n_today = int(count_row.get("c") or 0) if count_row else 0
             order_by_time = (
                 "(last_checkin_at IS NULL OR trim(last_checkin_at) = ''), last_checkin_at "
             )
             sep = self.language_manager.GetText("CHECKIN_CHAT_RANK_SEPARATOR")
             slot_key = "CHECKIN_CHAT_TODAY_RANK_SLOT"
-            if n_today <= rank_limit and n_today > 0:
-                today_rows = self.database_manager.query_all(
-                    "SELECT xuid, name FROM player_basic_info WHERE last_checkin_date = ? "
-                    "ORDER BY " + order_by_time + "ASC",
-                    (today,),
-                )
-                order_parts = []
-                for idx, row in enumerate(today_rows, start=1):
-                    display_name = self._rank_display_name_from_row(row)
-                    order_parts.append(
-                        self.language_manager.GetText(slot_key).format(idx, display_name)
-                    )
-                self._broadcast_chat_lines(
-                    self.language_manager.GetText("CHECKIN_CHAT_TODAY_RANK_ALL").format(
-                        n_today, sep.join(order_parts)
-                    )
-                )
-            elif n_today > rank_limit:
-                early_rows = self.database_manager.query_all(
-                    "SELECT xuid, name FROM player_basic_info WHERE last_checkin_date = ? "
-                    "ORDER BY " + order_by_time + "ASC LIMIT ?",
-                    (today, rank_limit),
-                )
-                late_rows = self.database_manager.query_all(
-                    "SELECT xuid, name FROM player_basic_info WHERE last_checkin_date = ? "
-                    "ORDER BY " + order_by_time + "DESC LIMIT ?",
-                    (today, rank_limit),
-                )
+
+            # 今日最早签到前 10 名
+            today_rows = self.database_manager.query_all(
+                "SELECT xuid, name FROM player_basic_info WHERE last_checkin_date = ? "
+                "ORDER BY " + order_by_time + "ASC LIMIT ?",
+                (today, rank_limit),
+            )
+            if today_rows:
                 early_parts = []
-                for idx, row in enumerate(early_rows, start=1):
+                for index, row in enumerate(today_rows, start=1):
                     display_name = self._rank_display_name_from_row(row)
                     early_parts.append(
-                        self.language_manager.GetText(slot_key).format(idx, display_name)
+                        self.language_manager.GetText(slot_key).format(
+                            index, display_name
+                        )
                     )
-                late_parts = []
-                for idx, row in enumerate(late_rows, start=1):
-                    display_name = self._rank_display_name_from_row(row)
-                    late_parts.append(
-                        self.language_manager.GetText(slot_key).format(idx, display_name)
-                    )
-                self._broadcast_chat_lines(
-                    self.language_manager.GetText("CHECKIN_CHAT_TODAY_RANK_EARLY").format(
-                        sep.join(early_parts)
-                    )
-                )
-                self._broadcast_chat_lines(
-                    self.language_manager.GetText("CHECKIN_CHAT_TODAY_RANK_LATE").format(
-                        sep.join(late_parts)
-                    )
-                )
+                today_text = self.language_manager.GetText(
+                    "CHECKIN_CHAT_TODAY_RANK_EARLY"
+                ).format(sep.join(early_parts))
         except Exception as e:
             if self.logger:
-                self.logger.error(f"{ColorFormat.RED}[ARC Core]checkin today rank broadcast error: {e}")
+                self.logger.error(
+                    f"{ColorFormat.RED}[ARC Core]build checkin today rank text error: {e}"
+                )
+
         try:
+            # 累计签到前 10 名
             total_rows = self.database_manager.query_all(
                 "SELECT xuid, name, total_checkin_count FROM player_basic_info "
                 "WHERE COALESCE(total_checkin_count, 0) > 0 "
@@ -2639,27 +3060,56 @@ class ARCCorePlugin(Plugin):
                 (rank_limit,),
             )
             if total_rows:
-                times_unit = self.language_manager.GetText("CHECKIN_RANK_TIMES_SUFFIX")
+                times_unit = self.language_manager.GetText(
+                    "CHECKIN_RANK_TIMES_SUFFIX"
+                )
                 total_parts = []
-                for idx, row in enumerate(total_rows, start=1):
+                for index, row in enumerate(total_rows, start=1):
                     display_name = self._rank_display_name_from_row(row)
                     try:
-                        cnt = int(row.get("total_checkin_count") or 0)
+                        checkin_times = int(row.get("total_checkin_count") or 0)
                     except (ValueError, TypeError):
-                        cnt = 0
+                        checkin_times = 0
                     total_parts.append(
-                        self.language_manager.GetText("CHECKIN_CHAT_TOTAL_RANK_SLOT").format(
-                            idx, display_name, cnt, times_unit
-                        )
+                        self.language_manager.GetText(
+                            "CHECKIN_CHAT_TOTAL_RANK_SLOT"
+                        ).format(index, display_name, checkin_times, times_unit)
                     )
-                self._broadcast_chat_lines(
-                    self.language_manager.GetText("CHECKIN_CHAT_TOTAL_RANK").format(
-                        self.language_manager.GetText("CHECKIN_CHAT_RANK_SEPARATOR").join(total_parts)
-                    )
+                total_text = self.language_manager.GetText(
+                    "CHECKIN_CHAT_TOTAL_RANK"
+                ).format(
+                    self.language_manager.GetText(
+                        "CHECKIN_CHAT_RANK_SEPARATOR"
+                    ).join(total_parts)
                 )
         except Exception as e:
             if self.logger:
-                self.logger.error(f"{ColorFormat.RED}[ARC Core]checkin total rank broadcast error: {e}")
+                self.logger.error(
+                    f"{ColorFormat.RED}[ARC Core]build checkin total rank text error: {e}"
+                )
+
+        return today_text, total_text
+
+    def _broadcast_checkin_rankings(self, player_display_name: str, today: str) -> None:
+        """签到成功后全服广播：完成提示、今日最早前 10 名、累计前 10 名（与面板复用同一套文本逻辑）。"""
+        try:
+            self.server.broadcast_message(
+                self.language_manager.GetText("CHECKIN_CHAT_ANNOUNCE").format(
+                    player_display_name
+                )
+            )
+        except Exception as e:
+            if self.logger:
+                self.logger.error(
+                    f"{ColorFormat.RED}[ARC Core]checkin broadcast announce error: {e}"
+                )
+            return
+
+        today_text, total_text = self._build_checkin_rank_texts(today)
+        if today_text:
+            self._broadcast_chat_lines(today_text)
+        if total_text:
+            self._broadcast_chat_lines(total_text)
 
     def show_daily_checkin_panel(self, player: Player):
         """每日签到：同一天仅一次，发放配置中的金钱与加权随机物品。"""
@@ -2675,12 +3125,29 @@ class ARCCorePlugin(Plugin):
         last_date = (row.get("last_checkin_date") if row else None) or ""
         last_date = str(last_date).strip()
         if last_date == today:
+            # 已签到玩家：在提示文案下方附带签到排行榜（只显示今日前 10 名 + 累计前 10 名）
+            content_lines = [self.language_manager.GetText("CHECKIN_ALREADY_DONE")]
+            try:
+                today_text, total_text = self._build_checkin_rank_texts(today)
+                if today_text:
+                    content_lines.append(today_text)
+                if total_text:
+                    content_lines.append(total_text)
+            except Exception as e:
+                if self.logger:
+                    self.logger.error(
+                        f"{ColorFormat.RED}[ARC Core]show_daily_checkin_panel rank build error: {e}"
+                    )
+
             panel = ActionForm(
                 title=self.language_manager.GetText("CHECKIN_PANEL_TITLE"),
-                content=self.language_manager.GetText("CHECKIN_ALREADY_DONE"),
+                content="\n\n".join(content_lines),
                 on_close=self.show_main_menu,
             )
-            panel.add_button(self.language_manager.GetText("RETURN_BUTTON_TEXT"), on_click=self.show_main_menu)
+            panel.add_button(
+                self.language_manager.GetText("RETURN_BUTTON_TEXT"),
+                on_click=self.show_main_menu,
+            )
             player.send_form(panel)
             return
 
@@ -3190,13 +3657,38 @@ class ARCCorePlugin(Plugin):
         except Exception as e:
             self.logger.error(f"{ColorFormat.RED}[ARC Core]Add pending invite rewards error: {str(e)}")
 
-    def get_top_richest_players(self, top_count: int) -> Dict[str, float]:
-        rich_list = {}
+    def get_top_richest_players(self, top_count: int):
+        """
+        获取存款排行前 top_count 名玩家的信息列表。
+        返回值为列表，每项包含：
+        {
+            "xuid": str,
+            "display_name": str,  # 可能带有头衔/颜色的展示名
+            "money": float,
+            "is_op": bool or None,  # None 表示未知
+        }
+        """
+        rich_list = []
         for entry in self.economy.get_top_richest_xuids(top_count):
             try:
-                player_name = self.get_player_name_by_xuid(entry['xuid'])
-                if player_name:
-                    rich_list[player_name] = self._round_money(entry['money'])
+                player_xuid = entry.get("xuid")
+                if not player_xuid:
+                    continue
+                money_value = self._round_money(entry.get("money", 0.0))
+                display_name = (
+                    self.get_player_name_by_xuid(player_xuid, return_with_title=True)
+                    or self.get_player_name_by_xuid(player_xuid, return_with_title=False)
+                    or str(player_xuid)
+                )
+                is_op = self.get_offline_player_op_status_by_xuid(player_xuid)
+                rich_list.append(
+                    {
+                        "xuid": player_xuid,
+                        "display_name": display_name,
+                        "money": money_value,
+                        "is_op": is_op,
+                    }
+                )
             except Exception:
                 continue
         return rich_list
@@ -3409,34 +3901,41 @@ class ARCCorePlugin(Plugin):
         return error_code, target_player, amount
 
     def show_money_rank_panel(self, player: Player):
-        # 获取更多的玩家数据以便过滤后仍有足够的显示数量
+        # 为了在隐藏 OP 时仍能展示足够名次，这里多取一些再在内存中过滤
         initial_count = 20 if self.hide_op_in_money_ranking else 10
-        rank_dict = self.get_top_richest_players(initial_count)
-        
-        # 如果启用了隐藏OP功能，在业务逻辑层过滤OP玩家
-        filtered_rank_dict = {}
-        for player_name, player_money in rank_dict.items():
-            if self.hide_op_in_money_ranking:
-                # 检查玩家是否为OP
-                is_op = self.get_offline_player_op_status(player_name)
-                if is_op is True:
-                    continue  # 跳过OP玩家
-            filtered_rank_dict[player_name] = player_money
-            # 如果已经有足够的显示数量，停止添加
-            if len(filtered_rank_dict) >= 10:
+        rich_entries = self.get_top_richest_players(initial_count)
+
+        filtered_entries = []
+        for entry in rich_entries:
+            if self.hide_op_in_money_ranking and entry.get("is_op") is True:
+                # 隐藏 OP 玩家
+                continue
+            filtered_entries.append(entry)
+            if len(filtered_entries) >= 10:
                 break
-        
-        rank_list = []
-        for i, (player_name, player_money) in enumerate(filtered_rank_dict.items()):
-            rank_list.append(
-                self.language_manager.GetText('MONEY_RANK_INFO_TEXT').format(
-                    i + 1, player_name, self._format_money_display(player_money)))
-        
+
+        rank_lines = []
+        for index, entry in enumerate(filtered_entries, start=1):
+            rank_lines.append(
+                self.language_manager.GetText("MONEY_RANK_INFO_TEXT").format(
+                    index,
+                    entry.get("display_name", ""),
+                    self._format_money_display(entry.get("money", 0.0)),
+                )
+            )
+
+        rank_content = "\n".join(rank_lines)
+        player_balance = self._format_money_display(self.get_player_money(player))
+        player_rank = self.get_player_money_rank(player)
+
         rank_panel = ActionForm(
-            title=self.language_manager.GetText('MONEY_RANK_PANEL_TITLE'),
-            content='\n'.join(rank_list) + '\n' + self.language_manager.GetText('MONEY_RANK_PLYAER_RANK_INFO_TEXT').format(
-                self._format_money_display(self.get_player_money(player)), self.get_player_money_rank(player)),
-            on_close=self.show_bank_main_menu
+            title=self.language_manager.GetText("MONEY_RANK_PANEL_TITLE"),
+            content=rank_content
+            + "\n"
+            + self.language_manager.GetText("MONEY_RANK_PLYAER_RANK_INFO_TEXT").format(
+                player_balance, player_rank
+            ),
+            on_close=self.show_bank_main_menu,
         )
         player.send_form(rank_panel)
     
@@ -6054,9 +6553,11 @@ class ARCCorePlugin(Plugin):
             name = str(achievement_row.get("name") or "").strip()
             unlock_title = str(achievement_row.get("unlock_title") or "").strip()
             enabled = int(achievement_row.get("enabled") or 0) == 1
+            if_hidden = bool(achievement_row.get("if_hidden", False))
             condition_count = len(self.achievement_system.list_conditions(unlock_title))
             status = "§aON§r" if enabled else "§cOFF§r"
-            label = f"{status} {name}\n头衔: {unlock_title} | 条件数: {condition_count} | 逻辑: all"
+            hid = self.language_manager.GetText('OP_ACHIEVEMENT_HIDDEN_TAG') if if_hidden else ""
+            label = f"{hid}{status} {name}\n头衔: {unlock_title} | 条件数: {condition_count} | 逻辑: all"
             panel.add_button(
                 label,
                 on_click=lambda p, ut=unlock_title: self.show_op_achievement_edit_panel(p, ut),
@@ -6082,9 +6583,14 @@ class ARCCorePlugin(Plugin):
             placeholder="1=启用 0=禁用",
             default_value="1",
         )
+        hidden_input = TextInput(
+            label=self.language_manager.GetText("OP_ACHIEVEMENT_FIELD_IF_HIDDEN"),
+            placeholder=self.language_manager.GetText("OP_ACHIEVEMENT_FIELD_IF_HIDDEN_HINT"),
+            default_value="0",
+        )
         form = ModalForm(
             title=self.language_manager.GetText("OP_ACHIEVEMENT_CREATE_TITLE"),
-            controls=[name_input, title_input, enabled_input],
+            controls=[name_input, title_input, enabled_input, hidden_input],
             on_close=self.show_op_achievement_manage_panel,
             on_submit=self._do_op_achievement_create,
         )
@@ -6104,11 +6610,15 @@ class ARCCorePlugin(Plugin):
         name = str(data[0] or "").strip()
         unlock_title = str(data[1] or "").strip()
         enabled = str(data[2] or "1").strip() not in ["0", "false", "False", "off", "OFF"]
+        if_hidden = False
+        if len(data) >= 4:
+            if_hidden = str(data[3] or "0").strip() in ["1", "true", "True", "yes", "YES", "on", "ON"]
 
         ok = self.achievement_system.create_achievement(
             name=name,
             unlock_title=unlock_title,
             enabled=enabled,
+            if_hidden=if_hidden,
         )
         if ok:
             player.send_message(self.language_manager.GetText("OP_ACHIEVEMENT_SAVE_SUCCESS"))
@@ -6126,6 +6636,7 @@ class ARCCorePlugin(Plugin):
         name = str(achievement_row.get("name") or "").strip()
         current_unlock_title = str(achievement_row.get("unlock_title") or "").strip()
         enabled = int(achievement_row.get("enabled") or 0) == 1
+        if_hidden = bool(achievement_row.get("if_hidden", False))
         condition_rows = self.achievement_system.list_conditions(current_unlock_title)
 
         panel = ActionForm(
@@ -6133,6 +6644,7 @@ class ARCCorePlugin(Plugin):
             content=(
                 f"头衔: {current_unlock_title}\n"
                 f"状态: {'启用' if enabled else '禁用'}\n"
+                f"隐藏: {'是' if if_hidden else '否'}\n"
                 "逻辑: all\n"
                 f"条件数: {len(condition_rows)}\n"
                 "说明: 全部条件满足后才会解锁。"
@@ -6171,6 +6683,17 @@ class ARCCorePlugin(Plugin):
             toggle_text,
             on_click=lambda p, ut=current_unlock_title, en=enabled: self._do_op_achievement_toggle(p, ut, not en),
         )
+        hidden_toggle = (
+            self.language_manager.GetText("OP_ACHIEVEMENT_CLEAR_HIDDEN_BUTTON")
+            if if_hidden
+            else self.language_manager.GetText("OP_ACHIEVEMENT_SET_HIDDEN_BUTTON")
+        )
+        panel.add_button(
+            hidden_toggle,
+            on_click=lambda p, ut=current_unlock_title, h=if_hidden: self._do_op_achievement_toggle_hidden(
+                p, ut, not h
+            ),
+        )
         panel.add_button(
             self.language_manager.GetText("OP_ACHIEVEMENT_DELETE_BUTTON"),
             on_click=lambda p, ut=current_unlock_title: self._do_op_achievement_delete(p, ut),
@@ -6200,9 +6723,14 @@ class ARCCorePlugin(Plugin):
             placeholder="1=启用 0=禁用",
             default_value="1" if int(achievement_row.get("enabled") or 0) == 1 else "0",
         )
+        hidden_input = TextInput(
+            label=self.language_manager.GetText("OP_ACHIEVEMENT_FIELD_IF_HIDDEN"),
+            placeholder=self.language_manager.GetText("OP_ACHIEVEMENT_FIELD_IF_HIDDEN_HINT"),
+            default_value="1" if bool(achievement_row.get("if_hidden", False)) else "0",
+        )
         form = ModalForm(
             title=f"编辑成就信息: {unlock_title}",
-            controls=[name_input, title_input, enabled_input],
+            controls=[name_input, title_input, enabled_input, hidden_input],
             on_close=lambda p, ut=unlock_title: self.show_op_achievement_edit_panel(p, ut),
             on_submit=lambda p, json_str, ut=unlock_title: self._do_op_achievement_save_meta(p, json_str, ut),
         )
@@ -6222,12 +6750,16 @@ class ARCCorePlugin(Plugin):
         name = str(data[0] or "").strip()
         new_unlock_title = str(data[1] or "").strip()
         enabled = str(data[2] or "1").strip() not in ["0", "false", "False", "off", "OFF"]
+        if_hidden = False
+        if len(data) >= 4:
+            if_hidden = str(data[3] or "0").strip() in ["1", "true", "True", "yes", "YES", "on", "ON"]
 
         ok = self.achievement_system.update_achievement(
             old_unlock_title=old_unlock_title,
             name=name,
             new_unlock_title=new_unlock_title,
             enabled=enabled,
+            if_hidden=if_hidden,
         )
         if ok:
             player.send_message(self.language_manager.GetText("OP_ACHIEVEMENT_SAVE_SUCCESS"))
@@ -6406,6 +6938,14 @@ class ARCCorePlugin(Plugin):
 
     def _do_op_achievement_toggle(self, player: Player, unlock_title: str, enabled: bool):
         ok = self.achievement_system.set_achievement_enabled(unlock_title, bool(enabled))
+        if ok:
+            player.send_message(self.language_manager.GetText("OP_ACHIEVEMENT_SAVE_SUCCESS"))
+        else:
+            player.send_message(self.language_manager.GetText("OP_ACHIEVEMENT_SAVE_FAIL"))
+        self.show_op_achievement_edit_panel(player, unlock_title)
+
+    def _do_op_achievement_toggle_hidden(self, player: Player, unlock_title: str, if_hidden: bool):
+        ok = self.achievement_system.set_achievement_if_hidden(unlock_title, bool(if_hidden))
         if ok:
             player.send_message(self.language_manager.GetText("OP_ACHIEVEMENT_SAVE_SUCCESS"))
         else:
@@ -6944,6 +7484,7 @@ class ARCCorePlugin(Plugin):
                 self.land_min_distance = 0
             self.teleport_system.reload_config()
             self.land_system.reload_config()
+            self._refresh_land_only_place_blocks()
             self.hide_op_in_money_ranking = self.setting_manager.GetSetting('HIDE_OP_IN_MONEY_RANKING')
             if self.hide_op_in_money_ranking is None:
                 self.hide_op_in_money_ranking = True
@@ -7231,9 +7772,24 @@ class ARCCorePlugin(Plugin):
             self.hide_op_in_money_ranking = hide_op
             self._ensure_richest_title_definition()
             try:
-                self._update_richest_title_if_needed(force=True)
+                self._update_richest_title_if_needed()
             except Exception:
                 pass
+
+            # 仅修改首富头衔名称时财富榜第一人 xuid 不变，_update 会早退；此处补发新名称下的头衔
+            if old_richest != new_richest and self.current_richest_xuid:
+                try:
+                    grant_title = self._get_richest_title_name()
+                    rx = self.current_richest_xuid
+                    pname = self.get_player_name_by_xuid(rx, return_with_title=False)
+                    online_player = self.server.get_player(pname) if pname else None
+                    if online_player is not None:
+                        self.api_unlock_title(online_player, grant_title)
+                        self._update_player_name_tag(online_player)
+                    else:
+                        self.title_system.unlock_title_by_xuid(rx, grant_title)
+                except Exception:
+                    pass
 
             result = ActionForm(
                 title=self.language_manager.GetText('OP_ECONOMY_SETTINGS_TITLE'),
@@ -7998,10 +8554,19 @@ class ARCCorePlugin(Plugin):
             self.logger.error(f"[ARC Core]Process broadcast placeholders error: {str(e)}")
             return message  # 如果处理失败，返回原消息
 
+    def _format_death_broadcast_player_display(self, player: Player) -> str:
+        """死亡播报中的玩家展示名：§颜色[头衔]§r名字，与聊天/头顶名一致。"""
+        equipped = self.title_system.get_equipped_title(player)
+        raw_name = getattr(player, "name", "") or ""
+        if equipped:
+            rarity_color = self.title_system.get_title_rarity_color(equipped)
+            return f"{rarity_color}[{equipped}]§r{raw_name}§r"
+        return raw_name
+
     def _send_death_broadcast(self, event: PlayerDeathEvent):
         """发送死亡播报消息"""
         try:
-            player_name = event.player.name
+            player_name = self._format_death_broadcast_player_display(event.player)
             dimension_raw = event.player.location.dimension.name
             dimension = self._translate_dimension_name(dimension_raw)
             x = int(event.player.location.x)
