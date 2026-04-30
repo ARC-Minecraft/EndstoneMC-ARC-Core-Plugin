@@ -2,7 +2,7 @@
 """头衔系统：稀有度、介绍、解锁时间、解锁奖励；玩家解锁/佩戴，聊天展示。"""
 import json
 from datetime import datetime
-from typing import List, Optional, Dict, Any
+from typing import List, Optional, Dict, Any, Tuple
 
 from endstone import Player
 
@@ -320,28 +320,38 @@ class TitleSystem:
             "INSERT INTO " + self._table_equipped + " (xuid, title) VALUES (?, ?)", (xuid, title)
         )
 
-    def unlock_title(self, player: Player, title: str) -> bool:
-        """为玩家解锁头衔（API）。"""
+    def unlock_title(self, player: Player, title: str) -> Tuple[bool, bool]:
+        """为玩家解锁头衔（API）。返回 (是否成功, 是否本次新解锁)；已拥有该头衔时成功为 True、新解锁为 False。"""
         if not title or not title.strip():
-            return False
+            return False, False
         return self.unlock_title_by_xuid(self._xuid(player), title.strip())
 
-    def unlock_title_by_xuid(self, xuid: str, title: str, unlocked_at: Optional[str] = None) -> bool:
-        """按 xuid 为玩家解锁头衔，并记录解锁时间。"""
+    def unlock_title_by_xuid(self, xuid: str, title: str, unlocked_at: Optional[str] = None) -> Tuple[bool, bool]:
+        """按 xuid 为玩家解锁头衔并记录解锁时间。返回 (是否成功, 是否本次新解锁)。
+
+        已解锁时返回 (True, False)，避免重复发放头衔解锁奖励。
+        """
         if not xuid or not title or not title.strip():
-            return False
+            return False, False
         title = title.strip()
         if unlocked_at is None:
             unlocked_at = datetime.now().isoformat()
         try:
-            return bool(
+            if self.has_unlocked_title_by_xuid(xuid, title):
+                return True, False
+            ok = bool(
                 self.database_manager.execute(
-                    "INSERT OR REPLACE INTO " + self._table_unlock_time + " (xuid, title, unlocked_at) VALUES (?, ?, ?)",
+                    "INSERT INTO " + self._table_unlock_time + " (xuid, title, unlocked_at) VALUES (?, ?, ?)",
                     (xuid, title, unlocked_at),
                 )
             )
+            if ok:
+                return True, True
+            if self.has_unlocked_title_by_xuid(xuid, title):
+                return True, False
+            return False, False
         except Exception:
-            return False
+            return False, False
 
     def has_unlocked_title_by_xuid(self, xuid: str, title: str) -> bool:
         """查询玩家是否已在头衔解锁表中拥有该头衔。"""

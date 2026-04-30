@@ -575,12 +575,14 @@ class AchievementSystem:
             result.append(achievement_data)
         return result
 
-    def _mark_unlocked(self, xuid: str, unlock_title: str) -> None:
+    def _mark_unlocked(self, xuid: str, unlock_title: str) -> bool:
+        """写入成就已解锁；返回 True 表示本次实际新插入一行（首次解锁）。"""
         now_iso = datetime.now().isoformat()
-        self.database_manager.execute(
+        rowcount = self.database_manager.execute_and_get_rowcount(
             "INSERT OR IGNORE INTO " + self._table_unlocked + " (xuid, unlock_title, unlocked_at) VALUES (?, ?, ?)",
             (xuid, unlock_title, now_iso),
         )
+        return rowcount == 1
 
     def _achievement_conditions_met(self, xuid: str, achievement_data: Dict[str, Any]) -> bool:
         condition_list = achievement_data.get("conditions") or []
@@ -606,6 +608,8 @@ class AchievementSystem:
             return
         if self._is_unlocked(xuid, unlock_title):
             return
+        if self.player_has_unlocked_title(xuid, unlock_title):
+            return
         if not self._achievement_conditions_met(xuid, achievement_data):
             return
         self.title_system.ensure_title_definition(unlock_title)
@@ -614,13 +618,14 @@ class AchievementSystem:
         except Exception:
             pass
         # 条件已达成即写入成就解锁表；头衔发放失败不应导致成就进度丢失
-        self._mark_unlocked(xuid, unlock_title)
-        try:
-            msg = self.language_manager.GetText("ACHIEVEMENT_UNLOCKED_HINT")
-            if msg:
-                player.send_message(msg.format(unlock_title))
-        except Exception:
-            pass
+        first_unlock = self._mark_unlocked(xuid, unlock_title)
+        if first_unlock:
+            try:
+                msg = self.language_manager.GetText("ACHIEVEMENT_UNLOCKED_HINT")
+                if msg:
+                    player.send_message(msg.format(unlock_title))
+            except Exception:
+                pass
 
     def _check_and_unlock_for_kill_related_titles(self, player: Player, unlock_titles: Set[str]) -> None:
         for unlock_title in unlock_titles:
@@ -637,6 +642,8 @@ class AchievementSystem:
             if not unlock_title:
                 continue
             if self._is_unlocked(xuid, unlock_title):
+                continue
+            if self.player_has_unlocked_title(xuid, unlock_title):
                 continue
             self._try_unlock_one_achievement(player, achievement_data)
 

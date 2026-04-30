@@ -4,7 +4,7 @@ import math
 import random
 import threading
 import time
-from datetime import datetime
+from datetime import datetime, timedelta
 from pathlib import Path
 from typing import Dict, Any, Optional, Set
 
@@ -200,6 +200,13 @@ class ARCCorePlugin(Plugin):
             self.broadcast_interval = int(self.broadcast_interval)
         except (ValueError, TypeError):
             self.broadcast_interval = 300  # 默认5分钟（300秒）
+        self.small_horn_price_per_hour = self.setting_manager.GetSetting('SMALL_HORN_PRICE_PER_HOUR')
+        try:
+            self.small_horn_price_per_hour = int(self.small_horn_price_per_hour)
+            if self.small_horn_price_per_hour < 0:
+                self.small_horn_price_per_hour = 60
+        except (ValueError, TypeError):
+            self.small_horn_price_per_hour = 60
 
         # 新人欢迎系统
         self.newbie_welcome_file = Path(MAIN_PATH) / "newbie_welcome.txt"
@@ -359,6 +366,9 @@ class ARCCorePlugin(Plugin):
             broadcast_period = self.broadcast_interval * 20  # 转换为ticks (1秒 = 20 ticks)
             self.server.scheduler.run_task(self, self.send_broadcast_message, delay=broadcast_period, period=broadcast_period)
             self.logger.info(f"[ARC Core]Broadcast system started, interval: {self.broadcast_interval} seconds")
+        small_horn_period = 10 * 60 * 20  # 每10分钟
+        self.server.scheduler.run_task(self, self.send_small_horn_messages, delay=small_horn_period, period=small_horn_period)
+        self.logger.info("[ARC Core]Small horn system started, interval: 600 seconds")
 
         # 清道夫系统定时任务
         if self.enable_cleaner:
@@ -1436,6 +1446,8 @@ class ARCCorePlugin(Plugin):
     def init_database(self):
         self.init_player_basic_table()
         self.init_spawn_locations_table()
+        self.init_small_horn_orders_table()
+        self.init_cross_server_table()
         self.economy.init_economy_table()
         self.economy.upgrade_player_economy_table_to_float()
         self.land_system.init_land_tables()
@@ -1547,7 +1559,7 @@ class ARCCorePlugin(Plugin):
                 if new_online is not None:
                     self.api_unlock_title(new_online, richest_title_name)
                 else:
-                    self.title_system.unlock_title_by_xuid(new_richest_xuid, richest_title_name)
+                    _, _ = self.title_system.unlock_title_by_xuid(new_richest_xuid, richest_title_name)
             except Exception:
                 pass
 
@@ -1638,6 +1650,9 @@ class ARCCorePlugin(Plugin):
                 success = False
             if not self._add_column_if_not_exists('player_basic_info', 'last_checkin_at', 'TEXT'):
                 success = False
+            # 签到：连续签到天数（按自然日连续）
+            if not self._add_column_if_not_exists('player_basic_info', 'continuous_checkin_days', 'INTEGER DEFAULT 0'):
+                success = False
             
             return success
         except Exception as e:
@@ -1662,7 +1677,8 @@ class ARCCorePlugin(Plugin):
             'last_checkin_date': 'TEXT',  # 上次签到日期 YYYY-MM-DD
             'default_title_auto_equipped': 'INTEGER DEFAULT 0',  # 是否已做过进服自动佩戴头衔
             'total_checkin_count': 'INTEGER DEFAULT 0',  # 累计签到次数
-            'last_checkin_at': 'TEXT'  # 最近一次签到时间 ISO8601
+            'last_checkin_at': 'TEXT',  # 最近一次签到时间 ISO8601
+            'continuous_checkin_days': 'INTEGER DEFAULT 0'  # 连续签到天数
         }
         result = self.database_manager.create_table('player_basic_info', fields)
         
@@ -1702,6 +1718,7 @@ class ARCCorePlugin(Plugin):
                 'pending_invite_reward_times': 0,  # 初始无待领取邀请奖励
                 'default_title_auto_equipped': 0,
                 'total_checkin_count': 0,
+                'continuous_checkin_days': 0,
             }
             return self.database_manager.insert('player_basic_info', player_data)
         except Exception as e:
@@ -2026,6 +2043,30 @@ class ARCCorePlugin(Plugin):
         }
         return self.database_manager.create_table('spawn_locations', fields)
 
+    def init_small_horn_orders_table(self) -> bool:
+        """初始化小喇叭订单表。"""
+        fields = {
+            'id': 'INTEGER PRIMARY KEY AUTOINCREMENT',
+            'xuid': 'TEXT NOT NULL',
+            'content': 'TEXT NOT NULL',
+            'start_time': 'TEXT NOT NULL',
+            'valid_hours': 'INTEGER NOT NULL',
+            'end_time': 'TEXT NOT NULL',
+            'created_at': 'TEXT NOT NULL',
+        }
+        return self.database_manager.create_table('small_horn_orders', fields)
+
+    def init_cross_server_table(self) -> bool:
+        """初始化跨服传送目标表。"""
+        fields = {
+            'id': 'INTEGER PRIMARY KEY AUTOINCREMENT',
+            'server_name': 'TEXT NOT NULL',
+            'server_host': 'TEXT NOT NULL',
+            'server_port': 'INTEGER NOT NULL',
+            'created_at': 'TEXT NOT NULL',
+        }
+        return self.database_manager.create_table('cross_server_targets', fields)
+
     def update_spawn_location(self, dimension: str, coordinates: tuple) -> bool:
         """
         更新出生地信息
@@ -2091,6 +2132,7 @@ class ARCCorePlugin(Plugin):
             arc_menu.add_button(self.language_manager.GetText('MAIN_MENU_MY_INFO_NAME'), on_click=self.show_my_info_panel)
             arc_menu.add_button(self.language_manager.GetText('NEWBIE_GUIDE_BUTTON'), on_click=self.show_newbie_welcome_panel)
             arc_menu.add_button(self.language_manager.GetText('BANK_MENU_NAME'), on_click=self.show_bank_main_menu)
+            arc_menu.add_button(self.language_manager.GetText('SMALL_HORN_MENU_BUTTON'), on_click=self.show_small_horn_buy_panel)
             arc_menu.add_button(self.language_manager.GetText('TELEPORT_MENU_NAME'), on_click=self.show_teleport_menu)
             arc_menu.add_button(self.language_manager.GetText('LAND_MENU_NAME'), on_click=self.show_land_main_menu)
             if self.server.plugin_manager.get_plugin('ushop'):
@@ -2504,8 +2546,10 @@ class ARCCorePlugin(Plugin):
             equipped_before = self.title_system.get_equipped_title(player)
         except Exception:
             equipped_before = None
-        ok = self.title_system.unlock_title(player, title)
-        if ok:
+        unlock_ok, was_new_unlock = self.title_system.unlock_title(player, title)
+        if not unlock_ok:
+            return False
+        if was_new_unlock:
             self._grant_title_unlock_reward(player, title)
             # 若玩家当前未佩戴任何头衔，则自动佩戴刚解锁的头衔
             if not equipped_before:
@@ -2514,7 +2558,7 @@ class ARCCorePlugin(Plugin):
                     self._update_player_name_tag(player)
                 except Exception:
                     pass
-        return ok
+        return True
 
     def api_get_newbie_guide_text(self) -> str:
         """供其他插件调用：返回新手引导文本全文（与 `plugins/ARCCore/newbie_welcome.txt`、主菜单新手引导一致）。"""
@@ -2959,6 +3003,42 @@ class ARCCorePlugin(Plugin):
             pick_min, pick_max = pick_max, pick_min
         return pick_min, pick_max
 
+    def _get_checkin_non_negative_int_setting(self, setting_key: str, default_value: int = 0) -> int:
+        raw_value = self.setting_manager.GetSetting(setting_key)
+        try:
+            parsed_value = int(str(raw_value).strip())
+        except (ValueError, TypeError, AttributeError):
+            parsed_value = default_value
+        return max(0, parsed_value)
+
+    def _get_checkin_non_negative_money_setting(self, setting_key: str, default_value: float = 0.0) -> float:
+        raw_value = self.setting_manager.GetSetting(setting_key)
+        try:
+            parsed_value = float(str(raw_value).strip())
+        except (ValueError, TypeError, AttributeError):
+            parsed_value = default_value
+        return self._round_money(max(0.0, parsed_value))
+
+    @staticmethod
+    def _compute_next_continuous_checkin_days(last_checkin_date: str, current_days: int, today: str) -> int:
+        if not last_checkin_date:
+            return 1
+        try:
+            today_date = datetime.fromisoformat(today).date()
+            yesterday = (today_date - timedelta(days=1)).isoformat()
+        except ValueError:
+            return 1
+        if last_checkin_date == yesterday:
+            return max(1, int(current_days) + 1)
+        return 1
+
+    @staticmethod
+    def _calculate_checkin_top_rank_bonus_money(today_rank: int, top_rank_limit: int, step_money: float) -> float:
+        if today_rank <= 0 or top_rank_limit <= 0 or today_rank > top_rank_limit or step_money <= 0:
+            return 0.0
+        reward_multiplier = top_rank_limit - today_rank + 1
+        return round(step_money * reward_multiplier, 2)
+
     def get_checkin_config(self) -> Dict[str, Any]:
         raw_money = self.setting_manager.GetSetting("CHECKIN_DAILY_MONEY")
         try:
@@ -2968,12 +3048,26 @@ class ARCCorePlugin(Plugin):
         daily_money = self._round_money(daily_money)
 
         pick_min, pick_max = self._get_checkin_pick_range()
+        top_rank_limit = self._get_checkin_non_negative_int_setting("CHECKIN_TOP_RANK_LIMIT", 0)
+        top_rank_bonus_item_count = self._get_checkin_non_negative_int_setting(
+            "CHECKIN_TOP_RANK_BONUS_ITEM_COUNT", 0
+        )
+        top_rank_bonus_money_step = self._get_checkin_non_negative_money_setting(
+            "CHECKIN_TOP_RANK_BONUS_MONEY_STEP", 0.0
+        )
+        continuous_checkin_money_increment = self._get_checkin_non_negative_money_setting(
+            "CHECKIN_CONTINUOUS_DAYS_MONEY_INCREMENT", 0.0
+        )
 
         reward_list = self._parse_checkin_reward_list_raw(self.setting_manager.GetSetting("CHECKIN_REWARD_LIST"))
         return {
             "daily_money": daily_money,
             "pick_min": pick_min,
             "pick_max": pick_max,
+            "top_rank_limit": top_rank_limit,
+            "top_rank_bonus_item_count": top_rank_bonus_item_count,
+            "top_rank_bonus_money_step": top_rank_bonus_money_step,
+            "continuous_checkin_money_increment": continuous_checkin_money_increment,
             "reward_list": reward_list,
         }
 
@@ -3119,7 +3213,7 @@ class ARCCorePlugin(Plugin):
         player_xuid = str(player.xuid)
         today = self._today_checkin_date_str()
         row = self.database_manager.query_one(
-            "SELECT last_checkin_date FROM player_basic_info WHERE xuid = ?",
+            "SELECT last_checkin_date, continuous_checkin_days FROM player_basic_info WHERE xuid = ?",
             (player_xuid,),
         )
         last_date = (row.get("last_checkin_date") if row else None) or ""
@@ -3155,12 +3249,54 @@ class ARCCorePlugin(Plugin):
         daily_money = cfg["daily_money"]
         pick_min = cfg["pick_min"]
         pick_max = cfg["pick_max"]
+        top_rank_limit = cfg["top_rank_limit"]
+        top_rank_bonus_item_count = cfg["top_rank_bonus_item_count"]
+        top_rank_bonus_money_step = cfg["top_rank_bonus_money_step"]
+        continuous_checkin_money_increment = cfg["continuous_checkin_money_increment"]
         reward_list = cfg["reward_list"]
+
+        today_rank = 1
+        try:
+            signed_count_row = self.database_manager.query_one(
+                "SELECT COUNT(1) AS cnt FROM player_basic_info WHERE last_checkin_date = ?",
+                (today,),
+            )
+            today_signed_count = int((signed_count_row or {}).get("cnt") or 0)
+            today_rank = max(1, today_signed_count + 1)
+        except (ValueError, TypeError):
+            today_rank = 1
+
+        try:
+            current_continuous_days = int((row or {}).get("continuous_checkin_days") or 0)
+        except (ValueError, TypeError):
+            current_continuous_days = 0
+        next_continuous_days = self._compute_next_continuous_checkin_days(
+            last_date, current_continuous_days, today
+        )
+
+        rank_bonus_money = self._calculate_checkin_top_rank_bonus_money(
+            today_rank, top_rank_limit, top_rank_bonus_money_step
+        )
+        continuous_bonus_money = self._round_money(
+            max(0, next_continuous_days - 1) * continuous_checkin_money_increment
+        )
+        total_money = self._round_money(daily_money + rank_bonus_money + continuous_bonus_money)
+
         pick_count = random.randint(pick_min, pick_max) if pick_max >= pick_min else 0
         picked = self._weighted_sample_checkin_rewards(reward_list, pick_count)
+        bonus_picked = []
+        if (
+            top_rank_limit > 0
+            and today_rank <= top_rank_limit
+            and top_rank_bonus_item_count > 0
+            and reward_list
+        ):
+            bonus_picked = self._weighted_sample_checkin_rewards(
+                reward_list, top_rank_bonus_item_count
+            )
 
-        if daily_money > 0:
-            self.increase_player_money(player, daily_money)
+        if total_money > 0:
+            self.increase_player_money(player, total_money)
 
         item_lines = []
         for it in picked:
@@ -3176,11 +3312,26 @@ class ARCCorePlugin(Plugin):
                 pass
             item_lines.append(f"{item_id} x{cnt}")
 
+        bonus_item_lines = []
+        for it in bonus_picked:
+            item_id = it["item_id"]
+            cnt = int(it["item_count"])
+            if cnt <= 0:
+                continue
+            try:
+                self.server.dispatch_command(
+                    self.server.command_sender, f"give {player.name} {item_id} {cnt}"
+                )
+            except Exception:
+                pass
+            bonus_item_lines.append(f"{item_id} x{cnt}")
+
         now_iso = datetime.now().replace(microsecond=0).isoformat()
         ok = self.database_manager.execute(
             "UPDATE player_basic_info SET last_checkin_date = ?, last_checkin_at = ?, "
-            "total_checkin_count = COALESCE(total_checkin_count, 0) + 1, name = ? WHERE xuid = ?",
-            (today, now_iso, player.name, player_xuid),
+            "total_checkin_count = COALESCE(total_checkin_count, 0) + 1, continuous_checkin_days = ?, "
+            "name = ? WHERE xuid = ?",
+            (today, now_iso, next_continuous_days, player.name, player_xuid),
         )
         if not ok:
             self.report_arc_error(
@@ -3192,14 +3343,25 @@ class ARCCorePlugin(Plugin):
             announcer = self.get_player_name_by_xuid(player_xuid, return_with_title=True) or player.name
             self._broadcast_checkin_rankings(announcer, today)
 
-        if daily_money > 0:
+        if total_money > 0:
             money_line = self.language_manager.GetText("CHECKIN_SUCCESS_MONEY_LINE").format(
-                self._format_money_display(daily_money)
+                self._format_money_display(daily_money),
+                self._format_money_display(rank_bonus_money),
+                self._format_money_display(continuous_bonus_money),
+                self._format_money_display(total_money),
             )
         else:
             money_line = self.language_manager.GetText("CHECKIN_SUCCESS_NO_MONEY_LINE")
         items_text = "、".join(item_lines) if item_lines else self.language_manager.GetText("CHECKIN_NO_ITEM_REWARD")
         content = self.language_manager.GetText("CHECKIN_SUCCESS_CONTENT").format(money_line, items_text)
+        if bonus_item_lines:
+            content = (
+                content
+                + "\n\n"
+                + self.language_manager.GetText("CHECKIN_TOP_RANK_BONUS_ITEM_NOTICE").format(
+                    top_rank_limit, "、".join(bonus_item_lines)
+                )
+            )
 
         result_panel = ActionForm(
             title=self.language_manager.GetText("CHECKIN_PANEL_TITLE"),
@@ -3216,6 +3378,10 @@ class ARCCorePlugin(Plugin):
             self._format_money_display(cfg["daily_money"]),
             cfg["pick_min"],
             cfg["pick_max"],
+            cfg["top_rank_limit"],
+            cfg["top_rank_bonus_item_count"],
+            self._format_money_display(cfg["top_rank_bonus_money_step"]),
+            self._format_money_display(cfg["continuous_checkin_money_increment"]),
             len(cfg["reward_list"]),
         )
         hub = ActionForm(
@@ -3255,6 +3421,26 @@ class ARCCorePlugin(Plugin):
             placeholder="0",
             default_value=str(cfg["pick_max"]),
         )
+        top_rank_limit_input = TextInput(
+            label=self.language_manager.GetText("CHECKIN_CONFIG_TOP_RANK_LIMIT_LABEL"),
+            placeholder="0",
+            default_value=str(cfg["top_rank_limit"]),
+        )
+        top_rank_bonus_item_count_input = TextInput(
+            label=self.language_manager.GetText("CHECKIN_CONFIG_TOP_RANK_BONUS_ITEM_COUNT_LABEL"),
+            placeholder="0",
+            default_value=str(cfg["top_rank_bonus_item_count"]),
+        )
+        top_rank_bonus_money_step_input = TextInput(
+            label=self.language_manager.GetText("CHECKIN_CONFIG_TOP_RANK_BONUS_MONEY_STEP_LABEL"),
+            placeholder="0",
+            default_value=str(cfg["top_rank_bonus_money_step"]),
+        )
+        continuous_checkin_money_increment_input = TextInput(
+            label=self.language_manager.GetText("CHECKIN_CONFIG_CONTINUOUS_MONEY_INCREMENT_LABEL"),
+            placeholder="0",
+            default_value=str(cfg["continuous_checkin_money_increment"]),
+        )
 
         def try_save(p: Player, json_str: str):
             try:
@@ -3262,7 +3448,7 @@ class ARCCorePlugin(Plugin):
             except Exception:
                 p.send_message(self.language_manager.GetText("CHECKIN_CONFIG_SAVE_FAIL"))
                 return self.show_checkin_config_panel(p)
-            if not data or len(data) < 3:
+            if not data or len(data) < 7:
                 p.send_message(self.language_manager.GetText("CHECKIN_CONFIG_SAVE_FAIL"))
                 return self.show_checkin_config_panel(p)
             try:
@@ -3277,26 +3463,64 @@ class ARCCorePlugin(Plugin):
                 pick_max_v = int(str(data[2]).strip())
             except (ValueError, TypeError):
                 pick_max_v = 0
+            try:
+                top_rank_limit_v = int(str(data[3]).strip())
+            except (ValueError, TypeError):
+                top_rank_limit_v = 0
+            try:
+                top_rank_bonus_item_count_v = int(str(data[4]).strip())
+            except (ValueError, TypeError):
+                top_rank_bonus_item_count_v = 0
+            try:
+                top_rank_bonus_money_step_v = self._round_money(float(str(data[5]).strip()))
+            except (ValueError, TypeError):
+                top_rank_bonus_money_step_v = 0.0
+            try:
+                continuous_checkin_money_increment_v = self._round_money(float(str(data[6]).strip()))
+            except (ValueError, TypeError):
+                continuous_checkin_money_increment_v = 0.0
             if pick_min_v < 0:
                 pick_min_v = 0
             if pick_max_v < 0:
                 pick_max_v = 0
+            if top_rank_limit_v < 0:
+                top_rank_limit_v = 0
+            if top_rank_bonus_item_count_v < 0:
+                top_rank_bonus_item_count_v = 0
+            if top_rank_bonus_money_step_v < 0:
+                top_rank_bonus_money_step_v = 0.0
+            if continuous_checkin_money_increment_v < 0:
+                continuous_checkin_money_increment_v = 0.0
             if pick_min_v > pick_max_v:
                 pick_min_v, pick_max_v = pick_max_v, pick_min_v
             reward_entries = self.get_checkin_config()["reward_list"]
-            if pick_max_v > 0 and not reward_entries:
+            if (pick_max_v > 0 or (top_rank_limit_v > 0 and top_rank_bonus_item_count_v > 0)) and not reward_entries:
                 p.send_message(self.language_manager.GetText("CHECKIN_CONFIG_LIST_INVALID"))
                 return self.show_checkin_config_panel(p)
             self.setting_manager.SetSetting("CHECKIN_DAILY_MONEY", money_v)
             self.setting_manager.SetSetting("CHECKIN_REWARD_PICK_MIN", pick_min_v)
             self.setting_manager.SetSetting("CHECKIN_REWARD_PICK_MAX", pick_max_v)
             self.setting_manager.SetSetting("CHECKIN_REWARD_PICK_COUNT", pick_max_v)
+            self.setting_manager.SetSetting("CHECKIN_TOP_RANK_LIMIT", top_rank_limit_v)
+            self.setting_manager.SetSetting("CHECKIN_TOP_RANK_BONUS_ITEM_COUNT", top_rank_bonus_item_count_v)
+            self.setting_manager.SetSetting("CHECKIN_TOP_RANK_BONUS_MONEY_STEP", top_rank_bonus_money_step_v)
+            self.setting_manager.SetSetting(
+                "CHECKIN_CONTINUOUS_DAYS_MONEY_INCREMENT", continuous_checkin_money_increment_v
+            )
             p.send_message(self.language_manager.GetText("CHECKIN_CONFIG_SAVED"))
             self.show_checkin_config_panel(p)
 
         form = ModalForm(
             title=self.language_manager.GetText("CHECKIN_CONFIG_MONEY_PICK_MODAL_TITLE"),
-            controls=[money_input, pick_min_input, pick_max_input],
+            controls=[
+                money_input,
+                pick_min_input,
+                pick_max_input,
+                top_rank_limit_input,
+                top_rank_bonus_item_count_input,
+                top_rank_bonus_money_step_input,
+                continuous_checkin_money_increment_input,
+            ],
             on_close=self.show_checkin_config_panel,
             on_submit=try_save,
         )
@@ -3829,6 +4053,108 @@ class ARCCorePlugin(Plugin):
         )
         player.send_form(transfer_panel)
 
+    def show_small_horn_buy_panel(self, player: Player, hint_message: Optional[str] = None):
+        """显示小喇叭购买面板。"""
+        panel_title = self.language_manager.GetText('SMALL_HORN_MENU_TITLE')
+        if hint_message:
+            panel_title = hint_message
+
+        info_label = Label(
+            text=self.language_manager.GetText('SMALL_HORN_MENU_CONTENT').format(
+                self._format_money_display(self.small_horn_price_per_hour),
+                self._format_money_display(self.get_player_money(player))
+            )
+        )
+        valid_hours_input = TextInput(
+            label=self.language_manager.GetText('SMALL_HORN_HOURS_INPUT_LABEL'),
+            placeholder=self.language_manager.GetText('SMALL_HORN_HOURS_INPUT_PLACEHOLDER'),
+            default_value='1'
+        )
+        content_input = TextInput(
+            label=self.language_manager.GetText('SMALL_HORN_CONTENT_INPUT_LABEL'),
+            placeholder=self.language_manager.GetText('SMALL_HORN_CONTENT_INPUT_PLACEHOLDER')
+        )
+
+        def try_buy_small_horn(sender: Player, json_str: str):
+            try:
+                data = json.loads(json_str)
+            except Exception:
+                self.show_small_horn_buy_panel(sender, self.language_manager.GetText('SMALL_HORN_BUY_INVALID_INPUT'))
+                return
+
+            if len(data) < 3:
+                self.show_small_horn_buy_panel(sender, self.language_manager.GetText('SMALL_HORN_BUY_INVALID_INPUT'))
+                return
+
+            valid_hours_text = str(data[1]).strip()
+            content = str(data[2]).strip()
+            try:
+                valid_hours = int(valid_hours_text)
+            except (TypeError, ValueError):
+                self.show_small_horn_buy_panel(sender, self.language_manager.GetText('SMALL_HORN_BUY_INVALID_HOURS'))
+                return
+
+            if valid_hours <= 0:
+                self.show_small_horn_buy_panel(sender, self.language_manager.GetText('SMALL_HORN_BUY_INVALID_HOURS'))
+                return
+
+            if not content:
+                self.show_small_horn_buy_panel(sender, self.language_manager.GetText('SMALL_HORN_BUY_EMPTY_CONTENT'))
+                return
+
+            total_cost = float(valid_hours * self.small_horn_price_per_hour)
+            if total_cost > 0 and not self.judge_if_player_has_enough_money(sender, total_cost):
+                sender.send_message(
+                    self.language_manager.GetText('SMALL_HORN_BUY_NO_MONEY').format(
+                        self._format_money_display(total_cost),
+                        self._format_money_display(self.get_player_money(sender))
+                    )
+                )
+                self.show_small_horn_buy_panel(sender)
+                return
+
+            if total_cost > 0 and not self.decrease_player_money(sender, total_cost):
+                sender.send_message(self.language_manager.GetText('SMALL_HORN_BUY_PAY_FAILED'))
+                self.show_small_horn_buy_panel(sender)
+                return
+
+            start_time = datetime.now()
+            end_time = start_time + timedelta(hours=valid_hours)
+            success = self.database_manager.insert(
+                'small_horn_orders',
+                {
+                    'xuid': str(sender.xuid),
+                    'content': content,
+                    'start_time': start_time.isoformat(timespec='seconds'),
+                    'valid_hours': valid_hours,
+                    'end_time': end_time.isoformat(timespec='seconds'),
+                    'created_at': start_time.isoformat(timespec='seconds'),
+                }
+            )
+            if not success:
+                if total_cost > 0:
+                    self.increase_player_money(sender, total_cost)
+                sender.send_message(self.language_manager.GetText('SMALL_HORN_BUY_SAVE_FAILED'))
+                self.show_small_horn_buy_panel(sender)
+                return
+
+            sender.send_message(
+                self.language_manager.GetText('SMALL_HORN_BUY_SUCCESS').format(
+                    valid_hours,
+                    self._format_money_display(total_cost),
+                    self._format_money_display(self.get_player_money(sender))
+                )
+            )
+            self.show_main_menu(sender)
+
+        buy_form = ModalForm(
+            title=panel_title,
+            controls=[info_label, valid_hours_input, content_input],
+            on_close=self.show_main_menu,
+            on_submit=try_buy_small_horn
+        )
+        player.send_form(buy_form)
+
     def _validate_transfer_data(self, player: Player, data: list) -> tuple[int, Optional[Player], Optional[int]]:
         """
         验证转账数据
@@ -3985,6 +4311,12 @@ class ARCCorePlugin(Plugin):
         if self.teleport_system.teleport_cost_player > 0:
             player_request_text = self.language_manager.GetText('TELEPORT_BUTTON_WITH_COST').format(player_request_text, self.teleport_system.teleport_cost_player)
         teleport_main_menu.add_button(player_request_text, on_click=self.show_player_teleport_request_menu)
+
+        # 跨服传送按钮
+        teleport_main_menu.add_button(
+            self.language_manager.GetText('TELEPORT_MAIN_MENU_CROSS_SERVER_BUTTON'),
+            on_click=self.show_cross_server_menu
+        )
         
         # 返回
         teleport_main_menu.add_button(self.language_manager.GetText('RETURN_BUTTON_TEXT'),
@@ -4056,6 +4388,84 @@ class ARCCorePlugin(Plugin):
             )
         
         player.send_form(warp_menu)
+
+    def _get_all_cross_server_targets(self) -> list[Dict[str, Any]]:
+        return self.database_manager.query_all(
+            "SELECT id, server_name, server_host, server_port FROM cross_server_targets ORDER BY id ASC"
+        )
+
+    def _create_cross_server_target(self, server_name: str, server_host: str, server_port: int) -> bool:
+        now_str = datetime.now().isoformat(timespec='seconds')
+        return self.database_manager.insert(
+            'cross_server_targets',
+            {
+                'server_name': server_name,
+                'server_host': server_host,
+                'server_port': int(server_port),
+                'created_at': now_str,
+            }
+        )
+
+    def _update_cross_server_target(self, target_id: int, server_name: str, server_host: str, server_port: int) -> bool:
+        return self.database_manager.update(
+            'cross_server_targets',
+            {
+                'server_name': server_name,
+                'server_host': server_host,
+                'server_port': int(server_port),
+            },
+            'id = ?',
+            (int(target_id),)
+        )
+
+    def _delete_cross_server_target(self, target_id: int) -> bool:
+        return self.database_manager.delete('cross_server_targets', 'id = ?', (int(target_id),))
+
+    def show_cross_server_menu(self, player: Player):
+        """显示跨服传送菜单。"""
+        targets = self._get_all_cross_server_targets()
+        if not targets:
+            no_target_panel = ActionForm(
+                title=self.language_manager.GetText('CROSS_SERVER_MENU_TITLE'),
+                content=self.language_manager.GetText('CROSS_SERVER_MENU_EMPTY'),
+                on_close=self.show_teleport_menu
+            )
+            no_target_panel.add_button(
+                self.language_manager.GetText('RETURN_BUTTON_TEXT'),
+                on_click=self.show_teleport_menu
+            )
+            player.send_form(no_target_panel)
+            return
+
+        cross_server_menu = ActionForm(
+            title=self.language_manager.GetText('CROSS_SERVER_MENU_TITLE'),
+            content=self.language_manager.GetText('CROSS_SERVER_MENU_CONTENT').format(len(targets)),
+            on_close=self.show_teleport_menu
+        )
+        for target in targets:
+            server_name = str(target.get('server_name') or '').strip()
+            server_host = str(target.get('server_host') or '').strip()
+            server_port = int(target.get('server_port') or 19132)
+            cross_server_menu.add_button(
+                self.language_manager.GetText('CROSS_SERVER_TARGET_BUTTON').format(
+                    server_name, server_host, server_port
+                ),
+                on_click=lambda p=player, h=server_host, po=server_port, n=server_name: self.transfer_player_to_server(p, h, po, n)
+            )
+        cross_server_menu.add_button(
+            self.language_manager.GetText('RETURN_BUTTON_TEXT'),
+            on_click=self.show_teleport_menu
+        )
+        player.send_form(cross_server_menu)
+
+    def transfer_player_to_server(self, player: Player, server_host: str, server_port: int, server_name: str):
+        """执行跨服传送。"""
+        try:
+            player.send_message(self.language_manager.GetText('CROSS_SERVER_TRANSFER_START').format(server_name))
+            player.transfer(server_host, int(server_port))
+        except Exception as e:
+            self.logger.error(f"[ARC Core]Cross server transfer failed: {str(e)}")
+            player.send_message(self.language_manager.GetText('CROSS_SERVER_TRANSFER_FAILED').format(server_name))
 
     def show_home_menu(self, player: Player):
         """显示玩家传送点菜单"""
@@ -4629,6 +5039,10 @@ class ARCCorePlugin(Plugin):
             self.language_manager.GetText('OP_TELEPORT_MANAGE_SETTINGS_BUTTON'),
             on_click=self.show_op_teleport_settings_panel,
         )
+        panel.add_button(
+            self.language_manager.GetText('OP_TELEPORT_MANAGE_CROSS_SERVER_BUTTON'),
+            on_click=self.show_op_cross_server_manage_menu,
+        )
         panel.add_button(self.language_manager.GetText('RETURN_BUTTON_TEXT'), on_click=self.show_op_main_panel)
         player.send_form(panel)
 
@@ -4766,6 +5180,235 @@ class ARCCorePlugin(Plugin):
         player.send_form(form)
 
     # OP Warp Management
+    def show_op_cross_server_manage_menu(self, player: Player):
+        """OP 管理跨服传送目标。"""
+        targets = self._get_all_cross_server_targets()
+        panel = ActionForm(
+            title=self.language_manager.GetText('OP_CROSS_SERVER_MANAGE_TITLE'),
+            content=self.language_manager.GetText('OP_CROSS_SERVER_MANAGE_CONTENT').format(len(targets)),
+            on_close=self.show_op_teleport_manage_panel
+        )
+        panel.add_button(
+            self.language_manager.GetText('OP_CROSS_SERVER_ADD_BUTTON'),
+            on_click=self.show_op_create_cross_server_panel
+        )
+        for target in targets:
+            target_id = int(target.get('id'))
+            panel.add_button(
+                self.language_manager.GetText('OP_CROSS_SERVER_ITEM_BUTTON').format(
+                    target.get('server_name', ''),
+                    target.get('server_host', ''),
+                    int(target.get('server_port') or 19132)
+                ),
+                on_click=lambda p=player, t_id=target_id: self.show_op_cross_server_detail_menu(p, t_id)
+            )
+        panel.add_button(
+            self.language_manager.GetText('RETURN_BUTTON_TEXT'),
+            on_click=self.show_op_teleport_manage_panel
+        )
+        player.send_form(panel)
+
+    def _get_cross_server_target_by_id(self, target_id: int) -> Optional[Dict[str, Any]]:
+        return self.database_manager.query_one(
+            "SELECT id, server_name, server_host, server_port FROM cross_server_targets WHERE id = ?",
+            (int(target_id),)
+        )
+
+    def show_op_create_cross_server_panel(self, player: Player):
+        server_name_input = TextInput(
+            label=self.language_manager.GetText('OP_CROSS_SERVER_NAME_LABEL'),
+            placeholder=self.language_manager.GetText('OP_CROSS_SERVER_NAME_PLACEHOLDER')
+        )
+        server_host_input = TextInput(
+            label=self.language_manager.GetText('OP_CROSS_SERVER_HOST_LABEL'),
+            placeholder=self.language_manager.GetText('OP_CROSS_SERVER_HOST_PLACEHOLDER')
+        )
+        server_port_input = TextInput(
+            label=self.language_manager.GetText('OP_CROSS_SERVER_PORT_LABEL'),
+            placeholder=self.language_manager.GetText('OP_CROSS_SERVER_PORT_PLACEHOLDER'),
+            default_value='19132'
+        )
+
+        def try_create_target(sender: Player, json_str: str):
+            try:
+                data = json.loads(json_str)
+            except Exception:
+                sender.send_message(self.language_manager.GetText('OP_CROSS_SERVER_SAVE_FAIL'))
+                self.show_op_create_cross_server_panel(sender)
+                return
+
+            if len(data) < 3:
+                sender.send_message(self.language_manager.GetText('OP_CROSS_SERVER_SAVE_FAIL'))
+                self.show_op_create_cross_server_panel(sender)
+                return
+
+            server_name = str(data[0]).strip()
+            server_host = str(data[1]).strip()
+            server_port_text = str(data[2]).strip()
+            try:
+                server_port = int(server_port_text)
+            except (ValueError, TypeError):
+                sender.send_message(self.language_manager.GetText('OP_CROSS_SERVER_PORT_INVALID'))
+                self.show_op_create_cross_server_panel(sender)
+                return
+
+            if not server_name or not server_host:
+                sender.send_message(self.language_manager.GetText('OP_CROSS_SERVER_SAVE_FAIL'))
+                self.show_op_create_cross_server_panel(sender)
+                return
+            if server_port <= 0 or server_port > 65535:
+                sender.send_message(self.language_manager.GetText('OP_CROSS_SERVER_PORT_INVALID'))
+                self.show_op_create_cross_server_panel(sender)
+                return
+
+            if not self._create_cross_server_target(server_name, server_host, server_port):
+                sender.send_message(self.language_manager.GetText('OP_CROSS_SERVER_SAVE_FAIL'))
+                self.show_op_create_cross_server_panel(sender)
+                return
+
+            sender.send_message(self.language_manager.GetText('OP_CROSS_SERVER_SAVE_SUCCESS'))
+            self.show_op_cross_server_manage_menu(sender)
+
+        form = ModalForm(
+            title=self.language_manager.GetText('OP_CROSS_SERVER_CREATE_TITLE'),
+            controls=[server_name_input, server_host_input, server_port_input],
+            on_close=self.show_op_cross_server_manage_menu,
+            on_submit=try_create_target
+        )
+        player.send_form(form)
+
+    def show_op_cross_server_detail_menu(self, player: Player, target_id: int):
+        target = self._get_cross_server_target_by_id(target_id)
+        if not target:
+            player.send_message(self.language_manager.GetText('OP_CROSS_SERVER_NOT_FOUND'))
+            self.show_op_cross_server_manage_menu(player)
+            return
+
+        detail_menu = ActionForm(
+            title=self.language_manager.GetText('OP_CROSS_SERVER_DETAIL_TITLE').format(target.get('server_name', '')),
+            content=self.language_manager.GetText('OP_CROSS_SERVER_DETAIL_CONTENT').format(
+                target.get('server_name', ''),
+                target.get('server_host', ''),
+                int(target.get('server_port') or 19132)
+            ),
+            on_close=self.show_op_cross_server_manage_menu
+        )
+        detail_menu.add_button(
+            self.language_manager.GetText('OP_CROSS_SERVER_EDIT_BUTTON'),
+            on_click=lambda p=player, t_id=target_id: self.show_op_edit_cross_server_panel(p, t_id)
+        )
+        detail_menu.add_button(
+            self.language_manager.GetText('OP_CROSS_SERVER_DELETE_BUTTON'),
+            on_click=lambda p=player, t_id=target_id: self.show_op_delete_cross_server_confirm(p, t_id)
+        )
+        detail_menu.add_button(
+            self.language_manager.GetText('RETURN_BUTTON_TEXT'),
+            on_click=self.show_op_cross_server_manage_menu
+        )
+        player.send_form(detail_menu)
+
+    def show_op_edit_cross_server_panel(self, player: Player, target_id: int):
+        target = self._get_cross_server_target_by_id(target_id)
+        if not target:
+            player.send_message(self.language_manager.GetText('OP_CROSS_SERVER_NOT_FOUND'))
+            self.show_op_cross_server_manage_menu(player)
+            return
+
+        server_name_input = TextInput(
+            label=self.language_manager.GetText('OP_CROSS_SERVER_NAME_LABEL'),
+            placeholder=self.language_manager.GetText('OP_CROSS_SERVER_NAME_PLACEHOLDER'),
+            default_value=str(target.get('server_name') or '')
+        )
+        server_host_input = TextInput(
+            label=self.language_manager.GetText('OP_CROSS_SERVER_HOST_LABEL'),
+            placeholder=self.language_manager.GetText('OP_CROSS_SERVER_HOST_PLACEHOLDER'),
+            default_value=str(target.get('server_host') or '')
+        )
+        server_port_input = TextInput(
+            label=self.language_manager.GetText('OP_CROSS_SERVER_PORT_LABEL'),
+            placeholder=self.language_manager.GetText('OP_CROSS_SERVER_PORT_PLACEHOLDER'),
+            default_value=str(int(target.get('server_port') or 19132))
+        )
+
+        def try_edit_target(sender: Player, json_str: str):
+            try:
+                data = json.loads(json_str)
+            except Exception:
+                sender.send_message(self.language_manager.GetText('OP_CROSS_SERVER_SAVE_FAIL'))
+                self.show_op_edit_cross_server_panel(sender, target_id)
+                return
+            if len(data) < 3:
+                sender.send_message(self.language_manager.GetText('OP_CROSS_SERVER_SAVE_FAIL'))
+                self.show_op_edit_cross_server_panel(sender, target_id)
+                return
+
+            server_name = str(data[0]).strip()
+            server_host = str(data[1]).strip()
+            server_port_text = str(data[2]).strip()
+            try:
+                server_port = int(server_port_text)
+            except (ValueError, TypeError):
+                sender.send_message(self.language_manager.GetText('OP_CROSS_SERVER_PORT_INVALID'))
+                self.show_op_edit_cross_server_panel(sender, target_id)
+                return
+
+            if not server_name or not server_host:
+                sender.send_message(self.language_manager.GetText('OP_CROSS_SERVER_SAVE_FAIL'))
+                self.show_op_edit_cross_server_panel(sender, target_id)
+                return
+            if server_port <= 0 or server_port > 65535:
+                sender.send_message(self.language_manager.GetText('OP_CROSS_SERVER_PORT_INVALID'))
+                self.show_op_edit_cross_server_panel(sender, target_id)
+                return
+
+            if not self._update_cross_server_target(target_id, server_name, server_host, server_port):
+                sender.send_message(self.language_manager.GetText('OP_CROSS_SERVER_SAVE_FAIL'))
+                self.show_op_edit_cross_server_panel(sender, target_id)
+                return
+            sender.send_message(self.language_manager.GetText('OP_CROSS_SERVER_SAVE_SUCCESS'))
+            self.show_op_cross_server_detail_menu(sender, target_id)
+
+        form = ModalForm(
+            title=self.language_manager.GetText('OP_CROSS_SERVER_EDIT_TITLE'),
+            controls=[server_name_input, server_host_input, server_port_input],
+            on_close=lambda p=player: self.show_op_cross_server_detail_menu(p, target_id),
+            on_submit=try_edit_target
+        )
+        player.send_form(form)
+
+    def show_op_delete_cross_server_confirm(self, player: Player, target_id: int):
+        target = self._get_cross_server_target_by_id(target_id)
+        if not target:
+            player.send_message(self.language_manager.GetText('OP_CROSS_SERVER_NOT_FOUND'))
+            self.show_op_cross_server_manage_menu(player)
+            return
+
+        panel = ActionForm(
+            title=self.language_manager.GetText('OP_CROSS_SERVER_DELETE_CONFIRM_TITLE'),
+            content=self.language_manager.GetText('OP_CROSS_SERVER_DELETE_CONFIRM_CONTENT').format(
+                target.get('server_name', ''),
+                target.get('server_host', ''),
+                int(target.get('server_port') or 19132)
+            ),
+            on_close=lambda p=player: self.show_op_cross_server_detail_menu(p, target_id)
+        )
+        panel.add_button(
+            self.language_manager.GetText('OP_CROSS_SERVER_DELETE_CONFIRM_BUTTON'),
+            on_click=lambda p=player, t_id=target_id: self._do_delete_cross_server_target(p, t_id)
+        )
+        panel.add_button(
+            self.language_manager.GetText('RETURN_BUTTON_TEXT'),
+            on_click=lambda p=player: self.show_op_cross_server_detail_menu(p, target_id)
+        )
+        player.send_form(panel)
+
+    def _do_delete_cross_server_target(self, player: Player, target_id: int):
+        if self._delete_cross_server_target(target_id):
+            player.send_message(self.language_manager.GetText('OP_CROSS_SERVER_DELETE_SUCCESS'))
+        else:
+            player.send_message(self.language_manager.GetText('OP_CROSS_SERVER_DELETE_FAIL'))
+        self.show_op_cross_server_manage_menu(player)
+
     def show_op_warp_manage_menu(self, player: Player):
         """显示OP传送点管理菜单"""
         warp_manage_menu = ActionForm(
@@ -7230,7 +7873,10 @@ class ARCCorePlugin(Plugin):
             count = 0
             for row in rows:
                 xuid = row.get('xuid')
-                if xuid and self.title_system.unlock_title_by_xuid(xuid, title):
+                if not xuid:
+                    continue
+                unlock_ok, was_new_unlock = self.title_system.unlock_title_by_xuid(xuid, title)
+                if unlock_ok and was_new_unlock:
                     count += 1
             player.send_message(self.language_manager.GetText('OP_TITLE_GRANT_TO_ALL_SUCCESS').format(count, title))
         except Exception as e:
@@ -7288,13 +7934,14 @@ class ARCCorePlugin(Plugin):
         player.send_form(panel)
 
     def _do_op_grant_title_to_single(self, player: Player, target_name: str, target_xuid: str, title: str):
-        if self.title_system.unlock_title_by_xuid(target_xuid, title):
+        unlock_ok, was_new_unlock = self.title_system.unlock_title_by_xuid(target_xuid, title)
+        if unlock_ok:
             target_online = None
             for p in (self.server.online_players or []):
                 if str(p.xuid) == target_xuid:
                     target_online = p
                     break
-            if target_online:
+            if target_online and was_new_unlock:
                 self._grant_title_unlock_reward(target_online, title)
             player.send_message(self.language_manager.GetText('OP_TITLE_GRANT_TO_SINGLE_SUCCESS').format(target_name, title))
         else:
@@ -7501,6 +8148,13 @@ class ARCCorePlugin(Plugin):
                     self.force_login = str(self.force_login).lower() in ['true', '1', 'yes']
                 except (ValueError, AttributeError):
                     self.force_login = False
+            self.small_horn_price_per_hour = self.setting_manager.GetSetting('SMALL_HORN_PRICE_PER_HOUR')
+            try:
+                self.small_horn_price_per_hour = int(self.small_horn_price_per_hour)
+                if self.small_horn_price_per_hour < 0:
+                    self.small_horn_price_per_hour = 60
+            except (ValueError, TypeError):
+                self.small_horn_price_per_hour = 60
             self._init_cleaner_system()
         except Exception as e:
             self.logger.error(f"[ARC Core]Reapply cached settings error: {str(e)}")
@@ -7787,7 +8441,7 @@ class ARCCorePlugin(Plugin):
                         self.api_unlock_title(online_player, grant_title)
                         self._update_player_name_tag(online_player)
                     else:
-                        self.title_system.unlock_title_by_xuid(rx, grant_title)
+                        _, _ = self.title_system.unlock_title_by_xuid(rx, grant_title)
                 except Exception:
                     pass
 
@@ -8553,6 +9207,38 @@ class ARCCorePlugin(Plugin):
         except Exception as e:
             self.logger.error(f"[ARC Core]Process broadcast placeholders error: {str(e)}")
             return message  # 如果处理失败，返回原消息
+
+    def send_small_horn_messages(self):
+        """每10分钟轮询并广播所有有效小喇叭。"""
+        try:
+            now_iso = datetime.now().isoformat(timespec='seconds')
+            active_orders = self.database_manager.query_all(
+                "SELECT id, xuid, content, end_time FROM small_horn_orders "
+                "WHERE start_time <= ? AND end_time > ? "
+                "ORDER BY created_at ASC",
+                (now_iso, now_iso)
+            )
+            if not active_orders:
+                return
+
+            for order in active_orders:
+                player_xuid = str(order.get('xuid') or '').strip()
+                content = str(order.get('content') or '').strip()
+                if not player_xuid or not content:
+                    continue
+                display_name = (
+                    self.get_player_name_by_xuid(player_xuid, return_with_title=True)
+                    or self.get_player_name_by_xuid(player_xuid, return_with_title=False)
+                    or player_xuid
+                )
+                self.server.broadcast_message(f"[小喇叭]玩家{display_name}：{content}")
+
+            self.database_manager.execute(
+                "DELETE FROM small_horn_orders WHERE end_time <= ?",
+                (now_iso,)
+            )
+        except Exception as e:
+            self.logger.error(f"[ARC Core]Send small horn messages error: {str(e)}")
 
     def _format_death_broadcast_player_display(self, player: Player) -> str:
         """死亡播报中的玩家展示名：§颜色[头衔]§r名字，与聊天/头顶名一致。"""

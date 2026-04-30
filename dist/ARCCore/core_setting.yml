@@ -24,6 +24,8 @@ LAND_ONLY_PLACE_BLOCKS=
 
 # 广播间隔
 BROADCAST_INTERVAL=120
+# 小喇叭每小时费用（玩家购买后每10分钟广播一次，按小时计费）
+SMALL_HORN_PRICE_PER_HOUR=60
 
 # 清道夫
 ENABLE_CLEANER=True
@@ -46,6 +48,13 @@ TELEPORT_COST_PLAYER=100
 
 # 每日签到（主菜单按钮；last_checkin_date 与服务器本地日期 YYYY-MM-DD 不同则可签到）
 CHECKIN_DAILY_MONEY=100
+# 每日前 X 名签到额外奖励配置（0 表示关闭该项）
+# 前 X 名的额外金钱采用等差递减：第 1 名 = X*步长，第 2 名 = (X-1)*步长，...，第 X 名 = 1*步长
+CHECKIN_TOP_RANK_LIMIT=5
+CHECKIN_TOP_RANK_BONUS_ITEM_COUNT=1
+CHECKIN_TOP_RANK_BONUS_MONEY_STEP=50
+# 连续签到金钱递增步长：总存款 = 基础签到存款 + (连续天数-1)*步长
+CHECKIN_CONTINUOUS_DAYS_MONEY_INCREMENT=100
 # 每日从奖励池中按权重不放回随机抽取的条数区间（含端点）；例如 1～3 表示每天随机 1、2 或 3 条
 CHECKIN_REWARD_PICK_MIN=1
 CHECKIN_REWARD_PICK_MAX=3

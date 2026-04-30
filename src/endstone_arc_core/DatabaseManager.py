@@ -52,6 +52,24 @@ class DatabaseManager:
             self.connection.rollback()
             return False
 
+    def execute_and_get_rowcount(self, sql: str, params: tuple = ()) -> int:
+        """
+        执行 SQL 并返回 cursor.rowcount（常用于 INSERT OR IGNORE 判断是否实际插入一行）。
+        失败时返回 -1。
+        """
+        try:
+            cursor = self.connection.cursor()
+            cursor.execute(sql, params)
+            self.connection.commit()
+            rowcount = cursor.rowcount
+            if rowcount is None:
+                return 0
+            return int(rowcount)
+        except Exception as e:
+            print(f"Execute SQL error: {str(e)}")
+            self.connection.rollback()
+            return -1
+
     def query_one(self, sql: str, params: tuple = ()) -> Optional[Dict[str, Any]]:
         """
         查询单条记录
