@@ -2,6 +2,7 @@ import hashlib
 import json
 import math
 import random
+import re
 import threading
 import time
 from datetime import datetime, timedelta
@@ -79,6 +80,11 @@ class ARCCorePlugin(Plugin):
             "description": "OP only: record current position as coordinate 2 and open OP panel.",
             "usages": ["/pos2"],
             "permissions": ["arc_core.command.op"],
+        },
+        "connecttoserver": {
+            "description": "Transfer to configured cross server by name.",
+            "usages": ["/connecttoserver <server_name: str>"],
+            "permissions": ["arc_core.command.connecttoserver"],
         }
     }
     permissions = {
@@ -101,6 +107,10 @@ class ARCCorePlugin(Plugin):
         "arc_core.command.op": {
             "description": "OP only commands: pos1, pos2, arc op.",
             "default": "op",
+        },
+        "arc_core.command.connecttoserver": {
+            "description": "Can used by everyone.",
+            "default": True,
         }
     }
 
@@ -169,6 +179,8 @@ class ARCCorePlugin(Plugin):
         except (ValueError, TypeError):
             self.land_min_size = 5  # 默认最小尺寸为5
         self._land_only_place_block_ids = frozenset()
+        self._disabled_block_ids = frozenset()
+        self._refresh_disabled_blocks()
         self._refresh_land_only_place_blocks()
         self.player_new_land_creation_info = {}  # {name: {'dimension': str, 'min_x': int, 'max_x': int, 'min_y': int, 'max_y': int, 'min_z': int, 'max_z': int}}
         self.player_land_pos1 = {}  # {name: {'dimension': str, 'x': int, 'y': int, 'z': int}} 暂存/landpos1
@@ -561,7 +573,82 @@ class ARCCorePlugin(Plugin):
                 return True
             self.record_coordinate_2(sender)
             return True
+        if command.name == 'connecttoserver':
+            sender_type_name = type(sender).__name__
+            sender_name = str(getattr(sender, 'name', '') or '')
+            sender_has_is_player = hasattr(sender, 'is_player')
+            sender_is_player_attr = getattr(sender, 'is_player', None)
+            sender_has_xuid = hasattr(sender, 'xuid')
+            args_text = " ".join(args) if args else ""
+            if not isinstance(sender, Player):
+                fallback_player = self._resolve_player_from_sender_name(sender_name)
+                self._safe_log(
+                    "warning",
+                    (
+                        "[ARC Core][connecttoserver debug] non-player sender blocked: "
+                        f"type={sender_type_name}, name={sender_name or '-'}, "
+                        f"has_is_player={sender_has_is_player}, is_player={sender_is_player_attr}, "
+                        f"has_xuid={sender_has_xuid}, args={args_text or '-'}, "
+                        f"fallback_player={getattr(fallback_player, 'name', '-')}"
+                    ),
+                )
+                if fallback_player is None:
+                    return True
+                sender = fallback_player
+            self._safe_log(
+                "info",
+                (
+                    "[ARC Core][connecttoserver debug] player sender accepted: "
+                    f"name={sender.name}, xuid={sender.xuid}, args={args_text or '-'}"
+                ),
+            )
+            if not args:
+                sender.send_message(self.language_manager.GetText('CONNECT_TO_SERVER_USAGE'))
+                return True
+            server_name = " ".join(args).strip()
+            if not server_name:
+                sender.send_message(self.language_manager.GetText('CONNECT_TO_SERVER_USAGE'))
+                return True
+            target = self._get_cross_server_target_by_name(server_name)
+            if not target:
+                sender.send_message(self.language_manager.GetText('CONNECT_TO_SERVER_NOT_FOUND').format(server_name))
+                return True
+            self.transfer_player_to_server(
+                sender,
+                str(target.get('server_host') or ''),
+                int(target.get('server_port') or 19132),
+                str(target.get('server_name') or server_name),
+            )
+            return True
         return False
+
+    @staticmethod
+    def _strip_minecraft_format_codes(text: str) -> str:
+        return re.sub(r"§.", "", str(text or ""))
+
+    def _extract_player_name_from_sender_name(self, sender_name: str) -> str:
+        normalized_sender_name = str(sender_name or "").strip()
+        if not normalized_sender_name:
+            return ""
+        if "§r" in normalized_sender_name:
+            normalized_sender_name = normalized_sender_name.rsplit("§r", 1)[-1]
+        return self._strip_minecraft_format_codes(normalized_sender_name).strip()
+
+    def _resolve_player_from_sender_name(self, sender_name: str) -> Optional[Player]:
+        extracted_player_name = self._extract_player_name_from_sender_name(sender_name)
+        if not extracted_player_name:
+            return None
+        try:
+            resolved_player = self.server.get_player(extracted_player_name)
+            if resolved_player is not None:
+                return resolved_player
+        except Exception:
+            pass
+        for online_player in list(getattr(self.server, "online_players", []) or []):
+            online_player_name = str(getattr(online_player, "name", "") or "").strip()
+            if online_player_name.lower() == extracted_player_name.lower():
+                return online_player
+        return None
 
     # Event handlers
     @event_handler
@@ -604,7 +691,22 @@ class ARCCorePlugin(Plugin):
         self._update_player_name_tag(event.player)
 
         if self.force_login and not self.if_player_logined(event.player):
-            self.show_main_menu(event.player)
+            self.server.scheduler.run_task(
+                self,
+                lambda p=event.player: self._show_force_login_menu_with_delay(p),
+                delay=20,
+            )
+
+    def _show_force_login_menu_with_delay(self, player: Player):
+        if player is None:
+            return
+        if not self.force_login:
+            return
+        if self.if_player_logined(player):
+            return
+        if player not in self.server.online_players:
+            return
+        self.show_main_menu(player)
 
     @event_handler
     def on_player_respawn(self, event: PlayerRespawnEvent):
@@ -808,6 +910,17 @@ class ARCCorePlugin(Plugin):
             return
         dimension_name = block_loc.dimension.name
         place_pos = (block_loc.x, block_loc.y, block_loc.z)
+        if self._is_disabled_block(target_desc):
+            event.is_cancelled = True
+            event.player.send_message(self.language_manager.GetText("DISABLED_BLOCK_DENIED_HINT"))
+            self._append_land_permission_denied_log(
+                "block_place_disabled",
+                event.player,
+                dimension_name,
+                place_pos,
+                target_description=str(target_desc),
+            )
+            return
         if not self.land_only_place_wilderness_check(
             event.player,
             dimension_name,
@@ -904,6 +1017,17 @@ class ARCCorePlugin(Plugin):
             block_target_desc = str(
                 getattr(block, 'identifier', getattr(block, 'type', 'block'))
             )
+            if self._is_disabled_block(block_target_desc):
+                event.is_cancelled = True
+                event.player.send_message(self.language_manager.GetText("DISABLED_BLOCK_DENIED_HINT"))
+                self._append_land_permission_denied_log(
+                    "block_interact_disabled",
+                    event.player,
+                    dimension,
+                    pos,
+                    target_description=block_target_desc,
+                )
+                return
             if not self.land_interact_check(event.player, dimension, pos):
                 event.is_cancelled = True
                 self._append_land_permission_denied_log(
@@ -1226,6 +1350,31 @@ class ARCCorePlugin(Plugin):
                 normalized = "minecraft:" + normalized
             parsed.add(normalized)
         self._land_only_place_block_ids = frozenset(parsed)
+
+    @staticmethod
+    def _normalize_block_id(block_identifier: str) -> str:
+        normalized = str(block_identifier or "").lower().strip()
+        if not normalized:
+            return ""
+        if ":" not in normalized:
+            normalized = "minecraft:" + normalized
+        return normalized
+
+    def _refresh_disabled_blocks(self):
+        """从 DISABLED_BLOCKS 解析「全局禁用方块」ID 集合（禁放置与禁交互）。"""
+        raw = self.setting_manager.GetSetting("DISABLED_BLOCKS")
+        if raw is None or not str(raw).strip():
+            self._disabled_block_ids = frozenset()
+            return
+        parsed = set()
+        for part in str(raw).split(","):
+            normalized = self._normalize_block_id(part)
+            if normalized:
+                parsed.add(normalized)
+        self._disabled_block_ids = frozenset(parsed)
+
+    def _is_disabled_block(self, block_identifier: str) -> bool:
+        return self._normalize_block_id(block_identifier) in self._disabled_block_ids
 
     def land_only_place_wilderness_check(
         self, player: Player, dimension: str, pos: tuple, block_identifier: str
@@ -5214,6 +5363,17 @@ class ARCCorePlugin(Plugin):
             (int(target_id),)
         )
 
+    def _get_cross_server_target_by_name(self, server_name: str) -> Optional[Dict[str, Any]]:
+        server_name_str = str(server_name or "").strip()
+        if not server_name_str:
+            return None
+        return self.database_manager.query_one(
+            "SELECT id, server_name, server_host, server_port FROM cross_server_targets "
+            "WHERE LOWER(TRIM(server_name)) = LOWER(?) "
+            "ORDER BY id ASC LIMIT 1",
+            (server_name_str,)
+        )
+
     def show_op_create_cross_server_panel(self, player: Player):
         server_name_input = TextInput(
             label=self.language_manager.GetText('OP_CROSS_SERVER_NAME_LABEL'),
@@ -8131,6 +8291,7 @@ class ARCCorePlugin(Plugin):
                 self.land_min_distance = 0
             self.teleport_system.reload_config()
             self.land_system.reload_config()
+            self._refresh_disabled_blocks()
             self._refresh_land_only_place_blocks()
             self.hide_op_in_money_ranking = self.setting_manager.GetSetting('HIDE_OP_IN_MONEY_RANKING')
             if self.hide_op_in_money_ranking is None:
