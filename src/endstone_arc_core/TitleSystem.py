@@ -35,7 +35,6 @@ class TitleSystem:
         self.setting_manager = setting_manager
         self._table_def = "title_definitions"
         self._table_unlock_time = "player_title_unlock_time"
-        self._table_extra = "player_title_extra"
         self._table_equipped = "player_title_equipped"
 
     def ensure_tables(self) -> bool:
@@ -46,9 +45,6 @@ class TitleSystem:
             )
             self.database_manager.execute(
                 "CREATE TABLE IF NOT EXISTS " + self._table_unlock_time + " (xuid TEXT NOT NULL, title TEXT NOT NULL, unlocked_at TEXT, UNIQUE(xuid, title))"
-            )
-            self.database_manager.execute(
-                "CREATE TABLE IF NOT EXISTS " + self._table_extra + " (xuid TEXT NOT NULL, title TEXT NOT NULL, UNIQUE(xuid, title))"
             )
             self.database_manager.execute(
                 "CREATE TABLE IF NOT EXISTS " + self._table_equipped + " (xuid TEXT PRIMARY KEY, title TEXT)"
@@ -152,10 +148,6 @@ class TitleSystem:
                 f"UPDATE {self._table_unlock_time} SET title = ? WHERE title = ?",
                 (new_title, old_title),
             )
-            self.database_manager.execute(
-                f"UPDATE {self._table_extra} SET title = ? WHERE title = ?",
-                (new_title, old_title),
-            )
 
             # 同步玩家佩戴记录
             self.database_manager.execute(
@@ -216,6 +208,10 @@ class TitleSystem:
         rarity = (defn.get("rarity") or DEFAULT_RARITY) if defn else DEFAULT_RARITY
         return RARITY_COLORS.get(rarity, "§f")
 
+    def get_normal_rarity_color(self) -> str:
+        """「普通」稀有度对应颜色（用于公会名等与默认头衔一致的着色）。"""
+        return RARITY_COLORS.get(DEFAULT_RARITY, "§f")
+
     def _get_default_titles_raw(self) -> str:
         raw = self.setting_manager.GetSetting("DEFAULT_TITLE")
         return (raw or "").strip()
@@ -237,27 +233,9 @@ class TitleSystem:
     def _xuid(self, player: Player) -> str:
         return str(player.xuid)
 
-    def _ensure_unlock_time_from_extra(self, xuid: str) -> None:
-        """兼容：若 player_title_unlock_time 无该玩家记录但 player_title_extra 有，则迁移并补时间。"""
-        rows_extra = self.database_manager.query_all(
-            "SELECT title FROM " + self._table_extra + " WHERE xuid = ?", (xuid,)
-        )
-        if not rows_extra:
-            return
-        now_iso = datetime.now().isoformat()
-        for r in rows_extra:
-            t = r.get("title")
-            if not t:
-                continue
-            self.database_manager.execute(
-                "INSERT OR IGNORE INTO " + self._table_unlock_time + " (xuid, title, unlocked_at) VALUES (?, ?, ?)",
-                (xuid, t, now_iso)
-            )
-
     def get_unlocked_titles(self, player: Player) -> List[str]:
-        """玩家当前拥有的全部头衔（来自 player_title_unlock_time；无记录时从 player_title_extra 迁移）。"""
+        """玩家当前拥有的全部头衔（来自 player_title_unlock_time）。"""
         xuid = self._xuid(player)
-        self._ensure_unlock_time_from_extra(xuid)
         rows = self.database_manager.query_all(
             "SELECT title FROM " + self._table_unlock_time + " WHERE xuid = ? ORDER BY title",
             (xuid,)
@@ -384,13 +362,8 @@ class TitleSystem:
                     (xuid,),
                 )
 
-            # 删除解锁记录（新表与兼容旧表都删）
             self.database_manager.execute(
                 "DELETE FROM " + self._table_unlock_time + " WHERE xuid = ? AND title = ?",
-                (xuid, title),
-            )
-            self.database_manager.execute(
-                "DELETE FROM " + self._table_extra + " WHERE xuid = ? AND title = ?",
                 (xuid, title),
             )
             return True
@@ -406,7 +379,6 @@ class TitleSystem:
     def on_player_join(self, player: Player) -> None:
         """进服时：1) 确保默认头衔与 OP 头衔有解锁记录（无则插入，时间为当前）；2) 若非 OP 且佩戴 OP 头衔则解除佩戴。"""
         xuid = self._xuid(player)
-        self._ensure_unlock_time_from_extra(xuid)
         default_titles = self.get_default_titles()
         op_title = self.get_op_title()
         to_ensure = list(default_titles)

@@ -7,7 +7,7 @@ import threading
 import time
 from datetime import datetime, timedelta
 from pathlib import Path
-from typing import Dict, Any, Optional, Set
+from typing import Any, Dict, List, Optional, Set
 
 from endstone import ColorFormat, Player, GameMode
 from endstone.form import ActionForm, TextInput, ModalForm, Label
@@ -23,6 +23,7 @@ from endstone_arc_core.TeleportSystem import TeleportSystem, generate_tp_command
 from endstone_arc_core.LandSystem import LandSystem
 from endstone_arc_core.TitleSystem import TitleSystem
 from endstone_arc_core.AchievementSystem import AchievementSystem
+from endstone_arc_core.GuildSystem import GuildSystem, ROLE_OWNER, ROLE_MANAGER, ROLE_MEMBER
 from endstone_arc_core.EntityDisplayNameManager import EntityDisplayNameManager
 from endstone_arc_core.KillRewardConfig import KillRewardConfig, normalize_entity_type_id
 from endstone_arc_core.arc_error_log import append_arc_error_log, format_context_lines
@@ -34,42 +35,51 @@ LAND_INTERACT_LOG_DIR_NAME = 'land_inteteact_log'
 
 class ARCCorePlugin(Plugin):
     api_version = "0.10"
+    # 交互圈地：同一次点击 EndStone 可能连发多次 PlayerInteractEvent；上次成功记录选点后的最短间隔（秒），用于防抖
+    _land_creation_pick_debounce_sec = 0.12
+
     commands = {
         "updatespawnpos": {
             "description": "Update spawn position of current dimension.",
-            "usages": ["/updatespawnpos"]
+            "usages": ["/updatespawnpos"],
+            "permissions": ["arc_core.command.op"],
         },
         "arc": {
-            "description": "ARC Core menu command. Use /arc op to open OP panel (OP only).",
-            "usages": ["/arc", "/arc op"],
-            "permissions": ["arc_core.command.arc"],
+            "description": "ARC menu; subcommands: op, land, tp, bank, guild.",
+            "usages": ["/arc", "/arc op", "/arc land", "/arc tp", "/arc bank", "/arc guild"],
+            "permissions": ["arc_core.command.common"],
         },
         "suicide":
             {
             "description": "Kill yourself.",
             "usages": ["/suicide"],
-            "permissions": ["arc_core.command.suicide"],
+            "permissions": ["arc_core.command.common"],
         },
         "spawn":
         {
             "description": "Teleport to spawn position.",
             "usages": ["/spawn"],
-            "permissions": ["arc_core.command.spawn"],
+            "permissions": ["arc_core.command.common"],
         },
         "landpos1": {
             "description": "Set new land corner 1.",
             "usages": ["/landpos1"],
-            "permissions": ["arc_core.command.set_land_corner"],
+            "permissions": ["arc_core.command.common"],
         },
         "landpos2": {
             "description": "Set new land corner 2.",
             "usages": ["/landpos2"],
-            "permissions": ["arc_core.command.set_land_corner"],
+            "permissions": ["arc_core.command.common"],
         },
         "landbuy": {
-            "description": "Buy the pending new land.",
+            "description": "Buy the pending new land (alias of /land buy).",
             "usages": ["/landbuy"],
-            "permissions": ["arc_core.command.set_land_corner"],
+            "permissions": ["arc_core.command.common"],
+        },
+        "land": {
+            "description": "Land helpers: pos1, pos2, buy.",
+            "usages": ["/land pos1", "/land pos2", "/land buy"],
+            "permissions": ["arc_core.command.common"],
         },
         "pos1": {
             "description": "OP only: record current position as coordinate 1.",
@@ -82,36 +92,20 @@ class ARCCorePlugin(Plugin):
             "permissions": ["arc_core.command.op"],
         },
         "connecttoserver": {
-            "description": "Transfer to configured cross server by name.",
-            "usages": ["/connecttoserver <server_name: str>"],
-            "permissions": ["arc_core.command.connecttoserver"],
+            "description": "Cross-server: no args opens picker; else transfer by server name.",
+            "usages": ["/connecttoserver", "/connecttoserver <server_name: str>"],
+            "permissions": ["arc_core.command.common"],
         }
     }
     permissions = {
-        "arc_core.command.arc": {
-            "description": "Can used by everyone.",
-            "default": True,
-        },
-        "arc_core.command.suicide": {
-            "description": "Can used by everyone.",
-            "default": True,
-        },
-        "arc_core.command.spawn": {
-            "description": "Can used by everyone.",
-            "default": True,
-        },
-        "arc_core.command.set_land_corner": {
-            "description": "Can used by everyone.",
+        "arc_core.command.common": {
+            "description": "Commands for all players (arc, suicide, spawn, land*, landpos*, connecttoserver, /arc guild).",
             "default": True,
         },
         "arc_core.command.op": {
-            "description": "OP only commands: pos1, pos2, arc op.",
+            "description": "OP only: updatespawnpos, pos1, pos2; /arc op still checks is_op in handler.",
             "default": "op",
         },
-        "arc_core.command.connecttoserver": {
-            "description": "Can used by everyone.",
-            "default": True,
-        }
     }
 
     def __init__(self):
@@ -121,6 +115,24 @@ class ARCCorePlugin(Plugin):
         default_language_dode = self.setting_manager.GetSetting('DEFAULT_LANGUAGE_CODE')
         self.language_manager = LanguageManager(default_language_dode if default_language_dode is not None else 'ZH-CN')
         self.database_manager = DatabaseManager(Path(MAIN_PATH) / self.setting_manager.GetSetting('DATABASE_PATH'))
+
+        # 跨服共享数据库路由：配置非空时，对应表的读写自动路由到指定数据库
+        player_db_path = self.setting_manager.GetSetting('PLAYER_DATABASE_PATH')
+        economy_db_path = self.setting_manager.GetSetting('PLAYER_ECONOMY_DATABASE_PATH')
+        title_db_path = self.setting_manager.GetSetting('PLAYER_TITLE_DATABASE_PATH')
+        if player_db_path:
+            self.database_manager.add_route('player_basic_info', player_db_path)
+        if economy_db_path:
+            self.database_manager.add_route('player_economy', economy_db_path)
+        if title_db_path:
+            for t in ('title_definitions', 'player_title_unlock_time', 'player_title_equipped'):
+                self.database_manager.add_route(t, title_db_path)
+
+        guild_db_path = self.setting_manager.GetSetting('GUILD_DATABASE_PATH')
+        if guild_db_path:
+            for t in ('guilds', 'guild_members', 'guild_invites'):
+                self.database_manager.add_route(t, guild_db_path)
+
         self.economy = Economy(self.database_manager, self.setting_manager)
         self.teleport_system = TeleportSystem(self.database_manager, self.setting_manager)
         self.land_system = LandSystem(self.database_manager, self.setting_manager)
@@ -131,9 +143,13 @@ class ARCCorePlugin(Plugin):
             self.language_manager,
             self.api_unlock_title,
             MAIN_PATH,
+            self._announce_achievement_unlock,
         )
         self.entity_display_name_manager = EntityDisplayNameManager(Path(MAIN_PATH), logger=None)
         self.kill_reward_config = KillRewardConfig(Path(MAIN_PATH), logger=None)
+        self.guild_system = GuildSystem(
+            self.database_manager, self.setting_manager, self.economy
+        )
         self.init_database()
         self._arc_error_log_path = str(Path(MAIN_PATH) / "error_log.txt")
 
@@ -184,6 +200,10 @@ class ARCCorePlugin(Plugin):
         self._refresh_land_only_place_blocks()
         self.player_new_land_creation_info = {}  # {name: {'dimension': str, 'min_x': int, 'max_x': int, 'min_y': int, 'max_y': int, 'min_z': int, 'max_z': int}}
         self.player_land_pos1 = {}  # {name: {'dimension': str, 'x': int, 'y': int, 'z': int}} 暂存/landpos1
+        # 交互式圈地：rect_a → rect_b → y_min → y_max，值为 dict(step=..., dimension=..., ...)
+        self.player_land_creation_pick: Dict[str, Dict[str, Any]] = {}
+        # 上次成功写入一次选点的时间，用于防抖（与 player_land_creation_pick 同步清理）
+        self.player_land_pick_last_event_ts: Dict[str, float] = {}
 
         # OP坐标记录与上次执行指令（空输入时重复执行）
         self.op_coordinate1_dict = {}
@@ -464,16 +484,42 @@ class ARCCorePlugin(Plugin):
                 sender.send_message(self.language_manager.GetText('UPDATE_SPAWN_POS_FAILED'))
             return True
         if command.name == "arc":
-            if not isinstance(sender, Player):
-                sender.send_message(f'[ARC Core]This command only works for players.')
+            player = self._resolve_player_for_command_sender(sender)
+            if player is None:
                 return True
-            if args and len(args) >= 1 and args[0].lower() == 'op':
-                if not sender.is_op:
-                    sender.send_message(self.language_manager.GetText('OP_PANEL_NO_PERMISSION'))
+            if args and len(args) >= 1:
+                head = args[0].lower()
+                if head == "op":
+                    if not player.is_op:
+                        player.send_message(self.language_manager.GetText("OP_PANEL_NO_PERMISSION"))
+                        return True
+                    self.show_op_main_panel(player)
                     return True
-                self.show_op_main_panel(sender)
-                return True
-            self.show_main_menu(sender)
+                if head == "land":
+                    if not self.if_player_logined(player):
+                        self.show_main_menu(player)
+                        return True
+                    self.show_land_main_menu(player)
+                    return True
+                if head == "tp":
+                    if not self.if_player_logined(player):
+                        self.show_main_menu(player)
+                        return True
+                    self.show_teleport_menu(player)
+                    return True
+                if head == "bank":
+                    if not self.if_player_logined(player):
+                        self.show_main_menu(player)
+                        return True
+                    self.show_bank_main_menu(player)
+                    return True
+                if head == "guild":
+                    if not self.if_player_logined(player):
+                        self.show_main_menu(player)
+                        return True
+                    self.show_guild_main_menu(player)
+                    return True
+            self.show_main_menu(player)
             return True
         if command.name == "suicide":
             if not isinstance(sender, Player):
@@ -493,66 +539,54 @@ class ARCCorePlugin(Plugin):
             else:
                 sender.send_message(self.language_manager.GetText('NO_SPAWN_POSITION_SET_MESSAGE'))
             return True
-        if command.name == 'landpos1':
-            if not isinstance(sender, Player):
-                sender.send_message(f'[ARC Core]This command only works for players.')
+        if command.name == "land":
+            player = self._resolve_player_for_command_sender(sender)
+            if player is None:
                 return True
-            if not self.if_player_logined(sender):
-                self.show_main_menu(sender)
+            if not self.if_player_logined(player):
+                self.show_main_menu(player)
                 return True
-            self.player_land_pos1[sender.name] = {
-                'dimension': sender.location.dimension.name,
-                'x': math.floor(sender.location.x),
-                'y': math.floor(sender.location.y),
-                'z': math.floor(sender.location.z)
-            }
-            sender.send_message(self.language_manager.GetText('CREATE_NEW_LAND_POS1_SET').format(
-                self.player_land_pos1[sender.name]['dimension'],
-                (self.player_land_pos1[sender.name]['x'],
-                 self.player_land_pos1[sender.name]['y'],
-                 self.player_land_pos1[sender.name]['z']))
-            )
+            if not args:
+                player.send_message(self.language_manager.GetText("LAND_COMMAND_USAGE"))
+                return True
+            sub = args[0].lower()
+            if sub == "pos1":
+                self._run_land_pos1_for_player(player)
+                return True
+            if sub == "pos2":
+                self._run_land_pos2_for_player(player)
+                return True
+            if sub == "buy":
+                self._run_land_buy_for_player(player)
+                return True
+            player.send_message(self.language_manager.GetText("LAND_COMMAND_USAGE"))
             return True
-        if command.name == 'landpos2':
-            if not isinstance(sender, Player):
-                sender.send_message(f'[ARC Core]This command only works for players.')
+        if command.name == "landpos1":
+            player = self._resolve_player_for_command_sender(sender)
+            if player is None:
                 return True
-            if not self.if_player_logined(sender):
-                self.show_main_menu(sender)
+            if not self.if_player_logined(player):
+                self.show_main_menu(player)
                 return True
-            if sender.name not in self.player_land_pos1:
-                sender.send_message(self.language_manager.GetText('CREATE_NEW_LAND_POS2_SET_FAIL_POS1_NOT_SET'))
-                return True
-            pos1 = self.player_land_pos1[sender.name]
-            if sender.location.dimension.name != pos1['dimension']:
-                sender.send_message(self.language_manager.GetText('CREATE_NEW_LAND_POS2_SET_FAIL_DIMENSION_CHANGED'))
-                return True
-            x2 = math.floor(sender.location.x)
-            y2 = math.floor(sender.location.y)
-            z2 = math.floor(sender.location.z)
-            self.player_new_land_creation_info[sender.name] = {
-                'dimension': pos1['dimension'],
-                'min_x': min(pos1['x'], x2),
-                'max_x': max(pos1['x'], x2),
-                'min_y': min(pos1['y'], y2),
-                'max_y': max(pos1['y'], y2),
-                'min_z': min(pos1['z'], z2),
-                'max_z': max(pos1['z'], z2)
-            }
-            del self.player_land_pos1[sender.name]
-            sender.send_message(self.language_manager.GetText('CREATE_NEW_LAND_POS2_SET').format(
-                (x2, y2, z2)))
-            self.show_new_land_info(sender)
-            self._visualize_pending_land(sender)
+            self._run_land_pos1_for_player(player)
             return True
-        if command.name == 'landbuy':
-            if not isinstance(sender, Player):
-                sender.send_message(f'[ARC Core]This command only works for players.')
+        if command.name == "landpos2":
+            player = self._resolve_player_for_command_sender(sender)
+            if player is None:
                 return True
-            if not self.if_player_logined(sender):
-                self.show_main_menu(sender)
+            if not self.if_player_logined(player):
+                self.show_main_menu(player)
                 return True
-            self._execute_land_buy(sender)
+            self._run_land_pos2_for_player(player)
+            return True
+        if command.name == "landbuy":
+            player = self._resolve_player_for_command_sender(sender)
+            if player is None:
+                return True
+            if not self.if_player_logined(player):
+                self.show_main_menu(player)
+                return True
+            self._run_land_buy_for_player(player)
             return True
         if command.name == 'pos1':
             if not isinstance(sender, Player):
@@ -602,13 +636,13 @@ class ARCCorePlugin(Plugin):
                     f"name={sender.name}, xuid={sender.xuid}, args={args_text or '-'}"
                 ),
             )
-            if not args:
-                sender.send_message(self.language_manager.GetText('CONNECT_TO_SERVER_USAGE'))
+            if not args or not str(" ".join(args)).strip():
+                if not self.if_player_logined(sender):
+                    self.show_main_menu(sender)
+                    return True
+                self.show_cross_server_menu(sender, on_close=self.show_main_menu)
                 return True
             server_name = " ".join(args).strip()
-            if not server_name:
-                sender.send_message(self.language_manager.GetText('CONNECT_TO_SERVER_USAGE'))
-                return True
             target = self._get_cross_server_target_by_name(server_name)
             if not target:
                 sender.send_message(self.language_manager.GetText('CONNECT_TO_SERVER_NOT_FOUND').format(server_name))
@@ -650,6 +684,55 @@ class ARCCorePlugin(Plugin):
                 return online_player
         return None
 
+    def _resolve_player_for_command_sender(self, sender: CommandSender) -> Optional[Player]:
+        """真实玩家直接返回；控制台/命令方块等从 sender 名称解析在线玩家（与 connecttoserver 一致）。"""
+        if isinstance(sender, Player):
+            return sender
+        return self._resolve_player_from_sender_name(str(getattr(sender, "name", "") or ""))
+
+    def _run_land_pos1_for_player(self, player: Player) -> None:
+        self.player_land_pos1[player.name] = {
+            "dimension": player.location.dimension.name,
+            "x": math.floor(player.location.x),
+            "y": math.floor(player.location.y),
+            "z": math.floor(player.location.z),
+        }
+        pos = self.player_land_pos1[player.name]
+        player.send_message(
+            self.language_manager.GetText("CREATE_NEW_LAND_POS1_SET").format(
+                pos["dimension"],
+                (pos["x"], pos["y"], pos["z"]),
+            )
+        )
+
+    def _run_land_pos2_for_player(self, player: Player) -> None:
+        if player.name not in self.player_land_pos1:
+            player.send_message(self.language_manager.GetText("CREATE_NEW_LAND_POS2_SET_FAIL_POS1_NOT_SET"))
+            return
+        pos1 = self.player_land_pos1[player.name]
+        if player.location.dimension.name != pos1["dimension"]:
+            player.send_message(self.language_manager.GetText("CREATE_NEW_LAND_POS2_SET_FAIL_DIMENSION_CHANGED"))
+            return
+        x2 = math.floor(player.location.x)
+        y2 = math.floor(player.location.y)
+        z2 = math.floor(player.location.z)
+        self.player_new_land_creation_info[player.name] = {
+            "dimension": pos1["dimension"],
+            "min_x": min(pos1["x"], x2),
+            "max_x": max(pos1["x"], x2),
+            "min_y": min(pos1["y"], y2),
+            "max_y": max(pos1["y"], y2),
+            "min_z": min(pos1["z"], z2),
+            "max_z": max(pos1["z"], z2),
+        }
+        del self.player_land_pos1[player.name]
+        player.send_message(self.language_manager.GetText("CREATE_NEW_LAND_POS2_SET").format((x2, y2, z2)))
+        self._visualize_pending_land(player)
+        self.show_pending_land_purchase_panel(player)
+
+    def _run_land_buy_for_player(self, player: Player) -> None:
+        self._execute_land_buy(player)
+
     # Event handlers
     @event_handler
     def on_player_join(self, event: PlayerJoinEvent):
@@ -690,6 +773,16 @@ class ARCCorePlugin(Plugin):
         self._auto_equip_highest_title_if_needed(event.player)
         self._update_player_name_tag(event.player)
 
+        # 通知 qqsync 发送加入消息到 QQ 群
+        try:
+            equipped = self.title_system.get_equipped_title(event.player)
+            display_name = self.format_player_display_label_with_guild(
+                event.player.name, equipped, str(event.player.xuid)
+            )
+            self._notify_qqsync("join", display_name, event.player.name)
+        except Exception as e:
+            self.logger.error(f"[ARC Core]Notify qqsync join error: {e}")
+
         if self.force_login and not self.if_player_logined(event.player):
             self.server.scheduler.run_task(
                 self,
@@ -722,15 +815,22 @@ class ARCCorePlugin(Plugin):
             time_str = f"{now.year}.{now.month}.{now.day}-{now.hour}:{now.minute:02d}"
             equipped = self.title_system.get_equipped_title(event.player)
             name = event.player.name
-            # §颜色[头衔]§r名字：稀有色仅作用在括号段，§r 后时间为默认样式
-            if equipped:
-                rarity_color = self.title_system.get_title_rarity_color(equipped)
-                line1 = f"{rarity_color}[{equipped}]§r{name}({time_str})："
-            else:
-                line1 = f"{name}({time_str})："
+            base = self.format_player_display_label_with_guild(
+                name, equipped, str(event.player.xuid)
+            )
+            line1 = f"{base}({time_str})："
             formatted = line1 + "\n" + raw_message
             event.is_cancelled = True
             self.server.broadcast_message(formatted)
+
+            # 通知 qqsync 发送聊天消息到 QQ 群
+            try:
+                display_name = self.format_player_display_label_with_guild(
+                    name, equipped, str(event.player.xuid)
+                )
+                self._notify_qqsync("chat", display_name, name, raw_message)
+            except Exception as e:
+                self.logger.error(f"[ARC Core]Notify qqsync chat error: {e}")
         except Exception as e:
             if self.logger:
                 self.logger.error(f"[ARC Core]Chat title format error: {e}")
@@ -739,14 +839,23 @@ class ARCCorePlugin(Plugin):
     def on_player_quit(self, event: PlayerQuitEvent):
         self.server.broadcast_message(self.language_manager.GetText('PLAYER_QUIT_MESSAGE').format(event.player.name))
         self.player_authentication_state[event.player.name] = False
+
+        # 通知 qqsync 发送离开消息到 QQ 群
+        try:
+            equipped = self.title_system.get_equipped_title(event.player)
+            display_name = self.format_player_display_label_with_guild(
+                event.player.name, equipped, str(event.player.xuid)
+            )
+            self._notify_qqsync("quit", display_name, event.player.name)
+        except Exception as e:
+            self.logger.error(f"[ARC Core]Notify qqsync quit error: {e}")
         
         # 线程安全地清理玩家领地位置记录
         with self.position_thread_lock:
             if event.player.name in self.player_in_land_id_dict:
                 del self.player_in_land_id_dict[event.player.name]
-        
-        # 清理死亡位置记录
-        self.teleport_system.clear_death_location(event.player.name)
+        self.player_land_creation_pick.pop(event.player.name, None)
+        self.player_land_pick_last_event_ts.pop(event.player.name, None)
 
     @event_handler
     def on_block_break(self, event: BlockBreakEvent):
@@ -970,6 +1079,8 @@ class ARCCorePlugin(Plugin):
         try:
             # 玩家或OP判定
             if not hasattr(event, 'player') or event.player is None:
+                return
+            if getattr(event, 'has_block', False) and self._try_consume_land_creation_pick(event):
                 return
             # 调试模式：有方块时发送方块交互信息
             if getattr(event, 'has_block', False):
@@ -1604,6 +1715,7 @@ class ARCCorePlugin(Plugin):
         self.teleport_system.init_teleport_tables()
         self.title_system.ensure_tables()
         self.achievement_system.ensure_tables()
+        self.guild_system.ensure_tables()
         self._init_richest_title_state_table()
 
     def _get_richest_title_name(self) -> str:
@@ -2113,7 +2225,7 @@ class ARCCorePlugin(Plugin):
         """
         通过 XUID 获取玩家名称。
         :param player_xuid: 玩家 XUID
-        :param return_with_title: 为 True（默认）时，若数据库中有记录且玩家佩戴头衔，则返回带 MC 颜色与 [头衔] 前缀的展示名，适合 UI / 广播；为 False 时始终返回库中裸名，适合 server.get_player、游戏指令参数、对外 API 等。
+        :param return_with_title: 为 True（默认）时返回展示名：§白[无公会]§r 或 §普通色[公会名]§r，再接 [头衔]§r 与名字（与聊天、头顶名一致）；为 False 时返回库中裸名，适合指令参数等。
         """
         try:
             result = self.database_manager.query_one(
@@ -2131,11 +2243,60 @@ class ARCCorePlugin(Plugin):
                 equipped = self.title_system.get_equipped_title_by_xuid(str(player_xuid).strip())
             except Exception:
                 equipped = None
-            return self.title_system.format_player_display_label(raw, equipped)
+            return self.format_player_display_label_with_guild(
+                raw, equipped, str(player_xuid).strip()
+            )
         except Exception as e:
             self.logger.error(f"{ColorFormat.RED}[ARC Core]Get player name by XUID error: {str(e)}")
             return None
-    
+
+    def format_player_display_label_with_guild(
+        self,
+        raw_player_name: str,
+        equipped_title: Optional[str],
+        xuid: str,
+    ) -> str:
+        """
+        展示用：§白[无公会]§r 或 §普通色[公会名]§r，再接 [头衔]§r，最后为游戏名。
+        与聊天、头顶 name_tag、死亡播报及 get_player_name_by_xuid(..., True) 保持一致。
+        """
+        name = (raw_player_name or "").strip() or "?"
+        xs = str(xuid or "").strip()
+        no_guild_label = self.language_manager.GetText("GUILD_DISPLAY_NO_GUILD_SHORT")
+        if no_guild_label is None or not str(no_guild_label).strip():
+            no_guild_label = "[无公会]"
+        else:
+            no_guild_label = str(no_guild_label).strip()
+        guild_prefix = ""
+        try:
+            if xs and getattr(self, "guild_system", None):
+                mem = self.guild_system.get_membership(xs)
+                if mem:
+                    g = self.guild_system.get_guild(int(mem["guild_id"]))
+                    if g and g.get("name"):
+                        gc = self.title_system.get_normal_rarity_color()
+                        gname = str(g["name"]).strip()
+                        if gname:
+                            guild_prefix = f"{gc}[{gname}]§r"
+        except Exception:
+            guild_prefix = ""
+        if not guild_prefix:
+            guild_prefix = f"§f{no_guild_label}§r"
+        et = (equipped_title or "").strip() if equipped_title else ""
+        if et:
+            tc = self.title_system.get_title_rarity_color(et)
+            title_part = f"{tc}[{et}]§r"
+        else:
+            title_part = ""
+        return guild_prefix + title_part + name
+
+    def _refresh_player_name_tag_by_xuid(self, xuid: Optional[str]) -> None:
+        if not xuid:
+            return
+        p = self._find_online_player_by_xuid(str(xuid).strip())
+        if p:
+            self._update_player_name_tag(p)
+
     def get_player_xuid_by_name(self, player_name: str) -> Optional[str]:
         """
         通过玩家名称获取 XUID。
@@ -2277,13 +2438,14 @@ class ARCCorePlugin(Plugin):
             arc_menu = ActionForm(
                 title=self.language_manager.GetText('MAIN_MENU_TITLE'),
             )
-            arc_menu.add_button(self.language_manager.GetText('CHECKIN_MENU_BUTTON'), on_click=self.show_daily_checkin_panel)
-            arc_menu.add_button(self.language_manager.GetText('MAIN_MENU_MY_INFO_NAME'), on_click=self.show_my_info_panel)
             arc_menu.add_button(self.language_manager.GetText('NEWBIE_GUIDE_BUTTON'), on_click=self.show_newbie_welcome_panel)
-            arc_menu.add_button(self.language_manager.GetText('BANK_MENU_NAME'), on_click=self.show_bank_main_menu)
-            arc_menu.add_button(self.language_manager.GetText('SMALL_HORN_MENU_BUTTON'), on_click=self.show_small_horn_buy_panel)
             arc_menu.add_button(self.language_manager.GetText('TELEPORT_MENU_NAME'), on_click=self.show_teleport_menu)
             arc_menu.add_button(self.language_manager.GetText('LAND_MENU_NAME'), on_click=self.show_land_main_menu)
+            arc_menu.add_button(self.language_manager.GetText('BANK_MENU_NAME'), on_click=self.show_bank_main_menu)
+            arc_menu.add_button(self.language_manager.GetText('GUILD_MENU_NAME'), on_click=self.show_guild_main_menu)
+            arc_menu.add_button(self.language_manager.GetText('CHECKIN_MENU_BUTTON'), on_click=self.show_daily_checkin_panel)
+            arc_menu.add_button(self.language_manager.GetText('MAIN_MENU_MY_INFO_NAME'), on_click=self.show_my_info_panel)
+            arc_menu.add_button(self.language_manager.GetText('MAIN_MENU_TOOLS_BUTTON'), on_click=self.show_arc_tools_menu)
             if self.server.plugin_manager.get_plugin('ushop'):
                 arc_menu.add_button(self.language_manager.GetText('SHOP_MENU_NAME'), on_click=self.show_shop_menu)
             if self.server.plugin_manager.get_plugin('arc_button_shop'):
@@ -2294,10 +2456,24 @@ class ARCCorePlugin(Plugin):
                 arc_menu.add_button(self.language_manager.GetText('STOCK_MARKET_NAME'), on_click=self.show_stock_ui)
             if player.is_op:
                 arc_menu.add_button(self.language_manager.GetText('OP_PANEL_NAME'), on_click=self.show_op_main_panel)
-            arc_menu.add_button(self.language_manager.GetText('SUICIDE_FUNC_BUTTON'), on_click=self.execute_suicide)
             arc_menu.on_close = None
             player.send_form(arc_menu)
-    
+
+    def show_arc_tools_menu(self, player: Player):
+        """小喇叭、重生等快捷功能入口。"""
+        tools_form = ActionForm(
+            title=self.language_manager.GetText("MAIN_MENU_TOOLS_TITLE"),
+            content=self.language_manager.GetText("MAIN_MENU_TOOLS_CONTENT"),
+            on_close=self.show_main_menu,
+        )
+        tools_form.add_button(
+            self.language_manager.GetText("SMALL_HORN_MENU_BUTTON"),
+            on_click=lambda p: self.show_small_horn_buy_panel(p, on_panel_close=self.show_arc_tools_menu),
+        )
+        tools_form.add_button(self.language_manager.GetText("SUICIDE_FUNC_BUTTON"), on_click=self.execute_suicide)
+        tools_form.add_button(self.language_manager.GetText("RETURN_BUTTON_TEXT"), on_click=self.show_main_menu)
+        player.send_form(tools_form)
+
     def execute_suicide(self, player: Player):
         player.perform_command('suicide')
 
@@ -2667,15 +2843,14 @@ class ARCCorePlugin(Plugin):
                 self.logger.error(f"{ColorFormat.RED}[ARC Core]Auto equip title on join error: {str(e)}")
 
     def _update_player_name_tag(self, player: Player) -> None:
-        """将玩家 name_tag 设为 [头衔]名字 或 名字（未佩戴时）。进服与头衔变动时调用。"""
+        """将玩家 name_tag 设为 [公会][头衔]名字（与聊天、接口展示一致）。"""
         try:
             equipped = self.title_system.get_equipped_title(player)
             name = player.name or ""
-            if equipped and name:
-                rarity_color = self.title_system.get_title_rarity_color(equipped)
-                player.name_tag = f"{rarity_color}[{equipped}]§r{name}"
-            else:
-                player.name_tag = name
+            xuid = str(player.xuid)
+            player.name_tag = self.format_player_display_label_with_guild(
+                name, equipped, xuid
+            )
         except Exception as e:
             if self.logger:
                 self.logger.error(f"[ARC Core]Update player name_tag error: {str(e)}")
@@ -4076,6 +4251,627 @@ class ARCCorePlugin(Plugin):
     def judge_if_player_has_enough_money(self, player: Player, amount: float) -> bool:
         return self.economy.judge_if_player_has_enough_money_by_xuid(str(player.xuid), amount)
 
+    def _guild_text(self, key: str, default: str) -> str:
+        t = self.language_manager.GetText(key)
+        if t is None or not str(t).strip():
+            return default
+        return str(t)
+
+    def _guild_err(self, code: Optional[str]) -> str:
+        if not code:
+            return self._guild_text("GUILD_ERR_UNKNOWN", "[弧光核心]操作失败。")
+        return self._guild_text(code, f"[弧光核心]操作失败（{code}）。")
+
+    def _find_online_player_by_xuid(self, xuid: str) -> Optional[Player]:
+        xuid_s = str(xuid).strip()
+        if not xuid_s:
+            return None
+        try:
+            for p in self.server.online_players or []:
+                if str(p.xuid) == xuid_s:
+                    return p
+        except Exception:
+            pass
+        return None
+
+    # Guild
+    def show_guild_main_menu(self, player: Player):
+        if not self.if_player_logined(player):
+            self.show_main_menu(player)
+            return
+        xuid = str(player.xuid)
+        pending = self.guild_system.list_invites_for_player(xuid)
+        mem = self.guild_system.get_membership(xuid)
+        cost = self.guild_system.get_create_cost()
+        lines = []
+        if mem:
+            g = self.guild_system.get_guild(int(mem["guild_id"]))
+            gname = g.get("name", "") if g else ""
+            role = mem.get("role", "")
+            role_label = self._guild_text(
+                f"GUILD_ROLE_{str(role).upper()}",
+                str(role),
+            )
+            motto = (g.get("motto") or "") if g else ""
+            lines.append(
+                self._guild_text("GUILD_MAIN_IN_GUILD", "所属公会：{0}  职级：{1}").format(
+                    gname, role_label
+                )
+            )
+            if motto:
+                lines.append(
+                    self._guild_text("GUILD_MAIN_MOTTO", "简介：{0}").format(motto)
+                )
+        else:
+            lines.append(
+                self._guild_text(
+                    "GUILD_MAIN_NOT_IN_GUILD",
+                    "您尚未加入公会。创建需支付 {0}。",
+                ).format(self._format_money_display(cost))
+            )
+        if pending:
+            lines.append(
+                self._guild_text(
+                    "GUILD_MAIN_PENDING_HINT",
+                    "您有 {0} 条待处理公会邀请。",
+                ).format(len(pending))
+            )
+        form = ActionForm(
+            title=self._guild_text("GUILD_MAIN_TITLE", "公会"),
+            content="\n".join(lines),
+            on_close=self.show_main_menu,
+        )
+        if pending:
+            form.add_button(
+                self._guild_text("GUILD_BTN_PENDING_INVITES", "待处理邀请"),
+                on_click=self.show_guild_pending_invites_menu,
+            )
+        if not mem:
+            form.add_button(
+                self._guild_text("GUILD_BTN_CREATE", "创建公会"),
+                on_click=self.show_guild_create_panel,
+            )
+        if mem:
+            form.add_button(
+                self._guild_text("GUILD_BTN_MY_GUILD", "我的公会"),
+                on_click=self.show_guild_my_menu,
+            )
+        form.add_button(
+            self._guild_text("RETURN_BUTTON_TEXT", "返回"),
+            on_click=self.show_main_menu,
+        )
+        player.send_form(form)
+
+    def show_guild_pending_invites_menu(self, player: Player):
+        xuid = str(player.xuid)
+        rows = self.guild_system.list_invites_for_player(xuid)
+        form = ActionForm(
+            title=self._guild_text("GUILD_PENDING_TITLE", "公会邀请"),
+            content=self._guild_text("GUILD_PENDING_CONTENT", "选择一条邀请查看详情。"),
+            on_close=self.show_guild_main_menu,
+        )
+        for r in rows:
+            gid = int(r["guild_id"])
+            inv_id = int(r["invite_id"])
+            gname = str(r.get("guild_name") or "")
+            label = self._guild_text("GUILD_PENDING_ROW", "{0}").format(gname)
+
+            def _open(p: Player, iid: int = inv_id):
+                self.show_guild_invite_action_menu(p, iid)
+
+            form.add_button(label, on_click=_open)
+        form.add_button(
+            self._guild_text("RETURN_BUTTON_TEXT", "返回"),
+            on_click=self.show_guild_main_menu,
+        )
+        player.send_form(form)
+
+    def show_guild_invite_action_menu(self, player: Player, invite_id: int):
+        xuid = str(player.xuid)
+        inv = self.guild_system.get_invite(invite_id)
+        if not inv or str(inv.get("invitee_xuid")) != xuid:
+            player.send_message(self._guild_err("GUILD_NO_INVITE"))
+            self.show_guild_pending_invites_menu(player)
+            return
+        g = self.guild_system.get_guild(int(inv["guild_id"]))
+        gname = g.get("name", "") if g else ""
+        form = ActionForm(
+            title=self._guild_text("GUILD_INVITE_DETAIL_TITLE", "邀请详情"),
+            content=self._guild_text(
+                "GUILD_INVITE_DETAIL_CONTENT", "公会：{0}"
+            ).format(gname),
+            on_close=self.show_guild_pending_invites_menu,
+        )
+
+        def _accept(p: Player, iid: int = invite_id):
+            ok, err = self.guild_system.accept_invite(str(p.xuid), iid)
+            if ok:
+                p.send_message(
+                    self._guild_text("GUILD_ACCEPT_OK", "[弧光核心]已加入公会。")
+                )
+                self._update_player_name_tag(p)
+            else:
+                p.send_message(self._guild_err(err))
+            self.show_guild_main_menu(p)
+
+        def _decline(p: Player, iid: int = invite_id):
+            ok, err = self.guild_system.decline_invite(str(p.xuid), iid)
+            if ok:
+                p.send_message(
+                    self._guild_text("GUILD_DECLINE_OK", "[弧光核心]已拒绝邀请。")
+                )
+            else:
+                p.send_message(self._guild_err(err))
+            self.show_guild_pending_invites_menu(p)
+
+        form.add_button(
+            self._guild_text("GUILD_INVITE_ACCEPT", "接受"),
+            on_click=_accept,
+        )
+        form.add_button(
+            self._guild_text("GUILD_INVITE_DECLINE", "拒绝"),
+            on_click=_decline,
+        )
+        form.add_button(
+            self._guild_text("RETURN_BUTTON_TEXT", "返回"),
+            on_click=self.show_guild_pending_invites_menu,
+        )
+        player.send_form(form)
+
+    def show_guild_invite_popup_live(
+        self, player: Player, guild_id: int, inviter_xuid: str
+    ):
+        """在线邀请弹窗：不依赖 guild_invites 表，凭公会 id 与邀请人 xuid 确认后加入。"""
+        g = self.guild_system.get_guild(int(guild_id))
+        if not g:
+            return
+        gname = str(g.get("name") or "")
+        ix = str(inviter_xuid or "").strip()
+        inviter_disp = self.get_player_name_by_xuid(ix, return_with_title=False) or ix
+        form = ActionForm(
+            title=self._guild_text("GUILD_INVITE_POPUP_TITLE", "公会邀请"),
+            content=self._guild_text(
+                "GUILD_INVITE_POPUP_CONTENT",
+                "公会：{0}\n邀请人：{1}\n\n是否加入该公会？",
+            ).format(gname, inviter_disp),
+            on_close=None,
+        )
+
+        def _accept(p: Player, gid: int = int(guild_id), inv: str = ix):
+            ok, err = self.guild_system.join_via_live_invite(str(p.xuid), gid, inv)
+            if ok:
+                p.send_message(
+                    self._guild_text("GUILD_ACCEPT_OK", "[弧光核心]已加入公会。")
+                )
+                self._update_player_name_tag(p)
+            else:
+                p.send_message(self._guild_err(err))
+
+        def _decline(p: Player):
+            p.send_message(
+                self._guild_text("GUILD_DECLINE_OK", "[弧光核心]已拒绝邀请。")
+            )
+
+        form.add_button(
+            self._guild_text("GUILD_INVITE_ACCEPT", "接受"),
+            on_click=_accept,
+        )
+        form.add_button(
+            self._guild_text("GUILD_INVITE_DECLINE", "拒绝"),
+            on_click=_decline,
+        )
+        player.send_form(form)
+
+    def _guild_send_live_invite(
+        self, inviter: Player, target: Player, guild_id: int
+    ) -> None:
+        mem = self.guild_system.get_membership(str(inviter.xuid))
+        if not mem or int(mem["guild_id"]) != int(guild_id):
+            inviter.send_message(self._guild_err("GUILD_NO_PERMISSION"))
+            self.show_guild_my_menu(inviter)
+            return
+        if mem.get("role") not in (ROLE_OWNER, ROLE_MANAGER):
+            inviter.send_message(self._guild_err("GUILD_NO_PERMISSION"))
+            self.show_guild_my_menu(inviter)
+            return
+        if self.guild_system.get_membership(str(target.xuid)):
+            inviter.send_message(self._guild_err("GUILD_TARGET_IN_GUILD"))
+            self.show_guild_invite_online_pick_menu(inviter)
+            return
+        self.show_guild_invite_popup_live(
+            target, int(guild_id), str(inviter.xuid)
+        )
+        inviter.send_message(
+            self._guild_text(
+                "GUILD_INVITE_SENT",
+                "[弧光核心]已向 {0} 发送公会邀请。",
+            ).format(target.name or "?")
+        )
+        self.show_guild_my_menu(inviter)
+
+    def show_guild_create_panel(self, player: Player):
+        cost = self.guild_system.get_create_cost()
+        info = Label(
+            text=self._guild_text(
+                "GUILD_CREATE_LABEL",
+                "创建费用：{0}（将立即扣除）",
+            ).format(self._format_money_display(cost))
+        )
+        name_in = TextInput(
+            label=self._guild_text("GUILD_CREATE_NAME_LABEL", "公会名称（最多32字）"),
+            placeholder=self._guild_text(
+                "GUILD_CREATE_NAME_PLACEHOLDER", "请输入唯一公会名"
+            ),
+        )
+        motto_in = TextInput(
+            label=self._guild_text("GUILD_CREATE_MOTTO_LABEL", "公会简介（可选）"),
+            placeholder=self._guild_text("GUILD_CREATE_MOTTO_PLACEHOLDER", "简介"),
+            default_value="",
+        )
+
+        def _submit(p: Player, json_str: str):
+            try:
+                data = json.loads(json_str)
+            except Exception:
+                p.send_message(
+                    self._guild_text("GUILD_CREATE_INVALID", "[弧光核心]输入无效。")
+                )
+                self.show_guild_create_panel(p)
+                return
+            if len(data) < 3:
+                self.show_guild_create_panel(p)
+                return
+            name = str(data[1]).strip()
+            motto = str(data[2]).strip()
+            ok, err = self.guild_system.create_guild(name, str(p.xuid), motto)
+            if ok:
+                p.send_message(
+                    self._guild_text(
+                        "GUILD_CREATE_OK",
+                        "[弧光核心]公会创建成功，已扣除 {0}。",
+                    ).format(self._format_money_display(cost))
+                )
+                self._update_player_name_tag(p)
+                self.show_guild_main_menu(p)
+            else:
+                p.send_message(self._guild_err(err))
+                self.show_guild_create_panel(p)
+
+        form = ModalForm(
+            title=self._guild_text("GUILD_CREATE_TITLE", "创建公会"),
+            controls=[info, name_in, motto_in],
+            on_close=self.show_guild_main_menu,
+            on_submit=_submit,
+        )
+        player.send_form(form)
+
+    def show_guild_my_menu(self, player: Player):
+        xuid = str(player.xuid)
+        mem = self.guild_system.get_membership(xuid)
+        if not mem:
+            self.show_guild_main_menu(player)
+            return
+        gid = int(mem["guild_id"])
+        role = str(mem.get("role") or "")
+        form = ActionForm(
+            title=self._guild_text("GUILD_MY_TITLE", "我的公会"),
+            content=self._guild_text("GUILD_MY_CONTENT", "管理公会事务。"),
+            on_close=self.show_guild_main_menu,
+        )
+        form.add_button(
+            self._guild_text("GUILD_BTN_MEMBER_LIST", "成员列表"),
+            on_click=lambda p: self.show_guild_member_list_menu(p, readonly=True),
+        )
+        if role in (ROLE_OWNER, ROLE_MANAGER):
+            form.add_button(
+                self._guild_text("GUILD_BTN_INVITE", "邀请玩家"),
+                on_click=self.show_guild_invite_online_pick_menu,
+            )
+            form.add_button(
+                self._guild_text("GUILD_BTN_KICK", "踢出成员"),
+                on_click=self.show_guild_kick_menu,
+            )
+        if role == ROLE_OWNER:
+            form.add_button(
+                self._guild_text("GUILD_BTN_SET_ROLE", "变更职级"),
+                on_click=self.show_guild_set_role_pick_member,
+            )
+            form.add_button(
+                self._guild_text("GUILD_BTN_DISBAND", "解散公会"),
+                on_click=self.show_guild_disband_confirm,
+            )
+        if role != ROLE_OWNER:
+            form.add_button(
+                self._guild_text("GUILD_BTN_LEAVE", "退出公会"),
+                on_click=self.show_guild_leave_confirm,
+            )
+        form.add_button(
+            self._guild_text("RETURN_BUTTON_TEXT", "返回"),
+            on_click=self.show_guild_main_menu,
+        )
+        player.send_form(form)
+
+    def show_guild_member_list_menu(self, player: Player, readonly: bool = True):
+        mem = self.guild_system.get_membership(str(player.xuid))
+        if not mem:
+            self.show_guild_main_menu(player)
+            return
+        gid = int(mem["guild_id"])
+        members = self.guild_system.list_members(gid)
+        lines = []
+        for m in members:
+            xu = str(m.get("xuid") or "")
+            rn = self.get_player_name_by_xuid(xu, return_with_title=False) or xu
+            rl = self._guild_text(
+                f"GUILD_ROLE_{str(m.get('role') or '').upper()}",
+                str(m.get("role") or ""),
+            )
+            lines.append(f"{rn}  [{rl}]")
+        form = ActionForm(
+            title=self._guild_text("GUILD_MEMBER_LIST_TITLE", "成员列表"),
+            content="\n".join(lines)
+            if lines
+            else self._guild_text("GUILD_MEMBER_LIST_EMPTY", "暂无成员"),
+            on_close=self.show_guild_my_menu,
+        )
+        form.add_button(
+            self._guild_text("RETURN_BUTTON_TEXT", "返回"),
+            on_click=self.show_guild_my_menu,
+        )
+        player.send_form(form)
+
+    def show_guild_invite_online_pick_menu(self, player: Player):
+        """仅邀请当前在线、且未加入任何公会的玩家；点击后对方弹出确认，不入库邀请表。"""
+        mem = self.guild_system.get_membership(str(player.xuid))
+        if not mem or mem.get("role") not in (ROLE_OWNER, ROLE_MANAGER):
+            player.send_message(self._guild_err("GUILD_NO_PERMISSION"))
+            self.show_guild_my_menu(player)
+            return
+        gid = int(mem["guild_id"])
+        try:
+            online = list(getattr(self.server, "online_players", []) or [])
+        except Exception:
+            online = []
+        candidates: List[Player] = []
+        self_xuid = str(player.xuid)
+        for op in online:
+            try:
+                if str(op.xuid) == self_xuid:
+                    continue
+                if self.guild_system.get_membership(str(op.xuid)):
+                    continue
+            except Exception:
+                continue
+            candidates.append(op)
+        candidates.sort(key=lambda pl: (pl.name or "").lower())
+
+        form = ActionForm(
+            title=self._guild_text("GUILD_INVITE_ONLINE_TITLE", "邀请在线玩家"),
+            content=self._guild_text(
+                "GUILD_INVITE_ONLINE_CONTENT",
+                "选择一名未加入公会的在线玩家，对方将收到确认窗口。",
+            ),
+            on_close=self.show_guild_my_menu,
+        )
+        if not candidates:
+            form.add_button(
+                self._guild_text(
+                    "GUILD_INVITE_ONLINE_EMPTY",
+                    "当前没有可邀请的在线玩家",
+                ),
+                on_click=self.show_guild_my_menu,
+            )
+        else:
+            for tgt in candidates:
+                label = tgt.name or "?"
+
+                def _pick(inviter: Player, target: Player = tgt, g_id: int = gid):
+                    self._guild_send_live_invite(inviter, target, g_id)
+
+                form.add_button(label, on_click=_pick)
+        form.add_button(
+            self._guild_text("RETURN_BUTTON_TEXT", "返回"),
+            on_click=self.show_guild_my_menu,
+        )
+        player.send_form(form)
+
+    def show_guild_kick_menu(self, player: Player):
+        actor_xuid = str(player.xuid)
+        mem = self.guild_system.get_membership(actor_xuid)
+        if not mem or mem.get("role") not in (ROLE_OWNER, ROLE_MANAGER):
+            player.send_message(self._guild_err("GUILD_NO_PERMISSION"))
+            self.show_guild_my_menu(player)
+            return
+        gid = int(mem["guild_id"])
+        role = str(mem.get("role") or "")
+        members = self.guild_system.list_members(gid)
+        targets: List[Dict[str, Any]] = []
+        for m in members:
+            tx = str(m.get("xuid") or "")
+            tr = str(m.get("role") or "")
+            if tx == actor_xuid:
+                continue
+            if tr == ROLE_OWNER:
+                continue
+            if role == ROLE_MANAGER and tr != ROLE_MEMBER:
+                continue
+            targets.append(m)
+        form = ActionForm(
+            title=self._guild_text("GUILD_KICK_TITLE", "踢出成员"),
+            content=self._guild_text("GUILD_KICK_CONTENT", "选择要移出公会的成员。"),
+            on_close=self.show_guild_my_menu,
+        )
+        if not targets:
+            form.add_button(
+                self._guild_text("GUILD_KICK_NONE", "暂无可踢出的成员"),
+                on_click=self.show_guild_my_menu,
+            )
+        for m in targets:
+            tx = str(m.get("xuid") or "")
+            disp = self.get_player_name_by_xuid(tx, return_with_title=False) or tx
+
+            def _kick(p: Player, target: str = tx):
+                ok, err = self.guild_system.kick(str(p.xuid), target)
+                if ok:
+                    p.send_message(
+                        self._guild_text("GUILD_KICK_OK", "[弧光核心]已移出该成员。")
+                    )
+                    self._refresh_player_name_tag_by_xuid(target)
+                else:
+                    p.send_message(self._guild_err(err))
+                self.show_guild_my_menu(p)
+
+            form.add_button(disp, on_click=_kick)
+        form.add_button(
+            self._guild_text("RETURN_BUTTON_TEXT", "返回"),
+            on_click=self.show_guild_my_menu,
+        )
+        player.send_form(form)
+
+    def show_guild_set_role_pick_member(self, player: Player):
+        actor_xuid = str(player.xuid)
+        mem = self.guild_system.get_membership(actor_xuid)
+        if not mem or mem.get("role") != ROLE_OWNER:
+            player.send_message(self._guild_err("GUILD_NO_PERMISSION"))
+            self.show_guild_my_menu(player)
+            return
+        gid = int(mem["guild_id"])
+        members = self.guild_system.list_members(gid)
+        form = ActionForm(
+            title=self._guild_text("GUILD_SET_ROLE_PICK_TITLE", "变更职级"),
+            content=self._guild_text(
+                "GUILD_SET_ROLE_PICK_CONTENT", "选择一名成员（不含会长）。"
+            ),
+            on_close=self.show_guild_my_menu,
+        )
+        any_btn = False
+        for m in members:
+            tx = str(m.get("xuid") or "")
+            if tx == actor_xuid:
+                continue
+            if str(m.get("role") or "") == ROLE_OWNER:
+                continue
+            any_btn = True
+            disp = self.get_player_name_by_xuid(tx, return_with_title=False) or tx
+
+            def _pick(p: Player, target: str = tx):
+                self.show_guild_set_role_actions(p, target)
+
+            form.add_button(disp, on_click=_pick)
+        if not any_btn:
+            form.add_button(
+                self._guild_text("GUILD_SET_ROLE_NOBODY", "没有其他成员"),
+                on_click=self.show_guild_my_menu,
+            )
+        form.add_button(
+            self._guild_text("RETURN_BUTTON_TEXT", "返回"),
+            on_click=self.show_guild_my_menu,
+        )
+        player.send_form(form)
+
+    def show_guild_set_role_actions(self, player: Player, target_xuid: str):
+        form = ActionForm(
+            title=self._guild_text("GUILD_SET_ROLE_ACTION_TITLE", "职级操作"),
+            content=self._guild_text("GUILD_SET_ROLE_ACTION_CONTENT", "选择新职级。"),
+            on_close=self.show_guild_set_role_pick_member,
+        )
+
+        def _set(p: Player, new_r: str):
+            ok, err = self.guild_system.set_role(str(p.xuid), target_xuid, new_r)
+            if ok:
+                p.send_message(
+                    self._guild_text("GUILD_SET_ROLE_OK", "[弧光核心]职级已更新。")
+                )
+            else:
+                p.send_message(self._guild_err(err))
+            self.show_guild_my_menu(p)
+
+        form.add_button(
+            self._guild_text("GUILD_ROLE_PROMOTE_MANAGER", "设为管理者"),
+            on_click=lambda p: _set(p, ROLE_MANAGER),
+        )
+        form.add_button(
+            self._guild_text("GUILD_ROLE_DEMOTE_MEMBER", "设为普通成员"),
+            on_click=lambda p: _set(p, ROLE_MEMBER),
+        )
+        form.add_button(
+            self._guild_text("RETURN_BUTTON_TEXT", "返回"),
+            on_click=self.show_guild_set_role_pick_member,
+        )
+        player.send_form(form)
+
+    def show_guild_leave_confirm(self, player: Player):
+        form = ActionForm(
+            title=self._guild_text("GUILD_LEAVE_TITLE", "退出公会"),
+            content=self._guild_text(
+                "GUILD_LEAVE_CONFIRM", "确定退出当前公会吗？"
+            ),
+            on_close=self.show_guild_my_menu,
+        )
+
+        def _yes(p: Player):
+            ok, err = self.guild_system.leave(str(p.xuid))
+            if ok:
+                p.send_message(
+                    self._guild_text("GUILD_LEAVE_OK", "[弧光核心]已退出公会。")
+                )
+                self._update_player_name_tag(p)
+            else:
+                p.send_message(self._guild_err(err))
+            self.show_guild_main_menu(p)
+
+        form.add_button(
+            self._guild_text("GUILD_CONFIRM_YES", "确定"),
+            on_click=_yes,
+        )
+        form.add_button(
+            self._guild_text("RETURN_BUTTON_TEXT", "取消"),
+            on_click=self.show_guild_my_menu,
+        )
+        player.send_form(form)
+
+    def show_guild_disband_confirm(self, player: Player):
+        form = ActionForm(
+            title=self._guild_text("GUILD_DISBAND_TITLE", "解散公会"),
+            content=self._guild_text(
+                "GUILD_DISBAND_CONFIRM",
+                "解散后所有成员将被移除，且不可恢复。确定吗？",
+            ),
+            on_close=self.show_guild_my_menu,
+        )
+
+        def _yes(p: Player):
+            member_xuids: List[str] = []
+            try:
+                mem = self.guild_system.get_membership(str(p.xuid))
+                if mem:
+                    for row in self.guild_system.list_members(int(mem["guild_id"])):
+                        xu = str(row.get("xuid") or "").strip()
+                        if xu:
+                            member_xuids.append(xu)
+            except Exception:
+                member_xuids = []
+            ok, err = self.guild_system.disband(str(p.xuid))
+            if ok:
+                p.send_message(
+                    self._guild_text("GUILD_DISBAND_OK", "[弧光核心]公会已解散。")
+                )
+                for xu in member_xuids:
+                    self._refresh_player_name_tag_by_xuid(xu)
+            else:
+                p.send_message(self._guild_err(err))
+            self.show_guild_main_menu(p)
+
+        form.add_button(
+            self._guild_text("GUILD_CONFIRM_YES_DISBAND", "确定解散"),
+            on_click=_yes,
+        )
+        form.add_button(
+            self._guild_text("RETURN_BUTTON_TEXT", "取消"),
+            on_click=self.show_guild_my_menu,
+        )
+        player.send_form(form)
+
     # Bank
     def show_bank_main_menu(self, player: Player):
         bank_main_menu = ActionForm(
@@ -4202,8 +4998,15 @@ class ARCCorePlugin(Plugin):
         )
         player.send_form(transfer_panel)
 
-    def show_small_horn_buy_panel(self, player: Player, hint_message: Optional[str] = None):
-        """显示小喇叭购买面板。"""
+    def show_small_horn_buy_panel(
+        self,
+        player: Player,
+        hint_message: Optional[str] = None,
+        *,
+        on_panel_close: Any = None,
+    ):
+        """显示小喇叭购买面板。on_panel_close 关闭表单时回调，默认回主菜单。"""
+        close_cb = on_panel_close if on_panel_close is not None else self.show_main_menu
         panel_title = self.language_manager.GetText('SMALL_HORN_MENU_TITLE')
         if hint_message:
             panel_title = hint_message
@@ -4228,11 +5031,15 @@ class ARCCorePlugin(Plugin):
             try:
                 data = json.loads(json_str)
             except Exception:
-                self.show_small_horn_buy_panel(sender, self.language_manager.GetText('SMALL_HORN_BUY_INVALID_INPUT'))
+                self.show_small_horn_buy_panel(
+                    sender, self.language_manager.GetText('SMALL_HORN_BUY_INVALID_INPUT'), on_panel_close=close_cb
+                )
                 return
 
             if len(data) < 3:
-                self.show_small_horn_buy_panel(sender, self.language_manager.GetText('SMALL_HORN_BUY_INVALID_INPUT'))
+                self.show_small_horn_buy_panel(
+                    sender, self.language_manager.GetText('SMALL_HORN_BUY_INVALID_INPUT'), on_panel_close=close_cb
+                )
                 return
 
             valid_hours_text = str(data[1]).strip()
@@ -4240,15 +5047,21 @@ class ARCCorePlugin(Plugin):
             try:
                 valid_hours = int(valid_hours_text)
             except (TypeError, ValueError):
-                self.show_small_horn_buy_panel(sender, self.language_manager.GetText('SMALL_HORN_BUY_INVALID_HOURS'))
+                self.show_small_horn_buy_panel(
+                    sender, self.language_manager.GetText('SMALL_HORN_BUY_INVALID_HOURS'), on_panel_close=close_cb
+                )
                 return
 
             if valid_hours <= 0:
-                self.show_small_horn_buy_panel(sender, self.language_manager.GetText('SMALL_HORN_BUY_INVALID_HOURS'))
+                self.show_small_horn_buy_panel(
+                    sender, self.language_manager.GetText('SMALL_HORN_BUY_INVALID_HOURS'), on_panel_close=close_cb
+                )
                 return
 
             if not content:
-                self.show_small_horn_buy_panel(sender, self.language_manager.GetText('SMALL_HORN_BUY_EMPTY_CONTENT'))
+                self.show_small_horn_buy_panel(
+                    sender, self.language_manager.GetText('SMALL_HORN_BUY_EMPTY_CONTENT'), on_panel_close=close_cb
+                )
                 return
 
             total_cost = float(valid_hours * self.small_horn_price_per_hour)
@@ -4259,12 +5072,12 @@ class ARCCorePlugin(Plugin):
                         self._format_money_display(self.get_player_money(sender))
                     )
                 )
-                self.show_small_horn_buy_panel(sender)
+                self.show_small_horn_buy_panel(sender, on_panel_close=close_cb)
                 return
 
             if total_cost > 0 and not self.decrease_player_money(sender, total_cost):
                 sender.send_message(self.language_manager.GetText('SMALL_HORN_BUY_PAY_FAILED'))
-                self.show_small_horn_buy_panel(sender)
+                self.show_small_horn_buy_panel(sender, on_panel_close=close_cb)
                 return
 
             start_time = datetime.now()
@@ -4284,7 +5097,7 @@ class ARCCorePlugin(Plugin):
                 if total_cost > 0:
                     self.increase_player_money(sender, total_cost)
                 sender.send_message(self.language_manager.GetText('SMALL_HORN_BUY_SAVE_FAILED'))
-                self.show_small_horn_buy_panel(sender)
+                self.show_small_horn_buy_panel(sender, on_panel_close=close_cb)
                 return
 
             sender.send_message(
@@ -4299,7 +5112,7 @@ class ARCCorePlugin(Plugin):
         buy_form = ModalForm(
             title=panel_title,
             controls=[info_label, valid_hours_input, content_input],
-            on_close=self.show_main_menu,
+            on_close=close_cb,
             on_submit=try_buy_small_horn
         )
         player.send_form(buy_form)
@@ -4570,18 +5383,19 @@ class ARCCorePlugin(Plugin):
     def _delete_cross_server_target(self, target_id: int) -> bool:
         return self.database_manager.delete('cross_server_targets', 'id = ?', (int(target_id),))
 
-    def show_cross_server_menu(self, player: Player):
-        """显示跨服传送菜单。"""
+    def show_cross_server_menu(self, player: Player, on_close=None):
+        """显示跨服传送菜单。on_close 默认返回传送主菜单；单独打开时可传入例如 show_main_menu。"""
+        back_menu = on_close if on_close is not None else self.show_teleport_menu
         targets = self._get_all_cross_server_targets()
         if not targets:
             no_target_panel = ActionForm(
                 title=self.language_manager.GetText('CROSS_SERVER_MENU_TITLE'),
                 content=self.language_manager.GetText('CROSS_SERVER_MENU_EMPTY'),
-                on_close=self.show_teleport_menu
+                on_close=back_menu
             )
             no_target_panel.add_button(
                 self.language_manager.GetText('RETURN_BUTTON_TEXT'),
-                on_click=self.show_teleport_menu
+                on_click=back_menu
             )
             player.send_form(no_target_panel)
             return
@@ -4589,7 +5403,7 @@ class ARCCorePlugin(Plugin):
         cross_server_menu = ActionForm(
             title=self.language_manager.GetText('CROSS_SERVER_MENU_TITLE'),
             content=self.language_manager.GetText('CROSS_SERVER_MENU_CONTENT').format(len(targets)),
-            on_close=self.show_teleport_menu
+            on_close=back_menu
         )
         for target in targets:
             server_name = str(target.get('server_name') or '').strip()
@@ -4603,7 +5417,7 @@ class ARCCorePlugin(Plugin):
             )
         cross_server_menu.add_button(
             self.language_manager.GetText('RETURN_BUTTON_TEXT'),
-            on_click=self.show_teleport_menu
+            on_click=back_menu
         )
         player.send_form(cross_server_menu)
 
@@ -5821,7 +6635,7 @@ class ARCCorePlugin(Plugin):
         land_main_menu.add_button(self.language_manager.GetText('LAND_MAIN_MENU_MANAGE_LAND_TEXT'),
                                   on_click=self.show_own_land_menu)
         land_main_menu.add_button(self.language_manager.GetText('LAND_MAIN_MENU_CREATE_NEW_LAND_TEXT'),
-                                  on_click=self.show_create_new_land_guide)
+                                  on_click=self.start_interactive_land_creation)
         land_main_menu.add_button(self.language_manager.GetText('LAND_MAIN_MENU_CHECK_CURRENT_LAND_TEXT'),
                                   on_click=self.show_current_land_info)
         # 返回
@@ -6554,7 +7368,7 @@ class ARCCorePlugin(Plugin):
                     'min_z': min_z, 'max_z': max_z
                 }
                 self._visualize_pending_land(p)
-                self.show_new_land_info(p)
+                self.show_pending_land_purchase_panel(p)
             except Exception as e:
                 self.logger.error(f"Create land form submit error: {str(e)}")
                 self.report_arc_error(
@@ -6726,118 +7540,12 @@ class ARCCorePlugin(Plugin):
             )
 
     def show_new_land_info(self, player: Player):
-        """显示待购买领地的预览信息面板（含购买按钮和/landbuy提示）"""
-        info = self.player_new_land_creation_info.get(player.name)
-        if not info:
-            self.report_arc_error(
-                "LAND25",
-                f"show_new_land_info no player_new_land_creation_info player={player.name!r}",
-                player,
-            )
-            return
-
-        dimension = info['dimension']
-        min_x, max_x = info['min_x'], info['max_x']
-        min_y, max_y = info['min_y'], info['max_y']
-        min_z, max_z = info['min_z'], info['max_z']
-
-        if_allowed, reason, overlap_ids = self.check_land_availability(dimension, min_x, max_x, min_y, max_y, min_z, max_z)
-        if not if_allowed:
-            if reason == "SYSTEM_ERROR":
-                self.report_arc_error(
-                    "LAND0",
-                    f"show_new_land_info check_land_availability SYSTEM_ERROR dim={dimension!r} overlap_ids={overlap_ids!r}",
-                    player,
-                )
-            msg = self.language_manager.GetText(f'CHECK_NEW_LAND_AVAILABILITY_FAIL_{reason}')
-            if overlap_ids:
-                land_parts = [f"#{lid} {self.get_land_name(lid) or ''}".strip() for lid in overlap_ids]
-                msg = msg + '\n' + self.language_manager.GetText('LAND_OVERLAP_WITH_LANDS').format(', '.join(land_parts))
-            player.send_message(msg)
-            return
-
-        length = max_x - min_x + 1
-        height = max_y - min_y + 1
-        width = max_z - min_z + 1
-
-        if length <= self.land_min_size or width <= self.land_min_size:
-            player.send_message(self.language_manager.GetText('CREATE_NEW_LAND_SIZE_TOO_SMALL').format(length, width, self.land_min_size))
-            return
-
-        volume = length * height * width
-
-        remaining_free_blocks = self.get_player_free_land_blocks(player)
-        paid_blocks = max(0, volume - remaining_free_blocks)
-        money_cost = paid_blocks * self.land_price
-        used_free_blocks = min(volume, remaining_free_blocks)
-
-        player_money = self.get_player_money(player)
-        can_afford = player.is_op or player_money >= money_cost
-
-        new_land_form = ActionForm(
-            title=self.language_manager.GetText('NEW_LAND_TITLE'),
-            content=self.language_manager.GetText('NEW_LAND_INFO_TEXT').format(
-                dimension,
-                (min_x, min_y, min_z),
-                (max_x, max_y, max_z),
-                volume,
-                self._format_money_display(money_cost),
-                self._format_money_display(player_money)
-            )
-        )
-
-        if can_afford:
-            new_land_form.add_button(
-                self.language_manager.GetText('BUY_NEW_LAND_TEXT'),
-                on_click=lambda p: self.player_buy_new_land(p, dimension, min_x, max_x, min_y, max_y, min_z, max_z, volume, money_cost, used_free_blocks)
-            )
-        else:
-            new_land_form.add_button(self.language_manager.GetText('BUY_NEW_LAND_NO_MONEY_TEXT'))
-
-        new_land_form.add_button(
-            self.language_manager.GetText('LAND_RESELECT_BUTTON_TEXT'),
-            on_click=self.show_create_new_land_guide
-        )
-        player.send_form(new_land_form)
+        """兼容旧入口：打开待购领地面板。"""
+        self.show_pending_land_purchase_panel(player)
 
     def _execute_land_buy(self, player: Player):
-        """供/landbuy命令调用，检查并购买缓存中的领地"""
-        info = self.player_new_land_creation_info.get(player.name)
-        if not info:
-            player.send_message(self.language_manager.GetText('LANDBUY_NO_PENDING_LAND'))
-            return
-
-        dimension = info['dimension']
-        min_x, max_x = info['min_x'], info['max_x']
-        min_y, max_y = info['min_y'], info['max_y']
-        min_z, max_z = info['min_z'], info['max_z']
-
-        if_allowed, reason, overlap_ids = self.check_land_availability(dimension, min_x, max_x, min_y, max_y, min_z, max_z)
-        if not if_allowed:
-            if reason == "SYSTEM_ERROR":
-                self.report_arc_error(
-                    "LAND0B",
-                    f"_execute_land_buy check_land_availability SYSTEM_ERROR dim={dimension!r} overlap_ids={overlap_ids!r}",
-                    player,
-                )
-            msg = self.language_manager.GetText(f'CHECK_NEW_LAND_AVAILABILITY_FAIL_{reason}')
-            if overlap_ids:
-                land_parts = [f"#{lid} {self.get_land_name(lid) or ''}".strip() for lid in overlap_ids]
-                msg = msg + '\n' + self.language_manager.GetText('LAND_OVERLAP_WITH_LANDS').format(', '.join(land_parts))
-            player.send_message(msg)
-            return
-
-        length = max_x - min_x + 1
-        height = max_y - min_y + 1
-        width = max_z - min_z + 1
-        volume = length * height * width
-
-        remaining_free_blocks = self.get_player_free_land_blocks(player)
-        paid_blocks = max(0, volume - remaining_free_blocks)
-        money_cost = paid_blocks * self.land_price
-        used_free_blocks = min(volume, remaining_free_blocks)
-
-        self.player_buy_new_land(player, dimension, min_x, max_x, min_y, max_y, min_z, max_z, volume, money_cost, used_free_blocks)
+        """供 /landbuy 调用：打开购买确认面板（不再直接扣款购买）。"""
+        self.show_pending_land_purchase_panel(player)
 
     def _visualize_pending_land(self, player: Player):
         """用粒子效果可视化玩家缓存中的待购买领地"""
@@ -6852,6 +7560,281 @@ class ARCCorePlugin(Plugin):
 
     def clear_new_land_creation_info_memory(self, player: Player):
         self.player_new_land_creation_info.pop(player.name, None)
+        self.player_land_creation_pick.pop(player.name, None)
+        self.player_land_pick_last_event_ts.pop(player.name, None)
+
+    def start_interactive_land_creation(self, player: Player):
+        """创建领地：先在世界中交互 4 个选点，再进入购买确认面板。"""
+        if not self.if_player_logined(player):
+            self.show_main_menu(player)
+            return
+        self.player_new_land_creation_info.pop(player.name, None)
+        self.player_land_pos1.pop(player.name, None)
+        self.player_land_creation_pick[player.name] = {
+            "step": "rect_a",
+            "dimension": player.location.dimension.name,
+        }
+        self.player_land_pick_last_event_ts.pop(player.name, None)
+        player.send_message(self.language_manager.GetText("LAND_CREATION_PICK_RECT_A"))
+
+    def _try_consume_land_creation_pick(self, event: PlayerInteractEvent) -> bool:
+        """处理圈地选点；已处理则取消默认交互。成功推进选点后打时间戳，短间隔内重复事件视为同一次点击防抖丢弃。"""
+        player = event.player
+        name = player.name
+        state = self.player_land_creation_pick.get(name)
+        if not state:
+            return False
+        if not getattr(event, "has_block", False):
+            return False
+        block = getattr(event, "block", None)
+        if block is None or not hasattr(block, "location") or block.location is None:
+            return False
+        block_location = block.location
+        now_ts = time.time()
+        last_ok_ts = self.player_land_pick_last_event_ts.get(name)
+        if last_ok_ts is not None and (now_ts - last_ok_ts) < self._land_creation_pick_debounce_sec:
+            event.is_cancelled = True
+            return True
+        if hasattr(block, "dimension") and block.dimension is not None and hasattr(block.dimension, "name"):
+            dimension = block.dimension.name
+        else:
+            dimension = player.location.dimension.name if hasattr(player, "location") and player.location else ""
+        if dimension != state.get("dimension"):
+            player.send_message(self.language_manager.GetText("LAND_CREATION_PICK_WRONG_DIM"))
+            return False
+        bx = int(math.floor(block_location.x))
+        by = int(math.floor(block_location.y))
+        bz = int(math.floor(block_location.z))
+        step = state.get("step")
+        try:
+            if step == "rect_a":
+                event.is_cancelled = True
+                state["step"] = "rect_b"
+                state["ax"], state["az"] = bx, bz
+                self.player_land_pick_last_event_ts[name] = time.time()
+                player.send_message(self.language_manager.GetText("LAND_CREATION_PICK_RECT_B"))
+                return True
+            if step == "rect_b":
+                event.is_cancelled = True
+                ax, az = state["ax"], state["az"]
+                state.pop("ax", None)
+                state.pop("az", None)
+                state["min_x"], state["max_x"] = min(ax, bx), max(ax, bx)
+                state["min_z"], state["max_z"] = min(az, bz), max(az, bz)
+                state["step"] = "y_min"
+                self.player_land_pick_last_event_ts[name] = time.time()
+                player.send_message(self.language_manager.GetText("LAND_CREATION_PICK_Y_MIN"))
+                return True
+            if step == "y_min":
+                event.is_cancelled = True
+                state["y_low"] = by
+                state["step"] = "y_max"
+                self.player_land_pick_last_event_ts[name] = time.time()
+                player.send_message(self.language_manager.GetText("LAND_CREATION_PICK_Y_MAX"))
+                return True
+            if step == "y_max":
+                event.is_cancelled = True
+                y_low = int(state.get("y_low", by))
+                y_high = by
+                min_y = min(y_low, y_high)
+                max_y = max(y_low, y_high)
+                self.player_new_land_creation_info[name] = {
+                    "dimension": state["dimension"],
+                    "min_x": state["min_x"],
+                    "max_x": state["max_x"],
+                    "min_y": min_y,
+                    "max_y": max_y,
+                    "min_z": state["min_z"],
+                    "max_z": state["max_z"],
+                }
+                self.player_land_creation_pick.pop(name, None)
+                self.player_land_pick_last_event_ts.pop(name, None)
+                self._visualize_pending_land(player)
+                self.show_pending_land_purchase_panel(player)
+                return True
+        except Exception as e:
+            self.logger.error(f"[ARC Core] land creation pick error: {e}")
+            self.report_arc_error(
+                "LAND_PICK1",
+                "_try_consume_land_creation_pick exception",
+                player,
+                exception=e,
+            )
+        return False
+
+    def show_pending_land_purchase_panel(self, player: Player):
+        """待购领地：粒子预览、坐标修改、确认购买；亦供 /landbuy 打开。"""
+        info = self.player_new_land_creation_info.get(player.name)
+        if not info:
+            player.send_message(self.language_manager.GetText("LANDBUY_NO_PENDING_LAND"))
+            return
+
+        dimension = info["dimension"]
+        min_x, max_x = info["min_x"], info["max_x"]
+        min_y, max_y = info["min_y"], info["max_y"]
+        min_z, max_z = info["min_z"], info["max_z"]
+
+        if_allowed, reason, overlap_ids = self.check_land_availability(dimension, min_x, max_x, min_y, max_y, min_z, max_z)
+        if not if_allowed:
+            if reason == "SYSTEM_ERROR":
+                self.report_arc_error(
+                    "LAND0",
+                    f"show_pending_land_purchase_panel check_land_availability SYSTEM_ERROR dim={dimension!r} overlap_ids={overlap_ids!r}",
+                    player,
+                )
+            msg = self.language_manager.GetText(f"CHECK_NEW_LAND_AVAILABILITY_FAIL_{reason}")
+            if overlap_ids:
+                land_parts = [f"#{lid} {self.get_land_name(lid) or ''}".strip() for lid in overlap_ids]
+                msg = msg + "\n" + self.language_manager.GetText("LAND_OVERLAP_WITH_LANDS").format(", ".join(land_parts))
+            player.send_message(msg)
+            return
+
+        length = max_x - min_x + 1
+        height = max_y - min_y + 1
+        width = max_z - min_z + 1
+
+        if length <= self.land_min_size or width <= self.land_min_size:
+            player.send_message(
+                self.language_manager.GetText("CREATE_NEW_LAND_SIZE_TOO_SMALL").format(length, width, self.land_min_size)
+            )
+            return
+
+        volume = length * height * width
+
+        remaining_free_blocks = self.get_player_free_land_blocks(player)
+        paid_blocks = max(0, volume - remaining_free_blocks)
+        money_cost = paid_blocks * self.land_price
+        used_free_blocks = min(volume, remaining_free_blocks)
+
+        player_money = self.get_player_money(player)
+        can_afford = player.is_op or player_money >= money_cost
+
+        base_text = self.language_manager.GetText("NEW_LAND_INFO_TEXT").format(
+            dimension,
+            (min_x, min_y, min_z),
+            (max_x, max_y, max_z),
+            volume,
+            self._format_money_display(money_cost),
+            self._format_money_display(player_money),
+        )
+        content = base_text + "\n" + self.language_manager.GetText("NEW_LAND_PURCHASE_CONTENT_SUFFIX")
+
+        purchase_form = ActionForm(
+            title=self.language_manager.GetText("LAND_PENDING_PURCHASE_PANEL_TITLE"),
+            content=content,
+            on_close=self.show_land_main_menu,
+        )
+
+        def _preview(p: Player):
+            self._visualize_pending_land(p)
+            p.send_message(self.language_manager.GetText("LAND_CURRENT_POSITION_PARTICLE_DISPLAY"))
+
+        purchase_form.add_button(self.language_manager.GetText("LAND_PENDING_PREVIEW_BUTTON"), on_click=_preview)
+        purchase_form.add_button(
+            self.language_manager.GetText("LAND_PENDING_EDIT_COORD_BUTTON"),
+            on_click=self.show_edit_pending_land_coordinates_modal,
+        )
+        purchase_form.add_button(
+            self.language_manager.GetText("LAND_PENDING_MANUAL_INPUT_BUTTON"),
+            on_click=self.show_create_new_land_guide,
+        )
+        purchase_form.add_button(
+            self.language_manager.GetText("LAND_PENDING_RESTART_PICK_BUTTON"),
+            on_click=self.start_interactive_land_creation,
+        )
+        if can_afford:
+            purchase_form.add_button(
+                self.language_manager.GetText("BUY_NEW_LAND_TEXT"),
+                on_click=lambda p: self.player_buy_new_land(
+                    p, dimension, min_x, max_x, min_y, max_y, min_z, max_z, volume, money_cost, used_free_blocks
+                ),
+            )
+        else:
+            purchase_form.add_button(self.language_manager.GetText("BUY_NEW_LAND_NO_MONEY_TEXT"))
+
+        purchase_form.add_button(self.language_manager.GetText("RETURN_BUTTON_TEXT"), on_click=self.show_land_main_menu)
+        player.send_form(purchase_form)
+
+    def show_edit_pending_land_coordinates_modal(self, player: Player):
+        """待购领地：6 个整数框 xmin/xmax ymin ymax zmin zmax（与领地存储字段一致）。"""
+        info = self.player_new_land_creation_info.get(player.name)
+        if not info:
+            player.send_message(self.language_manager.GetText("LANDBUY_NO_PENDING_LAND"))
+            return
+
+        controls = [
+            Label(text=self.language_manager.GetText("LAND_PENDING_EDIT_COORD_LABEL")),
+            TextInput(
+                label=self.language_manager.GetText("CREATE_LAND_FORM_MIN_X"),
+                default_value=str(info["min_x"]),
+            ),
+            TextInput(
+                label=self.language_manager.GetText("CREATE_LAND_FORM_MAX_X"),
+                default_value=str(info["max_x"]),
+            ),
+            TextInput(
+                label=self.language_manager.GetText("CREATE_LAND_FORM_MIN_Y"),
+                default_value=str(info["min_y"]),
+            ),
+            TextInput(
+                label=self.language_manager.GetText("CREATE_LAND_FORM_MAX_Y"),
+                default_value=str(info["max_y"]),
+            ),
+            TextInput(
+                label=self.language_manager.GetText("CREATE_LAND_FORM_MIN_Z"),
+                default_value=str(info["min_z"]),
+            ),
+            TextInput(
+                label=self.language_manager.GetText("CREATE_LAND_FORM_MAX_Z"),
+                default_value=str(info["max_z"]),
+            ),
+        ]
+
+        def on_submit(p: Player, json_str: str):
+            try:
+                data = json.loads(json_str)
+                try:
+                    raw_min_x = int(data[1])
+                    raw_max_x = int(data[2])
+                    raw_min_y = int(data[3])
+                    raw_max_y = int(data[4])
+                    raw_min_z = int(data[5])
+                    raw_max_z = int(data[6])
+                except (ValueError, TypeError, IndexError):
+                    p.send_message(self.language_manager.GetText("CREATE_LAND_FORM_INVALID_COORD"))
+                    return
+                min_x, max_x = min(raw_min_x, raw_max_x), max(raw_min_x, raw_max_x)
+                min_y, max_y = min(raw_min_y, raw_max_y), max(raw_min_y, raw_max_y)
+                min_z, max_z = min(raw_min_z, raw_max_z), max(raw_min_z, raw_max_z)
+                p_new = self.player_new_land_creation_info.get(p.name, {})
+                dim = p_new.get("dimension", p.location.dimension.name)
+                self.player_new_land_creation_info[p.name] = {
+                    "dimension": dim,
+                    "min_x": min_x,
+                    "max_x": max_x,
+                    "min_y": min_y,
+                    "max_y": max_y,
+                    "min_z": min_z,
+                    "max_z": max_z,
+                }
+                self._visualize_pending_land(p)
+                self.show_pending_land_purchase_panel(p)
+            except Exception as e:
+                self.logger.error(f"Edit pending land coords error: {e}")
+                self.report_arc_error(
+                    "LAND_EDIT1",
+                    "show_edit_pending_land_coordinates_modal on_submit exception",
+                    p,
+                    exception=e,
+                )
+
+        form = ModalForm(
+            title=self.language_manager.GetText("LAND_PENDING_EDIT_COORD_TITLE"),
+            controls=controls,
+            on_submit=on_submit,
+            on_close=lambda p: self.show_pending_land_purchase_panel(p),
+        )
+        player.send_form(form)
 
     def player_buy_new_land(self, player: Player, dimension: str,
                             min_x: int, max_x: int, min_y: int, max_y: int, min_z: int, max_z: int,
@@ -7333,8 +8316,8 @@ class ARCCorePlugin(Plugin):
         player.send_form(panel)
 
     def _do_op_apply_default_kill_achievements(self, player: Player):
-        bundle_size = AchievementSystem.get_default_kill_bundle_size()
-        ok = self.achievement_system.apply_default_kill_achievement_bundle(self.title_system)
+        bundle_size = AchievementSystem.get_horror_kill_bundle_size()
+        ok = self.achievement_system.apply_horror_kill_achievement_bundle(self.title_system)
         if ok:
             player.send_message(self.language_manager.GetText("OP_ACHIEVEMENT_APPLY_DEFAULT_DONE").format(bundle_size))
         else:
@@ -9402,13 +10385,59 @@ class ARCCorePlugin(Plugin):
             self.logger.error(f"[ARC Core]Send small horn messages error: {str(e)}")
 
     def _format_death_broadcast_player_display(self, player: Player) -> str:
-        """死亡播报中的玩家展示名：§颜色[头衔]§r名字，与聊天/头顶名一致。"""
+        """死亡播报中的玩家展示名：与聊天/头顶名一致（含公会前缀）。"""
         equipped = self.title_system.get_equipped_title(player)
         raw_name = getattr(player, "name", "") or ""
-        if equipped:
-            rarity_color = self.title_system.get_title_rarity_color(equipped)
-            return f"{rarity_color}[{equipped}]§r{raw_name}§r"
-        return raw_name
+        base = self.format_player_display_label_with_guild(
+            raw_name, equipped, str(player.xuid)
+        )
+        return f"{base}§r"
+
+    def _announce_achievement_unlock(self, player: Player, achievement_name: str, unlock_title: str) -> None:
+        """
+        成就解锁全服通告 + QQ 群/跨服广播（通过 qqsync）。
+
+        文案：
+        玩家[头衔]名字解锁了成就【成就名】，获得头衔奖励【奖励头衔】
+        其中【成就名】与【奖励头衔】使用“奖励头衔”的稀有色。
+        """
+        try:
+            achievement_name = str(achievement_name or "").strip()
+            unlock_title = str(unlock_title or "").strip()
+            if not player or not achievement_name or not unlock_title:
+                return
+
+            player_display = self._format_death_broadcast_player_display(player)
+            rarity_color = self.title_system.get_title_rarity_color(unlock_title)
+            colored_achievement = f"{rarity_color}【{achievement_name}】§r"
+            colored_title = f"{rarity_color}【{unlock_title}】§r"
+            msg = f"玩家{player_display}解锁了成就{colored_achievement}，获得头衔奖励{colored_title}"
+
+            # 游戏内全服广播
+            try:
+                self.server.broadcast_message(msg)
+            except Exception:
+                # 兼容部分端：broadcast_message 不存在则退化为遍历在线玩家
+                for p in getattr(self.server, "online_players", []) or []:
+                    try:
+                        p.send_message(msg)
+                    except Exception:
+                        pass
+
+            # QQ 群/跨服广播：交给 qqsync（多服部署时由 qqsync/机器人实现跨服同步）
+            try:
+                equipped = self.title_system.get_equipped_title(player)
+                display_name = self.format_player_display_label_with_guild(
+                    getattr(player, "name", "") or "", equipped, str(player.xuid)
+                )
+                self._notify_qqsync("custom", display_name, getattr(player, "name", "") or "", msg)
+            except Exception:
+                pass
+        except Exception as e:
+            try:
+                self.logger.error(f"[ARC Core]Announce achievement unlock error: {e}")
+            except Exception:
+                pass
 
     def _send_death_broadcast(self, event: PlayerDeathEvent):
         """发送死亡播报消息"""
@@ -9459,9 +10488,16 @@ class ARCCorePlugin(Plugin):
             # 发送给所有在线玩家
             for player in self.server.online_players:
                 player.send_message(game_message)
-            
-            # 发送到QQ群
-            self._send_to_qq_group(qq_message)
+
+            # 发送到QQ群（通过 qqsync API）
+            try:
+                qqsync = self.server.plugin_manager.get_plugin('qqsync_plugin')
+                if qqsync:
+                    qqsync.api_send_raw(qq_message)
+                else:
+                    self.logger.warning("[ARC Core] QQSync 插件未找到，无法发送死亡消息到群")
+            except Exception as e:
+                self.logger.error(f"[ARC Core] 发送死亡消息到QQ群失败: {e}")
                 
         except Exception as e:
             self.logger.error(f"[ARC Core]Send death broadcast error: {str(e)}")
@@ -9637,25 +10673,36 @@ class ARCCorePlugin(Plugin):
 
     def _send_to_qq_group(self, message: str):
         """
-        发送消息到QQ群
+        发送消息到QQ群（旧接口，保持兼容）
         :param message: 要发送的消息
         """
         try:
-            # 获取 qqsync_plugin 插件
             qqsync = self.server.plugin_manager.get_plugin('qqsync_plugin')
             if qqsync is None:
                 self.logger.warning("[ARC Core] QQSync 插件未找到，无法发送群消息")
                 return
-            
-            # 发送消息到QQ群
             success = qqsync.api_send_message(message)
-            if success:
-                self.logger.info(f"[ARC Core] 死亡消息已发送到QQ群: {message}")
-            else:
+            if not success:
                 self.logger.warning(f"[ARC Core] QQ群消息发送失败: {message}")
         except Exception as e:
             self.logger.error(f"[ARC Core] QQ群消息发送异常: {str(e)}")
-            # 即使QQ群发送失败，也不影响游戏正常运行
+
+    def _notify_qqsync(self, event_type: str, display_name: str,
+                        raw_player_name: str, message: str = ""):
+        """
+        通知 qqsync 插件发送事件消息到 QQ 群。
+        :param event_type: "join" | "quit" | "chat" | "death" | "custom"
+        :param display_name: 带头衔的显示名 (含 § 颜色码)
+        :param raw_player_name: 原始玩家名
+        :param message: 额外消息内容
+        """
+        try:
+            qqsync = self.server.plugin_manager.get_plugin('qqsync_plugin')
+            if qqsync is None:
+                return
+            qqsync.api_send_event(event_type, display_name, raw_player_name, message)
+        except Exception as e:
+            self.logger.error(f"[ARC Core]Notify qqsync error: {e}")
 
     # 清道夫系统
     def _init_cleaner_system(self):

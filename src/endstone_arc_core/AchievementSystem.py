@@ -1,6 +1,5 @@
 # -*- coding: utf-8 -*-
 import json
-from datetime import datetime
 from pathlib import Path
 from typing import Any, Dict, List, Optional, Set, Tuple, Union
 
@@ -55,6 +54,64 @@ _DEFAULT_KILL_ACHIEVEMENT_BUNDLE: List[Dict[str, Any]] = [
 
 DEFAULT_KILL_ACHIEVEMENT_ENTRY_COUNT = len(_DEFAULT_KILL_ACHIEVEMENT_BUNDLE)
 
+# 与 成就/恐怖服成就.md 一致：一键生成 OP 面板「恐怖服成就」用
+_HORROR_KILL_ACHIEVEMENT_BUNDLE: List[Dict[str, Any]] = [
+    # mythicus_hs
+    {"entity_id": "mythicus_hs:aberrant_shark", "name": "畸海猎手", "unlock_title": "畸鲨钓手", "rarity": "稀有", "reward_money": 5000.0, "reward_items": [], "required_count": 15, "kill_reward_money": 37},
+    {"entity_id": "mythicus_hs:abomination", "name": "憎恶清除", "unlock_title": "憎恶猎手", "rarity": "史诗", "reward_money": 4000.0, "reward_items": [], "required_count": 10, "kill_reward_money": 131},
+    {"entity_id": "mythicus_hs:abyssalbat", "name": "黑翼坠落", "unlock_title": "深渊蝙蝠猎手", "rarity": "普通", "reward_money": 3500.0, "reward_items": [], "required_count": 20, "kill_reward_money": 6},
+    {"entity_id": "mythicus_hs:abyssalleech", "name": "深渊吸血虫", "unlock_title": "深渊水蛭猎手", "rarity": "普通", "reward_money": 3500.0, "reward_items": [], "required_count": 10, "kill_reward_money": 0},
+    {"entity_id": "mythicus_hs:abyssalwretch", "name": "卑劣者的通行证", "unlock_title": "深渊清道夫", "rarity": "普通", "reward_money": 4000.0, "reward_items": [], "required_count": 15, "kill_reward_money": 34},
+    {"entity_id": "mythicus_hs:backrooms", "name": "误入黄墙", "unlock_title": "后室幸存者", "rarity": "稀有", "reward_money": 5000.0, "reward_items": [{"item_name": "xp_backrooms:carpet", "count": 16}], "required_count": 10, "kill_reward_money": 94},
+    {"entity_id": "mythicus_hs:broodmother", "name": "母巢崩塌", "unlock_title": "蜘蛛克星", "rarity": "稀有", "reward_money": 40000.0, "reward_items": [], "required_count": 10, "kill_reward_money": 75},
+    {"entity_id": "mythicus_hs:cave_lurker", "name": "暗洞回声", "unlock_title": "洞穴幸存者", "rarity": "传奇", "reward_money": 10000.0, "reward_items": [], "required_count": 1, "kill_reward_money": 4999},
+    {"entity_id": "mythicus_hs:crow", "name": "乌鸦在树枝上诡异的很安静", "unlock_title": "捕鸟人", "rarity": "普通", "reward_money": 2000.0, "reward_items": [], "required_count": 30, "kill_reward_money": 1},
+    {"entity_id": "mythicus_hs:cursedfurry", "name": "诅咒剥离", "unlock_title": "诅咒兽人克星", "rarity": "普通", "reward_money": 6000.0, "reward_items": [], "required_count": 15, "kill_reward_money": 34},
+    {"entity_id": "mythicus_hs:demonscale", "name": "魔鳞碎裂", "unlock_title": "鳞兽猎手", "rarity": "普通", "reward_money": 6000.0, "reward_items": [], "required_count": 15, "kill_reward_money": 34},
+    {"entity_id": "mythicus_hs:dracula", "name": "血族终结", "unlock_title": "范海辛", "rarity": "传奇", "reward_money": 80000.0, "reward_items": [], "required_count": 1, "kill_reward_money": 1000},
+    {"entity_id": "mythicus_hs:faceless_man", "name": "不可直视", "unlock_title": "不可直视", "rarity": "史诗", "reward_money": 12000.0, "reward_items": [], "required_count": 10, "kill_reward_money": 94},
+    {"entity_id": "mythicus_hs:feral_vampire", "name": "吸血鬼猎手", "unlock_title": "吸血鬼猎手", "rarity": "稀有", "reward_money": 1000.0, "reward_items": [], "required_count": 15, "kill_reward_money": 22},
+    {"entity_id": "mythicus_hs:gluttony", "name": "贪食终止", "unlock_title": "暴食终结者", "rarity": "史诗", "reward_money": 15000.0, "reward_items": [], "required_count": 10, "kill_reward_money": 162},
+    {"entity_id": "mythicus_hs:grimclaw", "name": "爪痕累累", "unlock_title": "断爪", "rarity": "普通", "reward_money": 5000.0, "reward_items": [], "required_count": 15, "kill_reward_money": 34},
+    {"entity_id": "mythicus_hs:hauntskull", "name": "骨影消散", "unlock_title": "亡骨安魂", "rarity": "普通", "reward_money": 4000.0, "reward_items": [], "required_count": 15, "kill_reward_money": 34},
+    {"entity_id": "mythicus_hs:netherscreech", "name": "静默尖啸", "unlock_title": "下界静音者", "rarity": "稀有", "reward_money": 15000.0, "reward_items": [], "required_count": 15, "kill_reward_money": 45},
+    {"entity_id": "mythicus_hs:possessed_sheep", "name": "羊群异变", "unlock_title": "牧牧人", "rarity": "普通", "reward_money": 4000.0, "reward_items": [], "required_count": 20, "kill_reward_money": 8},
+    {"entity_id": "mythicus_hs:possessed_sheep_baby", "name": "小恶灵退散", "unlock_title": "沉默的羔羊", "rarity": "普通", "reward_money": 4000.0, "reward_items": [{"item_name": "minecraft:wool", "count": 16}], "required_count": 10, "kill_reward_money": 0},
+    {"entity_id": "mythicus_hs:ravengore", "name": "血羽纷飞", "unlock_title": "血鸦猎手", "rarity": "稀有", "reward_money": 5000.0, "reward_items": [], "required_count": 15, "kill_reward_money": 37},
+    {"entity_id": "mythicus_hs:scarecrow", "name": "稻田惊魂", "unlock_title": "稻田守望者", "rarity": "普通", "reward_money": 4000.0, "reward_items": [], "required_count": 15, "kill_reward_money": 34},
+    {"entity_id": "mythicus_hs:serpent", "name": "蛇牙折断", "unlock_title": "巨蛇猎手", "rarity": "普通", "reward_money": 12000.0, "reward_items": [], "required_count": 20, "kill_reward_money": 5},
+    {"entity_id": "mythicus_hs:shadowlurk", "name": "影中窥视", "unlock_title": "暗影追猎者", "rarity": "普通", "reward_money": 12000.0, "reward_items": [], "required_count": 15, "kill_reward_money": 28},
+    {"entity_id": "mythicus_hs:shepherd", "name": "羊群背后的手", "unlock_title": "羊群劫掠者", "rarity": "传奇", "reward_money": 20000.0, "reward_items": [], "required_count": 1, "kill_reward_money": 1250},
+    {"entity_id": "mythicus_hs:soulrender", "name": "灵魂撕裂", "unlock_title": "牧魂者", "rarity": "稀有", "reward_money": 35000.0, "reward_items": [], "required_count": 15, "kill_reward_money": 37},
+    {"entity_id": "mythicus_hs:the_intruder", "name": "门外之人", "unlock_title": "村庄守护者", "rarity": "史诗", "reward_money": 25000.0, "reward_items": [], "required_count": 10, "kill_reward_money": 64},
+    {"entity_id": "mythicus_hs:venomspine", "name": "毒刺折断", "unlock_title": "解毒猎手", "rarity": "普通", "reward_money": 6000.0, "reward_items": [], "required_count": 15, "kill_reward_money": 34},
+    {"entity_id": "mythicus_hs:water_trapper", "name": "水下陷阱", "unlock_title": "扫雷艇", "rarity": "普通", "reward_money": 6000.0, "reward_items": [], "required_count": 30, "kill_reward_money": 1},
+    {"entity_id": "mythicus_hs:wendigo", "name": "雪林食人魔", "unlock_title": "温迪戈猎人", "rarity": "史诗", "reward_money": 50000.0, "reward_items": [], "required_count": 10, "kill_reward_money": 127},
+    {"entity_id": "mythicus_hs:werewolf_alpha", "name": "狼群失首", "unlock_title": "狼人猎手", "rarity": "稀有", "reward_money": 45000.0, "reward_items": [], "required_count": 15, "kill_reward_money": 56},
+    {"entity_id": "mythicus_hs:werewolf_beta", "name": "狼嚎止息", "unlock_title": "狼人宿敌", "rarity": "普通", "reward_money": 7000.0, "reward_items": [], "required_count": 15, "kill_reward_money": 11},
+    {"entity_id": "mythicus_hs:wraithwings", "name": "怨翼折断", "unlock_title": "怨灵猎手", "rarity": "稀有", "reward_money": 15000.0, "reward_items": [], "required_count": 10, "kill_reward_money": 84},
+    {"entity_id": "mythicus_hs:wraithwings_parasite", "name": "寄生肃清", "unlock_title": "怨翼净化者", "rarity": "普通", "reward_money": 16000.0, "reward_items": [], "required_count": 20, "kill_reward_money": 3},
+    # xp_cd
+    {"entity_id": "xp_cd:cave_dweller", "name": "地底居民", "unlock_title": "穴居洞人", "rarity": "传奇", "reward_money": 20000.0, "reward_items": [], "required_count": 5, "kill_reward_money": 250},
+    # xp_backrooms
+    {"entity_id": "xp_backrooms:bacteria", "name": "杀菌行动", "unlock_title": "抗生素", "rarity": "传奇", "reward_money": 10000.0, "reward_items": [], "required_count": 1, "kill_reward_money": 0},
+    {"entity_id": "xp_backrooms:smiler", "name": "皮笑肉不笑", "unlock_title": "笑面杀手", "rarity": "传奇", "reward_money": 10000.0, "reward_items": [], "required_count": 1, "kill_reward_money": 0},
+    # ps_hh
+    {"entity_id": "ps_hh:rabid_rabbit", "name": "兔患平息", "unlock_title": "疯兔捕手", "rarity": "普通", "reward_money": 2500.0, "reward_items": [], "required_count": 20, "kill_reward_money": 6},
+    {"entity_id": "ps_hh:nightstalker", "name": "夜色猎物", "unlock_title": "夜行猎手", "rarity": "普通", "reward_money": 8000.0, "reward_items": [], "required_count": 20, "kill_reward_money": 6},
+    {"entity_id": "ps_hh:horseman", "name": "无头传说", "unlock_title": "套马人", "rarity": "普通", "reward_money": 50000.0, "reward_items": [], "required_count": 20, "kill_reward_money": 10},
+    {"entity_id": "ps_hh:scarecrow", "name": "捕风捉影", "unlock_title": "万圣稻影", "rarity": "稀有", "reward_money": 5000.0, "reward_items": [], "required_count": 20, "kill_reward_money": 5},
+    {"entity_id": "ps_hh:mad_cow", "name": "牛群失控", "unlock_title": "疯牛猎手", "rarity": "普通", "reward_money": 2500.0, "reward_items": [], "required_count": 20, "kill_reward_money": 10},
+    {"entity_id": "ps_hh:butcher", "name": "屠夫终结者", "unlock_title": "血腥屠夫", "rarity": "传奇", "reward_money": 25000.0, "reward_items": [], "required_count": 5, "kill_reward_money": 300},
+    {"entity_id": "ps_hh:clucker", "name": "鸡飞蛋打", "unlock_title": "疯鸡猎手", "rarity": "普通", "reward_money": 2500.0, "reward_items": [], "required_count": 20, "kill_reward_money": 10},
+    {"entity_id": "ps_hh:glutton", "name": "饥饿停摆", "unlock_title": "暴食猪猎手", "rarity": "普通", "reward_money": 10000.0, "reward_items": [], "required_count": 15, "kill_reward_money": 20},
+    {"entity_id": "ps_hh:randomfarmmonster", "name": "农场清障", "unlock_title": "农场清道夫", "rarity": "普通", "reward_money": 7000.0, "reward_items": [], "required_count": 30, "kill_reward_money": 0},
+    {"entity_id": "ps_hh:skinwalker", "name": "它不是人", "unlock_title": "剥皮者猎手", "rarity": "普通", "reward_money": 60000.0, "reward_items": [], "required_count": 20, "kill_reward_money": 5},
+    {"entity_id": "ps_hh:woolywall", "name": "墙中有物", "unlock_title": "面壁者", "rarity": "普通", "reward_money": 7000.0, "reward_items": [], "required_count": 15, "kill_reward_money": 15},
+]
+
+HORROR_KILL_ACHIEVEMENT_ENTRY_COUNT = len(_HORROR_KILL_ACHIEVEMENT_BUNDLE)
+
 
 class AchievementSystem:
     """
@@ -62,24 +119,35 @@ class AchievementSystem:
     - 成就定义存到 achievements.json，服主可直接编辑
     - 条件类型：kill_entity（单种生物）；kill_entity_sum（多种生物击杀数相加达到 required_count）
     - 当前逻辑固定：all（列表内条件全部满足才解锁）
+    - 进度与完成：`player_achievement_stats` 中 `kill_total` / `kill:...` 等为击杀计数；
+      `ach_unlock:<unlock_title>` 表示该成就已达成（与是否成功发到头衔无关，避免发放失败丢进度）
     """
 
     condition_type_kill_entity = "kill_entity"
     condition_type_kill_entity_sum = "kill_entity_sum"
     logic_all = "all"
+    # 与击杀类 stat_key 不冲突；成就完成标记，count >= 1 即视为已解锁
+    _STAT_KEY_ACH_UNLOCK_PREFIX = "ach_unlock:"
 
-    def __init__(self, database_manager, title_system, language_manager, unlock_title_func, main_path: str = "plugins/ARCCore"):
+    def __init__(
+        self,
+        database_manager,
+        title_system,
+        language_manager,
+        unlock_title_func,
+        main_path: str = "plugins/ARCCore",
+        announce_achievement_unlock_func=None,
+    ):
         self.database_manager = database_manager
         self.title_system = title_system
         self.language_manager = language_manager
         self.unlock_title_func = unlock_title_func
+        self.announce_achievement_unlock_func = announce_achievement_unlock_func
 
         self._main_path = Path(main_path)
         self._achievement_json_path = self._main_path / "achievements.json"
 
         self._table_stats = "player_achievement_stats"
-        self._table_unlocked = "player_achievement_unlocked"
-        self._table_meta = "achievement_meta"
         self._table_condition = "achievement_conditions"
         self._legacy_table_def = "achievement_definitions"
 
@@ -97,22 +165,6 @@ class AchievementSystem:
                 ")"
             )
             self.database_manager.execute(
-                "CREATE TABLE IF NOT EXISTS " + self._table_unlocked + " ("
-                "xuid TEXT NOT NULL, "
-                "unlock_title TEXT NOT NULL, "
-                "unlocked_at TEXT, "
-                "UNIQUE (xuid, unlock_title)"
-                ")"
-            )
-            # 仅用于迁移旧数据
-            self.database_manager.execute(
-                "CREATE TABLE IF NOT EXISTS " + self._table_meta + " ("
-                "unlock_title TEXT PRIMARY KEY, "
-                "name TEXT NOT NULL, "
-                "enabled INTEGER NOT NULL DEFAULT 1"
-                ")"
-            )
-            self.database_manager.execute(
                 "CREATE TABLE IF NOT EXISTS " + self._table_condition + " ("
                 "id INTEGER PRIMARY KEY AUTOINCREMENT, "
                 "unlock_title TEXT NOT NULL, "
@@ -124,6 +176,7 @@ class AchievementSystem:
             self._migrate_legacy_definitions_to_db()
             self._ensure_json_definition_file()
             self._migrate_achievement_json_if_hidden_default()
+            self._backfill_achievement_unlock_stats_from_progress()
             return True
         except Exception:
             return False
@@ -307,17 +360,9 @@ class AchievementSystem:
         )
 
     def _migrate_legacy_definitions_to_db(self) -> None:
-        """
-        兼容旧版 achievement_definitions：
-        - 先迁移到中间表 achievement_meta / achievement_conditions
-        - 再由 _ensure_json_definition_file 导出到 achievements.json
-        """
+        """旧版 achievement_definitions：在 achievements.json 仍为空时直接导出为 JSON。"""
         try:
-            meta_rows = self.database_manager.query_all(
-                "SELECT unlock_title FROM " + self._table_meta + " LIMIT 1",
-                (),
-            )
-            if meta_rows:
+            if self._load_json_config().get("achievements"):
                 return
 
             legacy_rows = self.database_manager.query_all(
@@ -328,12 +373,13 @@ class AchievementSystem:
             if not legacy_rows:
                 return
 
+            grouped: Dict[str, Dict[str, Any]] = {}
             for row in legacy_rows:
                 name = str(row.get("name") or "").strip()
                 stat_key = str(row.get("stat_key") or "").strip()
                 unlock_title = str(row.get("unlock_title") or "").strip()
                 required_count = self._safe_int(row.get("required_count"), 0)
-                enabled = 1 if int(row.get("enabled") or 0) == 1 else 0
+                enabled = bool(int(row.get("enabled") or 0) == 1)
                 if not name or not stat_key or not unlock_title or required_count <= 0:
                     continue
 
@@ -342,15 +388,44 @@ class AchievementSystem:
                     continue
                 condition_type, target_id = parsed
 
-                self.database_manager.execute(
-                    "INSERT OR IGNORE INTO " + self._table_meta + " (unlock_title, name, enabled) VALUES (?, ?, ?)",
-                    (unlock_title, name, enabled),
+                if unlock_title not in grouped:
+                    grouped[unlock_title] = {
+                        "name": name,
+                        "enabled": enabled,
+                        "conditions": [],
+                        "next_id": 1,
+                    }
+                g = grouped[unlock_title]
+                cid = int(g["next_id"])
+                g["conditions"].append(
+                    {
+                        "id": cid,
+                        "type": condition_type,
+                        "condition_type": condition_type,
+                        "target_id": target_id,
+                        "required_count": required_count,
+                    }
                 )
-                self.database_manager.execute(
-                    "INSERT INTO " + self._table_condition + " (unlock_title, condition_type, target_id, required_count) "
-                    "VALUES (?, ?, ?, ?)",
-                    (unlock_title, condition_type, target_id, required_count),
+                g["next_id"] = cid + 1
+
+            if not grouped:
+                return
+
+            achievement_list = []
+            for ut in sorted(grouped.keys()):
+                g = grouped[ut]
+                achievement_list.append(
+                    {
+                        "name": g["name"],
+                        "unlock_title": ut,
+                        "enabled": g["enabled"],
+                        "if_hidden": False,
+                        "logic": self.logic_all,
+                        "conditions": g["conditions"],
+                    }
                 )
+
+            self._save_json_config({"version": 1, "achievements": achievement_list})
         except Exception:
             pass
 
@@ -359,19 +434,15 @@ class AchievementSystem:
         if config_data.get("achievements"):
             return
 
-        db_meta_rows = self.database_manager.query_all(
-            "SELECT unlock_title, name, enabled FROM " + self._table_meta + " ORDER BY unlock_title ASC",
-            (),
-        )
-        if not db_meta_rows:
-            self._save_json_config(self._default_config())
-            return
-
         condition_rows = self.database_manager.query_all(
             "SELECT id, unlock_title, condition_type, target_id, required_count "
             "FROM " + self._table_condition + " ORDER BY id ASC",
             (),
         )
+        if not condition_rows:
+            self._save_json_config(self._default_config())
+            return
+
         condition_group_dict: Dict[str, List[Dict[str, Any]]] = {}
         for condition_row in condition_rows:
             unlock_title = str(condition_row.get("unlock_title") or "").strip()
@@ -379,40 +450,51 @@ class AchievementSystem:
             target_id = str(condition_row.get("target_id") or "").strip()
             required_count = self._safe_int(condition_row.get("required_count"), 0)
             condition_id = self._safe_int(condition_row.get("id"), 0)
-            if (
-                not unlock_title
-                or condition_type != self.condition_type_kill_entity
-                or not target_id
-                or required_count <= 0
-                or condition_id <= 0
-            ):
+            if not unlock_title or not condition_type or required_count <= 0 or condition_id <= 0:
                 continue
-            if unlock_title not in condition_group_dict:
-                condition_group_dict[unlock_title] = []
-            condition_group_dict[unlock_title].append(
-                {
+
+            if condition_type == self.condition_type_kill_entity:
+                if not target_id:
+                    continue
+                cond: Dict[str, Any] = {
                     "id": condition_id,
                     "type": condition_type,
+                    "condition_type": condition_type,
                     "target_id": target_id,
                     "required_count": required_count,
                 }
-            )
+            elif condition_type == self.condition_type_kill_entity_sum:
+                target_ids = [x.strip() for x in target_id.split(",") if x.strip()]
+                if len(target_ids) < 1:
+                    continue
+                cond = {
+                    "id": condition_id,
+                    "type": condition_type,
+                    "condition_type": condition_type,
+                    "target_ids": target_ids,
+                    "required_count": required_count,
+                }
+            else:
+                continue
+
+            if unlock_title not in condition_group_dict:
+                condition_group_dict[unlock_title] = []
+            condition_group_dict[unlock_title].append(cond)
+
+        if not condition_group_dict:
+            self._save_json_config(self._default_config())
+            return
 
         achievement_list = []
-        for meta_row in db_meta_rows:
-            unlock_title = str(meta_row.get("unlock_title") or "").strip()
-            name = str(meta_row.get("name") or "").strip()
-            enabled = int(meta_row.get("enabled") or 0) == 1
-            if not unlock_title or not name:
-                continue
+        for unlock_title in sorted(condition_group_dict.keys()):
             achievement_list.append(
                 {
-                    "name": name,
+                    "name": unlock_title,
                     "unlock_title": unlock_title,
-                    "enabled": enabled,
+                    "enabled": True,
                     "if_hidden": False,
                     "logic": self.logic_all,
-                    "conditions": condition_group_dict.get(unlock_title, []),
+                    "conditions": condition_group_dict[unlock_title],
                 }
             )
 
@@ -488,38 +570,107 @@ class AchievementSystem:
         )
         return self._get_stat_count(xuid, stat_key)
 
-    def _is_unlocked(self, xuid: str, unlock_title: str) -> bool:
-        row = self.database_manager.query_one(
-            "SELECT 1 FROM " + self._table_unlocked + " WHERE xuid = ? AND unlock_title = ?",
-            (xuid, unlock_title),
+    def _achievement_unlock_stat_key(self, unlock_title: str) -> str:
+        return self._STAT_KEY_ACH_UNLOCK_PREFIX + str(unlock_title or "").strip()
+
+    def _has_achievement_unlock_stat(self, xuid: str, unlock_title: str) -> bool:
+        xs = str(xuid or "").strip()
+        ut = str(unlock_title or "").strip()
+        if not xs or not ut:
+            return False
+        return self._get_stat_count(xs, self._achievement_unlock_stat_key(ut)) >= 1
+
+    def _ensure_achievement_unlock_stat_silent(self, xuid: str, unlock_title: str) -> None:
+        """写入成就完成标记（不触发提示）。用于迁移补全或与正常解锁路径共用。"""
+        xs = str(xuid or "").strip()
+        ut = str(unlock_title or "").strip()
+        if not xs or not ut:
+            return
+        key = self._achievement_unlock_stat_key(ut)
+        self.database_manager.execute(
+            "INSERT OR IGNORE INTO " + self._table_stats + " (xuid, stat_key, count) VALUES (?, ?, 1)",
+            (xs, key),
         )
-        return row is not None
+        self.database_manager.execute(
+            "UPDATE " + self._table_stats + " SET count = 1 WHERE xuid = ? AND stat_key = ? AND count < 1",
+            (xs, key),
+        )
+
+    def _mark_achievement_unlock_stat(self, xuid: str, unlock_title: str) -> bool:
+        """写入成就完成标记。返回 True 表示本次为新写入（用于首次解锁提示）。"""
+        before = self._has_achievement_unlock_stat(xuid, unlock_title)
+        self._ensure_achievement_unlock_stat_silent(xuid, unlock_title)
+        return not before
+
+    def _collect_xuids_for_achievement_backfill(self) -> Set[str]:
+        """出现过统计或头衔记录的玩家，才可能需要补全 ach_unlock。"""
+        out: Set[str] = set()
+        try:
+            for r in self.database_manager.query_all(
+                "SELECT DISTINCT xuid FROM " + self._table_stats,
+                (),
+            ):
+                x = str(r.get("xuid") or "").strip()
+                if x:
+                    out.add(x)
+        except Exception:
+            pass
+        try:
+            tt = self.title_system._table_unlock_time
+            for r in self.database_manager.query_all(
+                "SELECT DISTINCT xuid FROM " + tt,
+                (),
+            ):
+                x = str(r.get("xuid") or "").strip()
+                if x:
+                    out.add(x)
+        except Exception:
+            pass
+        return out
+
+    def _backfill_achievement_unlock_stats_from_progress(self) -> None:
+        """
+        若某玩家某成就尚无 ach_unlock 记录，则根据是否已拥有对应头衔或当前进度是否已满足条件补全标记，
+        避免升级后重复走解锁逻辑、重复发奖励。
+        """
+        try:
+            achievements = self.list_achievements()
+            if not achievements:
+                return
+            xuids = self._collect_xuids_for_achievement_backfill()
+            if not xuids:
+                return
+            for xuid in xuids:
+                for achievement_data in achievements:
+                    ut = str(achievement_data.get("unlock_title") or "").strip()
+                    if not ut:
+                        continue
+                    if self._has_achievement_unlock_stat(xuid, ut):
+                        continue
+                    enabled = bool(achievement_data.get("enabled", True))
+                    title_ok = False
+                    try:
+                        title_ok = bool(self.title_system.has_unlocked_title_by_xuid(xuid, ut))
+                    except Exception:
+                        title_ok = False
+                    if title_ok:
+                        self._ensure_achievement_unlock_stat_silent(xuid, ut)
+                        continue
+                    if enabled and self._achievement_conditions_met(xuid, achievement_data):
+                        self._ensure_achievement_unlock_stat_silent(xuid, ut)
+        except Exception:
+            pass
 
     def list_unlocked_titles_for_xuid(self, xuid: str) -> Set[str]:
         xuid_s = str(xuid or "").strip()
         if not xuid_s:
             return set()
         try:
-            rows = self.database_manager.query_all(
-                "SELECT unlock_title FROM " + self._table_unlocked + " WHERE xuid = ?",
-                (xuid_s,),
-            )
-            titles = {
-                str(r.get("unlock_title") or "").strip()
-                for r in rows or []
-                if str(r.get("unlock_title") or "").strip()
-            }
-            # 头衔已在 player_title_unlock_time 中但成就表未写入时补录（旧逻辑曾依赖 unlock API 返回值）
+            titles: Set[str] = set()
             for achievement_data in self.list_achievements():
                 ut = str(achievement_data.get("unlock_title") or "").strip()
-                if not ut or ut in titles:
-                    continue
-                try:
-                    if self.title_system.has_unlocked_title_by_xuid(xuid_s, ut):
-                        self._mark_unlocked(xuid_s, ut)
-                        titles.add(ut)
-                except Exception:
-                    pass
+                if ut and self.player_has_unlocked_title(xuid_s, ut):
+                    titles.add(ut)
             return titles
         except Exception:
             return set()
@@ -529,15 +680,12 @@ class AchievementSystem:
         ut = str(unlock_title or "").strip()
         if not xs or not ut:
             return False
-        if self._is_unlocked(xs, ut):
+        if self._has_achievement_unlock_stat(xs, ut):
             return True
         try:
-            if self.title_system.has_unlocked_title_by_xuid(xs, ut):
-                self._mark_unlocked(xs, ut)
-                return True
+            return bool(self.title_system.has_unlocked_title_by_xuid(xs, ut))
         except Exception:
-            pass
-        return False
+            return False
 
     def set_achievement_if_hidden(self, unlock_title: str, if_hidden: bool) -> bool:
         unlock_title = (unlock_title or "").strip()
@@ -575,15 +723,6 @@ class AchievementSystem:
             result.append(achievement_data)
         return result
 
-    def _mark_unlocked(self, xuid: str, unlock_title: str) -> bool:
-        """写入成就已解锁；返回 True 表示本次实际新插入一行（首次解锁）。"""
-        now_iso = datetime.now().isoformat()
-        rowcount = self.database_manager.execute_and_get_rowcount(
-            "INSERT OR IGNORE INTO " + self._table_unlocked + " (xuid, unlock_title, unlocked_at) VALUES (?, ?, ?)",
-            (xuid, unlock_title, now_iso),
-        )
-        return rowcount == 1
-
     def _achievement_conditions_met(self, xuid: str, achievement_data: Dict[str, Any]) -> bool:
         condition_list = achievement_data.get("conditions") or []
         if not condition_list:
@@ -606,8 +745,6 @@ class AchievementSystem:
         enabled = bool(achievement_data.get("enabled", True))
         if not unlock_title or not enabled:
             return
-        if self._is_unlocked(xuid, unlock_title):
-            return
         if self.player_has_unlocked_title(xuid, unlock_title):
             return
         if not self._achievement_conditions_met(xuid, achievement_data):
@@ -617,13 +754,18 @@ class AchievementSystem:
             self.unlock_title_func(player, unlock_title)
         except Exception:
             pass
-        # 条件已达成即写入成就解锁表；头衔发放失败不应导致成就进度丢失
-        first_unlock = self._mark_unlocked(xuid, unlock_title)
+        first_unlock = self._mark_achievement_unlock_stat(xuid, unlock_title)
         if first_unlock:
             try:
                 msg = self.language_manager.GetText("ACHIEVEMENT_UNLOCKED_HINT")
                 if msg:
                     player.send_message(msg.format(unlock_title))
+            except Exception:
+                pass
+            try:
+                if callable(self.announce_achievement_unlock_func):
+                    ach_name = str(achievement_data.get("name") or "").strip()
+                    self.announce_achievement_unlock_func(player, ach_name, unlock_title)
             except Exception:
                 pass
 
@@ -640,8 +782,6 @@ class AchievementSystem:
         for achievement_data in self.list_achievements():
             unlock_title = str(achievement_data.get("unlock_title") or "").strip()
             if not unlock_title:
-                continue
-            if self._is_unlocked(xuid, unlock_title):
                 continue
             if self.player_has_unlocked_title(xuid, unlock_title):
                 continue
@@ -752,10 +892,17 @@ class AchievementSystem:
             return False
 
         if old_unlock_title != new_unlock_title:
-            self.database_manager.execute(
-                "DELETE FROM " + self._table_unlocked + " WHERE unlock_title = ?",
-                (old_unlock_title,),
-            )
+            old_k = self._achievement_unlock_stat_key(old_unlock_title)
+            new_k = self._achievement_unlock_stat_key(new_unlock_title)
+            if old_k != new_k:
+                try:
+                    self.database_manager.execute(
+                        "UPDATE " + self._table_stats + " SET stat_key = ? WHERE stat_key = ?",
+                        (new_k, old_k),
+                    )
+                except Exception:
+                    pass
+
         return True
 
     def set_achievement_enabled(self, unlock_title: str, enabled: bool) -> bool:
@@ -791,10 +938,13 @@ class AchievementSystem:
         config_data["achievements"] = new_achievement_list
         if not self._save_json_config(config_data):
             return False
-        self.database_manager.execute(
-            "DELETE FROM " + self._table_unlocked + " WHERE unlock_title = ?",
-            (unlock_title,),
-        )
+        try:
+            self.database_manager.execute(
+                "DELETE FROM " + self._table_stats + " WHERE stat_key = ?",
+                (self._achievement_unlock_stat_key(unlock_title),),
+            )
+        except Exception:
+            pass
         return True
 
     # ---------- 条件 ----------
@@ -1066,4 +1216,98 @@ class AchievementSystem:
     @staticmethod
     def get_default_kill_bundle_size() -> int:
         return DEFAULT_KILL_ACHIEVEMENT_ENTRY_COUNT
+
+    @staticmethod
+    def _normalize_rarity_name(rarity: Any) -> str:
+        """兼容“传说”写法，统一映射到 TitleSystem 支持的稀有度文本。"""
+        r = str(rarity or "").strip()
+        if r == "传说":
+            return "传奇"
+        return r or "普通"
+
+    def apply_horror_kill_title_definitions(self, title_system) -> bool:
+        """
+        根据恐怖服成就表写入头衔定义（title_definitions）：
+        - 若头衔已存在则跳过（不覆盖服主已手动创建/调整的定义）
+        - description 写入“猎杀奖励”提示，方便在 OP 面板查看
+        """
+        try:
+            for entry in _HORROR_KILL_ACHIEVEMENT_BUNDLE:
+                unlock_title = str(entry.get("unlock_title") or "").strip()
+                if not unlock_title:
+                    continue
+                if title_system.get_title_definition(unlock_title):
+                    continue
+                rarity = self._normalize_rarity_name(entry.get("rarity"))
+                kill_reward_money = float(entry.get("kill_reward_money") or 0.0)
+                description = f"猎杀奖励: {int(kill_reward_money) if kill_reward_money.is_integer() else kill_reward_money}"
+                reward_money = float(entry.get("reward_money") or 0.0)
+                reward_items = entry.get("reward_items") or []
+                if not isinstance(reward_items, list):
+                    reward_items = []
+                title_system.ensure_title_definition(unlock_title, rarity, description, reward_money, reward_items)
+            return True
+        except Exception:
+            return False
+
+    def apply_horror_kill_achievement_bundle(self, title_system) -> bool:
+        """先写入恐怖服头衔定义（跳过已存在），再写入对应击杀成就条件。"""
+        try:
+            if not self.apply_horror_kill_title_definitions(title_system):
+                return False
+            config_data = self._load_json_config()
+            achievement_list = config_data.get("achievements") or []
+            if not isinstance(achievement_list, list):
+                achievement_list = []
+            title_index_map = {str(a.get("unlock_title") or "").strip(): idx for idx, a in enumerate(achievement_list)}
+            next_condition_id = self._next_condition_id(achievement_list)
+
+            for entry in _HORROR_KILL_ACHIEVEMENT_BUNDLE:
+                unlock_title = str(entry.get("unlock_title") or "").strip()
+                if not unlock_title:
+                    continue
+                name = str(entry.get("name") or unlock_title).strip()
+                entity_id = str(entry.get("entity_id") or "").strip()
+                required_count = self._safe_int(entry.get("required_count"), 0)
+                if not name or not entity_id or required_count <= 0:
+                    continue
+
+                cond_obj: Dict[str, Any] = {
+                    "id": next_condition_id,
+                    "type": self.condition_type_kill_entity,
+                    "condition_type": self.condition_type_kill_entity,
+                    "target_id": entity_id,
+                    "required_count": required_count,
+                }
+                next_condition_id += 1
+
+                if unlock_title in title_index_map:
+                    idx = title_index_map[unlock_title]
+                    achievement_list[idx]["name"] = name
+                    achievement_list[idx]["unlock_title"] = unlock_title
+                    achievement_list[idx]["enabled"] = True
+                    achievement_list[idx]["if_hidden"] = False
+                    achievement_list[idx]["logic"] = self.logic_all
+                    achievement_list[idx]["conditions"] = [cond_obj]
+                else:
+                    achievement_list.append(
+                        {
+                            "name": name,
+                            "unlock_title": unlock_title,
+                            "enabled": True,
+                            "if_hidden": False,
+                            "logic": self.logic_all,
+                            "conditions": [cond_obj],
+                        }
+                    )
+                    title_index_map[unlock_title] = len(achievement_list) - 1
+
+            config_data["achievements"] = achievement_list
+            return self._save_json_config(config_data)
+        except Exception:
+            return False
+
+    @staticmethod
+    def get_horror_kill_bundle_size() -> int:
+        return HORROR_KILL_ACHIEVEMENT_ENTRY_COUNT
 

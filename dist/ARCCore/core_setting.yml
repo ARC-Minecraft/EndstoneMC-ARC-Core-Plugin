@@ -1,6 +1,16 @@
 DEFAULT_LANGUAGE_CODE=ZH-CN
 DATABASE_PATH=ARCCore.db
 
+# 跨服共享数据库路径（为空时使用默认 DATABASE_PATH；指定路径时从该数据库读取对应数据，实现多服共享）
+PLAYER_DATABASE_PATH=
+PLAYER_ECONOMY_DATABASE_PATH=
+PLAYER_TITLE_DATABASE_PATH=
+
+# 公会（为空时使用 DATABASE_PATH；多服填同一 SQLite 文件路径以共享公会数据）
+GUILD_DATABASE_PATH=
+# 创建公会费用（默认十万）
+GUILD_CREATE_COST=100000
+
 # 强制登录（为 True 时，玩家进入游戏强制打开 /arc 菜单登录或注册；关闭登录/注册界面且未正确输入密码时会再次强制打开）
 FORCE_LOGIN=False
 
