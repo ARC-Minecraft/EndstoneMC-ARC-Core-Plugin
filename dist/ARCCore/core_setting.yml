@@ -10,6 +10,23 @@ PLAYER_TITLE_DATABASE_PATH=
 GUILD_DATABASE_PATH=
 # 创建公会费用（默认十万）
 GUILD_CREATE_COST=100000
+# 公会规模：每个公会有 small / medium / large 三档规模等级，新建公会默认 small
+# 下列三个值为各等级的成员人数上限（含会长）；OP 可在「OP 面板 → 公会管理」中直接升级/降级公会规模（无消耗）
+GUILD_SIZE_SMALL_MAX=10
+GUILD_SIZE_MEDIUM_MAX=20
+GUILD_SIZE_LARGE_MAX=40
+# 公会升级规模消耗的「公会公共贡献点」（玩家通过完成小游戏等方式获得，并由 api_add_guild_contribution 累加）
+# 会长 / 管理员可在「我的公会 → 升级公会规模」中花费公共贡献点升级；下列两个值为升级到对应等级的消耗
+GUILD_UPGRADE_TO_MEDIUM_COST=10000
+GUILD_UPGRADE_TO_LARGE_COST=100000
+# 会长在「我的公会 → 公会改名」中改名公会需支付的金钱（0 表示免费）
+GUILD_RENAME_COST=0
+# 成员在「我的公会 → 公会领地」传送到公会领地时消耗的个人公会贡献点（0 表示免费；不从存款扣费）
+GUILD_LAND_TELEPORT_CONTRIB_COST=10
+# 击杀生物 → 公会贡献点比例（搭配 kill_reward.txt 使用）
+# 计算公式：贡献点 = floor(击杀金钱奖励 * 比例)；例如击杀奖励 10 元，比例 0.5，则获得 5 公会贡献点
+# 仅当玩家已加入公会时生效；未加入公会则静默跳过；设为 0 关闭该功能
+KILL_REWARD_GUILD_CONTRIB_RATIO=0.5
 
 # 强制登录（为 True 时，玩家进入游戏强制打开 /arc 菜单登录或注册；关闭登录/注册界面且未正确输入密码时会再次强制打开）
 FORCE_LOGIN=False
@@ -27,6 +44,8 @@ SPAWN_PROTECT_RANGE=8
 MIN_LAND_DISTANCE=1
 LAND_PRICE=50
 LAND_SELL_REFUND_COEFFICIENT=0.9
+# 私人领地上架成交：成交价高于买入价（owner_paid_money）时，对差额按此比例征收增值税（0～1，默认 0.1 即 10%）；0 为关闭
+LAND_SALE_VAT_RATE=0.1
 LAND_MIN_SIZE=5
 DEFAULT_FREE_LAND_BLOCKS=1500
 # 仅允许在领地内放置的方块（逗号分隔方块 ID）；列表中的方块无法在荒野放置；在领地内需为拥有者或授权玩家（与既有建造权限一致）。留空表示不限制
@@ -42,6 +61,16 @@ SMALL_HORN_PRICE_PER_HOUR=60
 # 清道夫
 ENABLE_CLEANER=True
 CLEANER_INTERVAL=300
+
+# 性能检测应急关服：为 True 时每 10 秒读取 Server.current_mspt，超过阈值则自动执行 stop 关服
+ENABLE_MSPT_EMERGENCY_SHUTDOWN=False
+# MSPT 上限（毫秒/刻），大于此值触发关服（默认 100）
+MSPT_EMERGENCY_SHUTDOWN_LIMIT=100
+
+# 天眼系统（Sky Eye）：玩家行为审计，日志目录 plugins/ARCCore/sky_eye/YYYYMMDD.txt（交互、放置、破坏、死亡、进出服、对实体交互等）
+ENABLE_SKY_EYE=False
+# 按自然日保留日志的最长天数，更早日期的 .txt 会被删除；0 表示不自动删除旧文件
+SKY_EYE_MAX_RETENTION_DAYS=7
 
 # 传送系统设置
 MAX_PLAYER_HOME_NUM=5
@@ -67,6 +96,8 @@ CHECKIN_TOP_RANK_BONUS_ITEM_COUNT=1
 CHECKIN_TOP_RANK_BONUS_MONEY_STEP=50
 # 连续签到金钱递增步长：总存款 = 基础签到存款 + (连续天数-1)*步长
 CHECKIN_CONTINUOUS_DAYS_MONEY_INCREMENT=100
+# 每日签到额外发放的公会贡献点（同时加本人私人贡献与公会公共贡献；未加入公会则跳过；0 表示关闭）
+CHECKIN_GUILD_CONTRIBUTION_POINTS=10
 # 每日从奖励池中按权重不放回随机抽取的条数区间（含端点）；例如 1～3 表示每天随机 1、2 或 3 条
 CHECKIN_REWARD_PICK_MIN=1
 CHECKIN_REWARD_PICK_MAX=3

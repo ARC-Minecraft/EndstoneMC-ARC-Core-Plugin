@@ -1,13 +1,21 @@
 # -*- coding: utf-8 -*-
 """领地系统：建表、区块索引、CRUD、子领地、权限设置的全部数据/逻辑层"""
 import json
-from typing import Callable, Dict, Optional, Set
+from typing import Any, Callable, Dict, Optional, Set
 
 
 class LandSystem:
     """领地系统：负责 lands / sub_lands / chunk_lands_* 表的所有数据操作，不包含 UI 逻辑。"""
 
-    PUBLIC_LAND_OWNER_XUID = "0"  # 公共领地的 owner_xuid 固定值
+    # 领地主人存于 lands.owner_xuid / sub_lands.owner_xuid（列名未改，值为下列格式）：
+    # - 玩家：Player_<xuid>
+    # - 公会：GUILD_<guild_id>
+    # - 公共：PUBLIC（旧版曾用 "0"，启动时自动升级）
+    LAND_OWNER_PUBLIC = "PUBLIC"
+    LAND_OWNER_PLAYER_PREFIX = "Player_"
+    LAND_OWNER_GUILD_PREFIX = "GUILD_"
+    # 兼容旧插件里对「公共领地主键」的引用（新值为 PUBLIC，不再使用 "0"）
+    PUBLIC_LAND_OWNER_XUID = LAND_OWNER_PUBLIC
 
     # 未开放展示框（allow_frame）时禁止交互/破坏的方块；配置项留空则使用此集合
     _DEFAULT_PUBLIC_LAND_INTERACT_BLOCK_BLACKLIST = frozenset({
@@ -26,6 +34,61 @@ class LandSystem:
         "minecraft:crimson_shelf",
         "minecraft:warped_shelf",
     })
+
+    @staticmethod
+    def is_public_land_owner(value: Any) -> bool:
+        s = str(value or "").strip()
+        if s == LandSystem.LAND_OWNER_PUBLIC:
+            return True
+        return s == "0"
+
+    @staticmethod
+    def land_owner_key_player(xuid: Any) -> str:
+        return f"{LandSystem.LAND_OWNER_PLAYER_PREFIX}{str(xuid).strip()}"
+
+    @staticmethod
+    def land_owner_key_guild(guild_id: Any) -> str:
+        return f"{LandSystem.LAND_OWNER_GUILD_PREFIX}{int(guild_id)}"
+
+    @staticmethod
+    def parse_land_owner_player_xuid(owner_key: Any) -> Optional[str]:
+        s = str(owner_key or "").strip()
+        p = LandSystem.LAND_OWNER_PLAYER_PREFIX
+        if not s.startswith(p):
+            return None
+        rest = s[len(p) :].strip()
+        return rest if rest else None
+
+    @staticmethod
+    def parse_land_owner_guild_id(owner_key: Any) -> Optional[int]:
+        s = str(owner_key or "").strip()
+        p = LandSystem.LAND_OWNER_GUILD_PREFIX
+        if not s.startswith(p):
+            return None
+        rest = s[len(p) :].strip()
+        if not rest:
+            return None
+        try:
+            return int(rest)
+        except (TypeError, ValueError):
+            return None
+
+    @staticmethod
+    def normalize_owner_key_for_write(raw: Any) -> str:
+        """写入库前规范化主人键；裸字符串视为玩家 XUID；GUILD_/Player_ 保持前缀。"""
+        s = str(raw or "").strip()
+        if not s:
+            return ""
+        if s == "0" or s.upper() == "PUBLIC":
+            return LandSystem.LAND_OWNER_PUBLIC
+        if s.startswith(LandSystem.LAND_OWNER_GUILD_PREFIX):
+            return s
+        if s.startswith(LandSystem.LAND_OWNER_PLAYER_PREFIX):
+            rest = s[len(LandSystem.LAND_OWNER_PLAYER_PREFIX) :].strip()
+            return (
+                f"{LandSystem.LAND_OWNER_PLAYER_PREFIX}{rest}" if rest else ""
+            )
+        return LandSystem.land_owner_key_player(s)
 
     def __init__(self, database_manager, setting_manager, logger=None):
         self.db = database_manager
@@ -94,6 +157,42 @@ class LandSystem:
             return any(col["name"] == column for col in columns_info)
         except Exception:
             return False
+
+    def _migrate_land_owner_keys_in_table(self, table: str) -> None:
+        """旧库：公共领地 owner_xuid 由 0 升为 PUBLIC；玩家由裸 XUID 升为 Player_<xuid>；已有 GUILD_ 不动。"""
+        if table not in ("lands", "sub_lands"):
+            return
+        try:
+            if not self.db.table_exists(table) or not self._column_exists(
+                table, "owner_xuid"
+            ):
+                return
+            n0 = self.db.execute_and_get_rowcount(
+                f"UPDATE {table} SET owner_xuid = ? WHERE owner_xuid = ?",
+                (self.LAND_OWNER_PUBLIC, "0"),
+            )
+            like_p = f"{self.LAND_OWNER_PLAYER_PREFIX}%"
+            like_g = f"{self.LAND_OWNER_GUILD_PREFIX}%"
+            n1 = self.db.execute_and_get_rowcount(
+                f"UPDATE {table} SET owner_xuid = ? || owner_xuid "
+                f"WHERE owner_xuid != ? AND owner_xuid NOT LIKE ? AND owner_xuid NOT LIKE ?",
+                (
+                    self.LAND_OWNER_PLAYER_PREFIX,
+                    self.LAND_OWNER_PUBLIC,
+                    like_p,
+                    like_g,
+                ),
+            )
+            touched = 0
+            for n in (n0, n1):
+                if isinstance(n, int) and n > 0:
+                    touched += n
+            if touched:
+                print(
+                    f"[ARC Core]Migrated owner_xuid in {table} ({touched} row(s) updated)"
+                )
+        except Exception as e:
+            print(f"[ARC Core]Migrate owner_xuid in {table} error: {str(e)}")
 
     def _get_dimension_table(self, dimension: str) -> str:
         dim_name = dimension.split(":")[-1].lower()
@@ -181,14 +280,19 @@ class LandSystem:
                 "allow_frame": "INTEGER DEFAULT 0",
                 "owner_paid_money": "REAL DEFAULT 0",
                 "allow_non_public_land": "INTEGER DEFAULT 0",
+                "allow_guild_member_interact": "INTEGER DEFAULT 0",
+                "for_sale": "INTEGER DEFAULT 0",
+                "sale_price": "REAL DEFAULT 0",
             }
             if self.db.table_exists("lands"):
                 self._upgrade_land_table()
-                return True
-            success = self.db.create_table("lands", land_fields)
-            if success:
+            else:
+                success = self.db.create_table("lands", land_fields)
+                if not success:
+                    return False
                 print("[ARC Core]Created new land table with all fields")
-            return success
+            self._migrate_land_owner_keys_in_table("lands")
+            return True
         except Exception as e:
             print(f"[ARC Core]Init land tables error: {str(e)}")
             return False
@@ -226,6 +330,9 @@ class LandSystem:
                     print("[ARC Core]Failed to add owner_paid_money column")
 
             _add_col("allow_non_public_land", "INTEGER DEFAULT 0")
+            _add_col("allow_guild_member_interact", "INTEGER DEFAULT 0")
+            _add_col("for_sale", "INTEGER DEFAULT 0")
+            _add_col("sale_price", "REAL DEFAULT 0")
             _add_col("min_y", "INTEGER NOT NULL DEFAULT 0")
             _add_col("max_y", "INTEGER NOT NULL DEFAULT 255")
             return True
@@ -248,7 +355,9 @@ class LandSystem:
                 "max_z": "INTEGER NOT NULL",
                 "shared_users": 'TEXT DEFAULT "[]"',
             }
-            return self.db.create_table("sub_lands", fields)
+            ok = self.db.create_table("sub_lands", fields)
+            self._migrate_land_owner_keys_in_table("sub_lands")
+            return ok
         except Exception as e:
             print(f"[ARC Core]Init sub_land table error: {str(e)}")
             return False
@@ -302,18 +411,23 @@ class LandSystem:
         owner_paid_money: float = 0.0,
     ) -> Optional[int]:
         try:
+            owner_xuid = self.normalize_owner_key_for_write(owner_xuid)
+            if not owner_xuid:
+                return None
             if not self._ensure_dimension_table(dimension):
                 return None
             self.db.execute(
                 "INSERT INTO lands "
                 "(owner_xuid, land_name, dimension, min_x, max_x, min_y, max_y, min_z, max_z, "
-                "tp_x, tp_y, tp_z, shared_users, allow_explosion, allow_public_interact, owner_paid_money) "
-                "VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)",
+                "tp_x, tp_y, tp_z, shared_users, allow_explosion, allow_public_interact, "
+                "allow_guild_member_interact, owner_paid_money, for_sale, sale_price) "
+                "VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)",
                 (
                     owner_xuid, land_name, dimension,
                     min_x, max_x, min_y, max_y, min_z, max_z,
                     tp_x, tp_y, tp_z,
-                    "[]", 0, 0, float(owner_paid_money),
+                    "[]", 0, 0, 0, float(owner_paid_money),
+                    0, 0.0,
                 ),
             )
             result = self.db.query_one("SELECT last_insert_rowid() as land_id")
@@ -352,7 +466,7 @@ class LandSystem:
                 if y is not None:
                     if not (land.get("min_y", 0) <= int(y) <= land.get("max_y", 255)):
                         continue
-                if land["owner_xuid"] != self.PUBLIC_LAND_OWNER_XUID:
+                if not self.is_public_land_owner(land["owner_xuid"]):
                     return land_id
                 public_land_id = land_id
             return public_land_id
@@ -360,15 +474,19 @@ class LandSystem:
             self._log("error", f"Get land at pos error: {str(e)}")
             return None
 
-    def delete_land(self, land_id: int) -> bool:
+    def _unregister_land_from_chunk_mapping(
+        self,
+        land_id: int,
+        dimension: str,
+        min_x: int,
+        max_x: int,
+        min_z: int,
+        max_z: int,
+    ) -> None:
+        """从 chunk_lands_* 索引中移除该领地 ID（不删除 lands 表行）。"""
         try:
-            land = self.db.query_one("SELECT * FROM lands WHERE land_id = ?", (land_id,))
-            if not land:
-                return False
-            table = self._get_dimension_table(land["dimension"])
-            for chunk_key in self._get_affected_chunks(
-                land["min_x"], land["max_x"], land["min_z"], land["max_z"]
-            ):
+            table = self._get_dimension_table(dimension)
+            for chunk_key in self._get_affected_chunks(min_x, max_x, min_z, max_z):
                 row = self.db.query_one(
                     f"SELECT land_ids FROM {table} WHERE chunk_key = ?", (chunk_key,)
                 )
@@ -378,14 +496,94 @@ class LandSystem:
                         ids.remove(land_id)
                         if ids:
                             self.db.update(
-                                table, {"land_ids": json.dumps(ids)},
-                                "chunk_key = ?", (chunk_key,)
+                                table,
+                                {"land_ids": json.dumps(ids)},
+                                "chunk_key = ?",
+                                (chunk_key,),
                             )
                         else:
                             self.db.delete(table, "chunk_key = ?", (chunk_key,))
+        except Exception as e:
+            self._log("error", f"Unregister land from chunk mapping error: {str(e)}")
+
+    def delete_land(self, land_id: int) -> bool:
+        try:
+            land = self.db.query_one("SELECT * FROM lands WHERE land_id = ?", (land_id,))
+            if not land:
+                return False
+            self._unregister_land_from_chunk_mapping(
+                land_id,
+                land["dimension"],
+                land["min_x"],
+                land["max_x"],
+                land["min_z"],
+                land["max_z"],
+            )
             return self.db.delete("lands", "land_id = ?", (land_id,))
         except Exception as e:
             self._log("error", f"Delete land error: {str(e)}")
+            return False
+
+    def update_land_bounds(
+        self,
+        land_id: int,
+        min_x: int,
+        max_x: int,
+        min_y: int,
+        max_y: int,
+        min_z: int,
+        max_z: int,
+        owner_paid_money: Optional[float] = None,
+    ) -> bool:
+        """更新领地范围并重建 chunk 索引；land_id 不变。owner_paid_money 为 None 时不改该列。"""
+        try:
+            min_x, max_x = min(min_x, max_x), max(min_x, max_x)
+            min_y, max_y = min(min_y, max_y), max(min_y, max_y)
+            min_z, max_z = min(min_z, max_z), max(min_z, max_z)
+            land = self.db.query_one("SELECT * FROM lands WHERE land_id = ?", (land_id,))
+            if not land:
+                return False
+            dim = land["dimension"]
+            self._unregister_land_from_chunk_mapping(
+                land_id,
+                dim,
+                land["min_x"],
+                land["max_x"],
+                land["min_z"],
+                land["max_z"],
+            )
+            if owner_paid_money is not None:
+                self.db.execute(
+                    "UPDATE lands SET min_x = ?, max_x = ?, min_y = ?, max_y = ?, min_z = ?, max_z = ?, "
+                    "owner_paid_money = ? WHERE land_id = ?",
+                    (
+                        min_x,
+                        max_x,
+                        min_y,
+                        max_y,
+                        min_z,
+                        max_z,
+                        float(owner_paid_money),
+                        land_id,
+                    ),
+                )
+            else:
+                self.db.execute(
+                    "UPDATE lands SET min_x = ?, max_x = ?, min_y = ?, max_y = ?, min_z = ?, max_z = ? "
+                    "WHERE land_id = ?",
+                    (min_x, max_x, min_y, max_y, min_z, max_z, land_id),
+                )
+            if not self._register_land_to_chunk_mapping(
+                land_id, dim, min_x, max_x, min_z, max_z
+            ):
+                self._log(
+                    "error",
+                    f"update_land_bounds: chunk mapping failed land_id={land_id}",
+                )
+                return False
+            return True
+        except Exception as e:
+            self._log("error", f"update_land_bounds error: {str(e)}")
             return False
 
     def check_land_availability(
@@ -397,8 +595,12 @@ class LandSystem:
         max_y: int,
         min_z: int,
         max_z: int,
+        exclude_land_ids: Optional[Set[int]] = None,
     ) -> tuple:
-        """检查领地范围是否可用。返回 (available, reason_key_or_None, overlapping_ids_or_None)"""
+        """检查领地范围是否可用。返回 (available, reason_key_or_None, overlapping_ids_or_None)
+
+        exclude_land_ids：重设范围时排除当前领地自身与其它已排除 ID，避免与自身旧范围判重叠。
+        """
         try:
             min_x, max_x = min(min_x, max_x), max(min_x, max_x)
             min_y, max_y = min(min_y, max_y), max(min_y, max_y)
@@ -424,6 +626,8 @@ class LandSystem:
                     nearby_ids.update(json.loads(row["land_ids"]))
             overlapping = []
             for land_id in nearby_ids:
+                if exclude_land_ids and land_id in exclude_land_ids:
+                    continue
                 land = self.db.query_one(
                     "SELECT * FROM lands WHERE land_id = ? AND dimension = ?",
                     (land_id, dimension),
@@ -431,7 +635,7 @@ class LandSystem:
                 if not land:
                     continue
                 if (
-                    land.get("owner_xuid") == self.PUBLIC_LAND_OWNER_XUID
+                    self.is_public_land_owner(land.get("owner_xuid"))
                     and land.get("allow_non_public_land", 0)
                 ):
                     continue
@@ -480,6 +684,11 @@ class LandSystem:
             "allow_actor_damage": bool(row.get("allow_actor_damage", 0)),
             "allow_frame": bool(row.get("allow_frame", 0)),
             "allow_non_public_land": bool(row.get("allow_non_public_land", 0)),
+            "allow_guild_member_interact": bool(
+                row.get("allow_guild_member_interact", 0)
+            ),
+            "for_sale": bool(row.get("for_sale", 0)),
+            "sale_price": float(row.get("sale_price") or 0),
             "owner_paid_money": row.get("owner_paid_money", 0),
         }
 
@@ -556,7 +765,7 @@ class LandSystem:
             return False, str(e)
 
     def is_public_land(self, land_id: int) -> bool:
-        return self.get_land_owner(land_id) == self.PUBLIC_LAND_OWNER_XUID
+        return self.is_public_land_owner(self.get_land_owner(land_id))
 
     def set_land_as_public(self, land_id: int) -> bool:
         try:
@@ -564,9 +773,10 @@ class LandSystem:
                 return False
             return self.db.execute(
                 "UPDATE lands SET owner_xuid = ?, owner_paid_money = 0, "
+                "for_sale = 0, sale_price = 0, "
                 "allow_public_interact = 1, allow_actor_interaction = 1, allow_actor_damage = 1 "
                 "WHERE land_id = ?",
-                (self.PUBLIC_LAND_OWNER_XUID, land_id),
+                (self.LAND_OWNER_PUBLIC, land_id),
             )
         except Exception as e:
             self._log("error", f"Set land as public error: {str(e)}")
@@ -576,19 +786,90 @@ class LandSystem:
         try:
             if not self.get_land_info(land_id):
                 return False
+            new_key = self.normalize_owner_key_for_write(new_owner_xuid)
+            if not new_key:
+                return False
             self.db.execute(
-                "UPDATE lands SET owner_xuid = ? WHERE land_id = ?",
-                (new_owner_xuid, land_id),
+                "UPDATE lands SET owner_xuid = ?, for_sale = 0, sale_price = 0 WHERE land_id = ?",
+                (new_key, land_id),
             )
             return True
         except Exception as e:
             self._log("error", f"Transfer land error: {str(e)}")
             return False
 
+    def set_land_sale_listing(
+        self, land_id: int, for_sale: bool, sale_price: float = 0.0
+    ) -> bool:
+        """私人领地上架/下架：上架时售价须 > 0。"""
+        try:
+            if not self.get_land_info(land_id):
+                return False
+            sp = float(sale_price)
+            if for_sale:
+                if sp <= 0:
+                    return False
+            else:
+                sp = 0.0
+            return bool(
+                self.db.execute(
+                    "UPDATE lands SET for_sale = ?, sale_price = ? WHERE land_id = ?",
+                    (1 if for_sale else 0, sp, land_id),
+                )
+            )
+        except Exception as e:
+            self._log("error", f"Set land sale listing error: {str(e)}")
+            return False
+
+    def transfer_land_purchase(
+        self,
+        land_id: int,
+        buyer_owner_key: str,
+        seller_owner_key: str,
+        price: float,
+    ) -> bool:
+        """
+        买家购买上架领地：须仍为 seller 且 for_sale=1 且 sale_price 与 price 一致。
+        转让后清空出售状态、授权列表，owner_paid_money 记为成交价。
+        """
+        try:
+            new_key = self.normalize_owner_key_for_write(buyer_owner_key)
+            if not new_key:
+                return False
+            fp = float(price)
+            if fp <= 0:
+                return False
+            row = self.db.query_one(
+                "SELECT owner_xuid, for_sale, sale_price FROM lands WHERE land_id = ?",
+                (land_id,),
+            )
+            if not row:
+                return False
+            if str(row["owner_xuid"]) != str(seller_owner_key):
+                return False
+            if not int(row.get("for_sale") or 0):
+                return False
+            listed = float(row.get("sale_price") or 0)
+            if abs(listed - fp) > 1e-6:
+                return False
+            return bool(
+                self.db.execute(
+                    "UPDATE lands SET owner_xuid = ?, for_sale = 0, sale_price = 0, "
+                    "shared_users = '[]', owner_paid_money = ? "
+                    "WHERE land_id = ? AND owner_xuid = ? AND for_sale = 1 "
+                    "AND ABS(sale_price - ?) < 1e-6",
+                    (new_key, fp, land_id, seller_owner_key, fp),
+                )
+            )
+        except Exception as e:
+            self._log("error", f"Transfer land purchase error: {str(e)}")
+            return False
+
     def get_player_land_count(self, xuid: str) -> int:
         try:
+            key = self.land_owner_key_player(xuid)
             row = self.db.query_one(
-                "SELECT COUNT(*) as count FROM lands WHERE owner_xuid = ?", (xuid,)
+                "SELECT COUNT(*) as count FROM lands WHERE owner_xuid = ?", (key,)
             )
             return row["count"] if row else 0
         except Exception as e:
@@ -597,10 +878,37 @@ class LandSystem:
 
     def get_player_lands(self, xuid: str) -> Dict[int, dict]:
         try:
-            rows = self.db.query_all("SELECT * FROM lands WHERE owner_xuid = ?", (xuid,))
+            key = self.land_owner_key_player(xuid)
+            rows = self.db.query_all(
+                "SELECT * FROM lands WHERE owner_xuid = ?", (key,)
+            )
             return {r["land_id"]: self._parse_land_row(r) for r in rows}
         except Exception as e:
             self._log("error", f"Get player lands error: {str(e)}")
+            return {}
+
+    def get_guild_land_count(self, guild_id: int) -> int:
+        try:
+            key = self.land_owner_key_guild(guild_id)
+            row = self.db.query_one(
+                "SELECT COUNT(*) as count FROM lands WHERE owner_xuid = ?", (key,)
+            )
+            return int(row["count"]) if row else 0
+        except Exception as e:
+            self._log("error", f"Get guild land count error: {str(e)}")
+            return 0
+
+    def get_guild_lands(self, guild_id: int) -> Dict[int, dict]:
+        """返回指定公会名下所有主领地 land_id -> 解析后的领地信息。"""
+        try:
+            key = self.land_owner_key_guild(int(guild_id))
+            rows = self.db.query_all(
+                "SELECT * FROM lands WHERE owner_xuid = ? ORDER BY land_id",
+                (key,),
+            )
+            return {int(r["land_id"]): self._parse_land_row(r) for r in rows}
+        except Exception as e:
+            self._log("error", f"Get guild lands error: {str(e)}")
             return {}
 
     def get_all_lands(self) -> Dict[int, dict]:
@@ -628,6 +936,10 @@ class LandSystem:
 
     def set_land_allow_public_interact(self, land_id: int, allow: bool) -> bool:
         return self._set_land_flag(land_id, "allow_public_interact", allow)
+
+    def set_land_allow_guild_member_interact(self, land_id: int, allow: bool) -> bool:
+        """开启后，与领地主人（Player_ 主人）同一公会的成员可进行方块交互（不含建造/破坏）。"""
+        return self._set_land_flag(land_id, "allow_guild_member_interact", allow)
 
     def set_land_allow_actor_interaction(self, land_id: int, allow: bool) -> bool:
         return self._set_land_flag(land_id, "allow_actor_interaction", allow)
@@ -725,9 +1037,12 @@ class LandSystem:
         sub_land_name: str,
         min_x: int, max_x: int,
         min_y: int, max_y: int,
-        min_z: int, max_z: int,
+        min_z: int,         max_z: int,
     ) -> Optional[int]:
         try:
+            owner_xuid = self.normalize_owner_key_for_write(owner_xuid)
+            if not owner_xuid:
+                return None
             self.db.execute(
                 "INSERT INTO sub_lands "
                 "(parent_land_id, owner_xuid, sub_land_name, min_x, max_x, min_y, max_y, min_z, max_z, shared_users) "
@@ -771,9 +1086,10 @@ class LandSystem:
         self, parent_land_id: int, owner_xuid: str
     ) -> Dict[int, dict]:
         try:
+            key = self.normalize_owner_key_for_write(owner_xuid)
             rows = self.db.query_all(
                 "SELECT * FROM sub_lands WHERE parent_land_id = ? AND owner_xuid = ?",
-                (parent_land_id, owner_xuid),
+                (parent_land_id, key),
             )
             return {r["sub_land_id"]: self._parse_sub_land_row(r) for r in rows}
         except Exception as e:
