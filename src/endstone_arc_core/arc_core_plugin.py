@@ -7,10 +7,10 @@ import threading
 import time
 from datetime import datetime, timedelta
 from pathlib import Path
-from typing import Any, Dict, List, Optional, Set
+from typing import Any, Callable, Dict, List, Optional, Set
 
 from endstone import ColorFormat, Player, GameMode
-from endstone.form import ActionForm, TextInput, ModalForm, Label
+from endstone.form import ActionForm, TextInput, ModalForm, Label, Dropdown
 from endstone.command import Command, CommandSender
 from endstone.event import event_handler, PlayerJoinEvent, PlayerQuitEvent, PlayerRespawnEvent, BlockBreakEvent, BlockPlaceEvent, PlayerDeathEvent, PlayerInteractEvent, ActorExplodeEvent, PlayerInteractActorEvent, ActorDamageEvent, ActorDeathEvent, PlayerChatEvent 
 from endstone.plugin import Plugin
@@ -20,6 +20,7 @@ from endstone_arc_core.Economy import Economy
 from endstone_arc_core.LanguageManager import LanguageManager
 from endstone_arc_core.SettingManager import SettingManager
 from endstone_arc_core.TeleportSystem import TeleportSystem, generate_tp_command_to_position
+from endstone_arc_core.mc_command_format import format_mc_command_player_name
 from endstone_arc_core.LandSystem import LandSystem
 from endstone_arc_core.TitleSystem import TitleSystem
 from endstone_arc_core.AchievementSystem import AchievementSystem
@@ -40,8 +41,6 @@ from endstone_arc_core.arc_error_log import append_arc_error_log, format_context
 from endstone_arc_core.sky_eye_log import append_sky_eye_record, prune_sky_eye_logs
 
 MAIN_PATH = 'plugins/ARCCore'
-# 领地无权限操作日志目录（按日期分文件），位于弧光核心数据目录下
-LAND_INTERACT_LOG_DIR_NAME = 'land_inteteact_log'
 # 天眼系统：玩家行为审计日志目录（按自然日 YYYYMMDD.txt）
 SKY_EYE_LOG_DIR_NAME = 'sky_eye'
 # 公会浏览列表每页按钮数量（避免表单按钮过多）
@@ -186,8 +185,10 @@ class ARCCorePlugin(Plugin):
             except ValueError:
                 self.spawn_protect_range = 8
 
-        # 玩家认证
-        self.player_authentication_state = {}
+        # 敏感操作（转账、创建/管理领地等）：本会话验证密码一次，退出游戏前有效
+        self.player_sensitive_password_verified: Dict[str, bool] = {}
+        # 尚未设置密码的玩家：完成注册后需继续的敏感操作（关闭注册窗时走 on_cancel）
+        self._pending_sensitive_action_by_player: Dict[str, Dict[str, Callable[[Player], None]]] = {}
 
         # 玩家圈地
         self.land_min_distance = self.setting_manager.GetSetting('MIN_LAND_DISTANCE')
@@ -245,7 +246,6 @@ class ARCCorePlugin(Plugin):
         self.position_thread = None
         self.position_thread_running = False
         self.position_thread_lock = threading.Lock()
-        self._land_interact_log_lock = threading.Lock()
         self.position_check_interval = 0.5  # 每0.5秒检查一次，比原来的1.25秒更快
 
 
@@ -279,16 +279,6 @@ class ARCCorePlugin(Plugin):
                 self.hide_op_in_money_ranking = self.hide_op_in_money_ranking.lower() in ['true', '1', 'yes']
             except (ValueError, AttributeError):
                 self.hide_op_in_money_ranking = True
-
-        # 强制登录
-        self.force_login = self.setting_manager.GetSetting('FORCE_LOGIN')
-        if self.force_login is None:
-            self.force_login = False
-        else:
-            try:
-                self.force_login = str(self.force_login).lower() in ['true', '1', 'yes']
-            except (ValueError, AttributeError):
-                self.force_login = False
 
         # 清道夫系统变量初始化
         self.enable_cleaner = False
@@ -336,7 +326,11 @@ class ARCCorePlugin(Plugin):
             
             # 创建新人指令文件
             if not self.newbie_commands_file.exists():
-                default_commands = "# 新人指令文件\n# 每行一个指令，{player} 会被替换为玩家名称\n# 示例：\n# gamemode 0 {player}\n# give {player} minecraft:bread 16\n# clear {player}"
+                default_commands = (
+                    "# 新人指令文件\n# 每行一个指令，{player} 会被替换为玩家名称"
+                    "（若名称含空格会自动加双引号）\n# 示例：\n# gamemode 0 {player}\n"
+                    "# give {player} minecraft:bread 16\n# clear {player}"
+                )
                 self.newbie_commands_file.write_text(default_commands, encoding='utf-8')
                 # 在__init__期间不能使用self.logger，使用print代替
                 print(f"[ARC Core]Created default newbie commands file: {self.newbie_commands_file}")
@@ -376,8 +370,10 @@ class ARCCorePlugin(Plugin):
                         line = line.strip()
                         # 跳过空行和注释行
                         if line and not line.startswith('#'):
-                            # 替换玩家名称占位符
-                            command = line.replace('{player}', player.name)
+                            # 替换玩家名称占位符（含空格时加引号，避免指令拆成多参数）
+                            command = line.replace(
+                                '{player}', format_mc_command_player_name(player.name)
+                            )
                             # 执行指令
                             try:
                                 self.server.dispatch_command(self.server.command_sender, command)
@@ -457,7 +453,7 @@ class ARCCorePlugin(Plugin):
             pass
 
         # 天眼：启动时若已开启则立即按保留天数清理过期日文件
-        if self._sky_eye_setting_bool("ENABLE_SKY_EYE", False):
+        if self._sky_eye_setting_bool("ENABLE_SKY_EYE", True):
             try:
                 prune_sky_eye_logs(
                     Path(MAIN_PATH) / SKY_EYE_LOG_DIR_NAME,
@@ -542,27 +538,15 @@ class ARCCorePlugin(Plugin):
                     self.show_op_main_panel(player)
                     return True
                 if head == "land":
-                    if not self.if_player_logined(player):
-                        self.show_main_menu(player)
-                        return True
                     self.show_land_main_menu(player)
                     return True
                 if head == "tp":
-                    if not self.if_player_logined(player):
-                        self.show_main_menu(player)
-                        return True
                     self.show_teleport_menu(player)
                     return True
                 if head == "bank":
-                    if not self.if_player_logined(player):
-                        self.show_main_menu(player)
-                        return True
                     self.show_bank_main_menu(player)
                     return True
                 if head == "guild":
-                    if not self.if_player_logined(player):
-                        self.show_main_menu(player)
-                        return True
                     self.show_guild_main_menu(player)
                     return True
             self.show_main_menu(player)
@@ -571,7 +555,10 @@ class ARCCorePlugin(Plugin):
             if not isinstance(sender, Player):
                 sender.send_message(f'[ARC Core]This command only works for players.')
                 return True
-            self.server.dispatch_command(self.server.command_sender, f'kill {sender.name}')
+            self.server.dispatch_command(
+                self.server.command_sender,
+                f'kill {format_mc_command_player_name(sender.name)}',
+            )
             self.server.broadcast_message(self.language_manager.GetText('PLAYER_SUICIDE_MESSAGE').format(sender.name))
             return True
         if command.name == "spawn":
@@ -579,8 +566,12 @@ class ARCCorePlugin(Plugin):
                 sender.send_message(f'[ARC Core]This command only works for players.')
                 return True
             if sender.location.dimension.name in self.spawn_pos_dict:
-                self.server.dispatch_command(self.server.command_sender,
-                                             f'tp {sender.name} {int(self.spawn_pos_dict[sender.location.dimension.name][0])} {int(self.spawn_pos_dict[sender.location.dimension.name][1])} {int(self.spawn_pos_dict[sender.location.dimension.name][2])}')
+                spawn_xyz = self.spawn_pos_dict[sender.location.dimension.name]
+                self.server.dispatch_command(
+                    self.server.command_sender,
+                    f'tp {format_mc_command_player_name(sender.name)} '
+                    f'{int(spawn_xyz[0])} {int(spawn_xyz[1])} {int(spawn_xyz[2])}',
+                )
                 sender.send_message(self.language_manager.GetText('PLAYER_TELEPORTED_TO_SPAWN_HINT'))
             else:
                 sender.send_message(self.language_manager.GetText('NO_SPAWN_POSITION_SET_MESSAGE'))
@@ -588,9 +579,6 @@ class ARCCorePlugin(Plugin):
         if command.name == "land":
             player = self._resolve_player_for_command_sender(sender)
             if player is None:
-                return True
-            if not self.if_player_logined(player):
-                self.show_main_menu(player)
                 return True
             if not args:
                 player.send_message(self.language_manager.GetText("LAND_COMMAND_USAGE"))
@@ -611,26 +599,17 @@ class ARCCorePlugin(Plugin):
             player = self._resolve_player_for_command_sender(sender)
             if player is None:
                 return True
-            if not self.if_player_logined(player):
-                self.show_main_menu(player)
-                return True
             self._run_land_pos1_for_player(player)
             return True
         if command.name == "landpos2":
             player = self._resolve_player_for_command_sender(sender)
             if player is None:
                 return True
-            if not self.if_player_logined(player):
-                self.show_main_menu(player)
-                return True
             self._run_land_pos2_for_player(player)
             return True
         if command.name == "landbuy":
             player = self._resolve_player_for_command_sender(sender)
             if player is None:
-                return True
-            if not self.if_player_logined(player):
-                self.show_main_menu(player)
                 return True
             self._run_land_buy_for_player(player)
             return True
@@ -683,9 +662,6 @@ class ARCCorePlugin(Plugin):
                 ),
             )
             if not args or not str(" ".join(args)).strip():
-                if not self.if_player_logined(sender):
-                    self.show_main_menu(sender)
-                    return True
                 self.show_cross_server_menu(sender, on_close=self.show_main_menu)
                 return True
             server_name = " ".join(args).strip()
@@ -737,6 +713,13 @@ class ARCCorePlugin(Plugin):
         return self._resolve_player_from_sender_name(str(getattr(sender, "name", "") or ""))
 
     def _run_land_pos1_for_player(self, player: Player) -> None:
+        self.require_sensitive_password_verified(
+            player,
+            self._run_land_pos1_for_player_verified,
+            on_cancel=None,
+        )
+
+    def _run_land_pos1_for_player_verified(self, player: Player) -> None:
         self.player_land_pos1[player.name] = {
             "dimension": player.location.dimension.name,
             "x": math.floor(player.location.x),
@@ -752,6 +735,13 @@ class ARCCorePlugin(Plugin):
         )
 
     def _run_land_pos2_for_player(self, player: Player) -> None:
+        self.require_sensitive_password_verified(
+            player,
+            self._run_land_pos2_for_player_verified,
+            on_cancel=None,
+        )
+
+    def _run_land_pos2_for_player_verified(self, player: Player) -> None:
         if player.name not in self.player_land_pos1:
             player.send_message(self.language_manager.GetText("CREATE_NEW_LAND_POS2_SET_FAIL_POS1_NOT_SET"))
             return
@@ -777,6 +767,13 @@ class ARCCorePlugin(Plugin):
         self.show_pending_land_purchase_panel(player)
 
     def _run_land_buy_for_player(self, player: Player) -> None:
+        self.require_sensitive_password_verified(
+            player,
+            self._run_land_buy_for_player_verified,
+            on_cancel=None,
+        )
+
+    def _run_land_buy_for_player_verified(self, player: Player) -> None:
         self._execute_land_buy(player)
 
     # Event handlers
@@ -793,7 +790,8 @@ class ARCCorePlugin(Plugin):
             self._execute_newbie_commands(event.player)
         
         self.server.broadcast_message(self.language_manager.GetText('PLAYER_JOIN_MESSAGE').format(event.player.name))
-        self.player_authentication_state[event.player.name] = False
+        self.player_sensitive_password_verified.pop(event.player.name, None)
+        self._pending_sensitive_action_by_player.pop(event.player.name, None)
         event.player.send_message(self.language_manager.GetText('PLAYER_JOIN_HINT'))
 
         # 登录时提示可领取的邀请奖励次数
@@ -829,12 +827,11 @@ class ARCCorePlugin(Plugin):
         except Exception as e:
             self.logger.error(f"[ARC Core]Notify qqsync join error: {e}")
 
-        if self.force_login and not self.if_player_logined(event.player):
-            self.server.scheduler.run_task(
-                self,
-                lambda p=event.player: self._show_force_login_menu_with_delay(p),
-                delay=20,
-            )
+        self.server.scheduler.run_task(
+            self,
+            lambda p=event.player: self._show_join_arc_main_menu_with_delay(p),
+            delay=20,
+        )
 
         try:
             join_loc = getattr(event.player, "location", None)
@@ -851,12 +848,9 @@ class ARCCorePlugin(Plugin):
         except Exception:
             pass
 
-    def _show_force_login_menu_with_delay(self, player: Player):
+    def _show_join_arc_main_menu_with_delay(self, player: Player):
+        """进服后延迟弹出主菜单一次（与配置无关）；玩家可关闭表单，随时可用 /arc 再次打开。"""
         if player is None:
-            return
-        if not self.force_login:
-            return
-        if self.if_player_logined(player):
             return
         if player not in self.server.online_players:
             return
@@ -913,7 +907,8 @@ class ARCCorePlugin(Plugin):
         except Exception:
             pass
         self.server.broadcast_message(self.language_manager.GetText('PLAYER_QUIT_MESSAGE').format(event.player.name))
-        self.player_authentication_state[event.player.name] = False
+        self.player_sensitive_password_verified.pop(event.player.name, None)
+        self._pending_sensitive_action_by_player.pop(event.player.name, None)
 
         # 通知 qqsync 发送离开消息到 QQ 群
         try:
@@ -959,13 +954,6 @@ class ARCCorePlugin(Plugin):
         if not self.land_operation_check(event.player, event.block.location.dimension.name,
                                     (event.block.location.x, event.block.location.y, event.block.location.z)):
             event.is_cancelled = True
-            self._append_land_permission_denied_log(
-                "block_break",
-                event.player,
-                event.block.location.dimension.name,
-                (event.block.location.x, event.block.location.y, event.block.location.z),
-                target_description=str(target_desc),
-            )
         if not event.is_cancelled and self._is_frame_block(event.block):
             land_id = self.get_land_at_pos(
                 event.block.location.dimension.name,
@@ -990,15 +978,6 @@ class ARCCorePlugin(Plugin):
                 ):
                     event.is_cancelled = True
                     event.player.send_message(self.language_manager.GetText('LAND_FRAME_PROTECT_HINT'))
-                    self._append_land_permission_denied_log(
-                        "frame_block_break",
-                        event.player,
-                        event.block.location.dimension.name,
-                        (event.block.location.x, event.block.location.y, event.block.location.z),
-                        land_id=land_id,
-                        target_description=str(target_desc),
-                        note="allow_frame_disabled",
-                    )
         if not self.spawn_protect_check(event.player, event.block.location.dimension.name,
                                     (event.block.location.x, event.block.location.y, event.block.location.z)):
             event.is_cancelled = True
@@ -1128,13 +1107,6 @@ class ARCCorePlugin(Plugin):
         if self._is_disabled_block(target_desc):
             event.is_cancelled = True
             event.player.send_message(self.language_manager.GetText("DISABLED_BLOCK_DENIED_HINT"))
-            self._append_land_permission_denied_log(
-                "block_place_disabled",
-                event.player,
-                dimension_name,
-                place_pos,
-                target_description=str(target_desc),
-            )
             return
         if not self.land_only_place_wilderness_check(
             event.player,
@@ -1143,23 +1115,8 @@ class ARCCorePlugin(Plugin):
             target_desc,
         ):
             event.is_cancelled = True
-            self._append_land_permission_denied_log(
-                "block_place_land_only",
-                event.player,
-                dimension_name,
-                place_pos,
-                target_description=str(target_desc),
-                note="wilderness",
-            )
         if not self.land_operation_check(event.player, dimension_name, place_pos):
             event.is_cancelled = True
-            self._append_land_permission_denied_log(
-                "block_place",
-                event.player,
-                dimension_name,
-                place_pos,
-                target_description=str(target_desc),
-            )
         if not self.spawn_protect_check(event.player, dimension_name, place_pos):
             event.is_cancelled = True
         return
@@ -1302,23 +1259,9 @@ class ARCCorePlugin(Plugin):
             if self._is_disabled_block(block_target_desc):
                 event.is_cancelled = True
                 event.player.send_message(self.language_manager.GetText("DISABLED_BLOCK_DENIED_HINT"))
-                self._append_land_permission_denied_log(
-                    "block_interact_disabled",
-                    event.player,
-                    dimension,
-                    pos,
-                    target_description=block_target_desc,
-                )
                 return
             if not self.land_interact_check(event.player, dimension, pos):
                 event.is_cancelled = True
-                self._append_land_permission_denied_log(
-                    "block_interact",
-                    event.player,
-                    dimension,
-                    pos,
-                    target_description=block_target_desc,
-                )
             elif self._is_frame_block(block):
                 land_id = self.get_land_at_pos(dimension, int(block_location.x), int(block_location.z), int(block_location.y))
                 if land_id is not None:
@@ -1332,23 +1275,24 @@ class ARCCorePlugin(Plugin):
                     ):
                         event.is_cancelled = True
                         event.player.send_message(self.language_manager.GetText('LAND_FRAME_PROTECT_HINT'))
-                        self._append_land_permission_denied_log(
-                            "frame_interact",
-                            event.player,
-                            dimension,
-                            pos,
-                            land_id=land_id,
-                            target_description=block_target_desc,
-                            note="allow_frame_disabled",
-                        )
         except Exception as e:
             pass
             # self.logger.error(f"[ARC Core] on_player_interact error: {str(e)}")
 
     @event_handler
     def on_actor_explode(self, event: ActorExplodeEvent):
-        """处理爆炸事件，保护领地免受爆炸伤害"""
+        """处理爆炸事件：全局拦截或按领地保护"""
         try:
+            # 安全检查：确保 event.location 存在
+            if not hasattr(event, 'location') or event.location is None:
+                self.logger.warning("[ARC Core] on_actor_explode: event.location is None, skipping")
+                return
+
+            # 全局拦截一切爆炸（默认开启）
+            if self._sky_eye_setting_bool("BLOCK_ALL_EXPLOSIONS", True):
+                event.is_cancelled = True
+                return
+
             explosion_location = event.location
             dimension = explosion_location.dimension.name
             
@@ -1360,23 +1304,48 @@ class ARCCorePlugin(Plugin):
                     # 如果领地不允许爆炸，则取消爆炸事件
                     event.is_cancelled = True
                     return
-                    
+            
+            # 安全检查：确保 block_list 存在且可迭代
+            if not hasattr(event, 'block_list') or event.block_list is None:
+                # block_list 为 None 或不存在时，直接返回（让爆炸正常处理）
+                return
+            
+            # 安全检查：block_list 必须是可迭代的对象
+            block_list = event.block_list
+            if not isinstance(block_list, (list, tuple, set)):
+                self.logger.warning("[ARC Core] on_actor_explode: block_list is not iterable, skipping")
+                return
+            
             # 检查爆炸影响的方块是否在领地内
             filtered_blocks = []
-            for block in event.block_list:
-                block_land_id = self.get_land_at_pos(dimension, math.floor(block.location.x), math.floor(block.location.z))
-                if block_land_id is not None:
-                    block_land_info = self.get_land_info(block_land_id)
-                    if block_land_info and block_land_info.get('allow_explosion', False):
-                        # 如果该领地允许爆炸，保留这个方块在爆炸列表中
+            for block in block_list:
+                try:
+                    # 安全检查：确保 block 和 block.location 存在
+                    if not hasattr(block, 'location') or block.location is None:
+                        continue
+                    block_land_id = self.get_land_at_pos(dimension, math.floor(block.location.x), math.floor(block.location.z))
+                    if block_land_id is not None:
+                        block_land_info = self.get_land_info(block_land_id)
+                        if block_land_info and block_land_info.get('allow_explosion', False):
+                            # 如果该领地允许爆炸，保留这个方块在爆炸列表中
+                            filtered_blocks.append(block)
+                        # 如果不允许爆炸，则不添加到列表中（移除）
+                    else:
+                        # 不在领地内的方块保持原样
                         filtered_blocks.append(block)
-                    # 如果不允许爆炸，则不添加到列表中（移除）
-                else:
-                    # 不在领地内的方块保持原样
-                    filtered_blocks.append(block)
+                except (AttributeError, TypeError, ValueError):
+                    # 跳过无效的方块
+                    continue
             
-            # 更新爆炸影响的方块列表
-            event.block_list = filtered_blocks
+            # 安全检查：只有在 filtered_blocks 有内容时才尝试更新
+            # 注意：直接赋值 event.block_list 可能在某些版本导致 SIGSEGV
+            # 因此我们只在方块数量减少时才更新（移除无效方块）
+            if len(filtered_blocks) < len(block_list):
+                try:
+                    event.block_list = filtered_blocks
+                except Exception as e:
+                    # 如果赋值失败，记录警告但不影响事件处理
+                    self.logger.warning(f"[ARC Core] Failed to update block_list: {str(e)}")
             
         except Exception as e:
             self.logger.error(f"Handle actor explode event error: {str(e)}")
@@ -1425,14 +1394,6 @@ class ARCCorePlugin(Plugin):
                 if not self._check_land_permission(event.player, land_info):
                     event.is_cancelled = True
                     event.player.send_message(self.language_manager.GetText('LAND_ACTOR_INTERACTION_DENIED'))
-                    self._append_land_permission_denied_log(
-                        "actor_interact",
-                        event.player,
-                        dimension,
-                        (float(ax), float(ay), float(az)),
-                        land_id=land_id,
-                        target_description=str(target_desc),
-                    )
 
     @event_handler
     def on_actor_damage(self, event: ActorDamageEvent):
@@ -1476,15 +1437,6 @@ class ARCCorePlugin(Plugin):
                 if not land_info.get('allow_actor_damage', False):
                     event.is_cancelled = True
                     attacker.send_message(self.language_manager.GetText('LAND_ACTOR_DAMAGE_DENIED'))
-                    self._append_land_permission_denied_log(
-                        "actor_damage",
-                        attacker,
-                        dimension,
-                        (float(ax), float(ay), float(az)),
-                        land_id=land_id,
-                        target_description=str(target_desc),
-                        note="public_land_actor_damage_disabled",
-                    )
                     return
                 protected = self._get_public_land_protected_entities()
                 # print("entity",event.actor.type, "public land protected entities", protected)
@@ -1492,30 +1444,12 @@ class ARCCorePlugin(Plugin):
                 if damaged_entity_type and damaged_entity_type in protected:
                     event.is_cancelled = True
                     attacker.send_message(self.language_manager.GetText('LAND_ACTOR_DAMAGE_DENIED'))
-                    self._append_land_permission_denied_log(
-                        "actor_damage",
-                        attacker,
-                        dimension,
-                        (float(ax), float(ay), float(az)),
-                        land_id=land_id,
-                        target_description=str(target_desc),
-                        note="public_land_protected_entity",
-                    )
                 return
             # 非公共领地：未开放生物伤害时仅主人/授权用户可造成伤害（与方块互动等统一走权限判定）
             if not land_info.get('allow_actor_damage', False):
                 if not self._check_land_permission(attacker, land_info):
                     event.is_cancelled = True
                     attacker.send_message(self.language_manager.GetText('LAND_ACTOR_DAMAGE_DENIED'))
-                    self._append_land_permission_denied_log(
-                        "actor_damage",
-                        attacker,
-                        dimension,
-                        (float(ax), float(ay), float(az)),
-                        land_id=land_id,
-                        target_description=str(target_desc),
-                        note="private_land_no_actor_damage_permission",
-                    )
 
     @event_handler
     def on_actor_death(self, event: ActorDeathEvent):
@@ -1710,56 +1644,6 @@ class ARCCorePlugin(Plugin):
             return True
         return False
 
-    def _append_land_permission_denied_log(
-        self,
-        action_kind: str,
-        player: Player,
-        dimension: str,
-        pos: tuple,
-        *,
-        land_id: Optional[int] = None,
-        target_description: str = "",
-        note: str = "",
-    ) -> None:
-        """无权限领地操作被拒绝时写入日志：plugins/ARCCore/land_inteteact_log/YYYY-MM-DD.txt"""
-        try:
-            if not player or not dimension:
-                return
-            x = pos[0] if len(pos) > 0 else 0.0
-            y = pos[1] if len(pos) > 1 else None
-            z = pos[2] if len(pos) > 2 else 0.0
-            if land_id is None:
-                if y is not None:
-                    land_id = self.get_land_at_pos(
-                        dimension, int(math.floor(x)), int(math.floor(z)), int(math.floor(y))
-                    )
-                else:
-                    land_id = self.get_land_at_pos(
-                        dimension, int(math.floor(x)), int(math.floor(z))
-                    )
-            player_name = getattr(player, "name", "") or "?"
-            player_xuid = str(getattr(player, "xuid", "") or "")
-            ts = datetime.now().isoformat(timespec="seconds")
-            pos_y = "-" if y is None else str(y)
-            line = (
-                f"{ts}\t{action_kind}\tplayer={player_name}\txuid={player_xuid}\t"
-                f"dim={dimension}\tpos=({x},{pos_y},{z})\tland_id={land_id if land_id is not None else '-'}\t"
-                f"target={target_description or '-'}"
-            )
-            if note:
-                line += f"\tnote={note}"
-            line += "\n"
-            log_dir = Path(MAIN_PATH) / LAND_INTERACT_LOG_DIR_NAME
-            log_dir.mkdir(parents=True, exist_ok=True)
-            date_filename = datetime.now().strftime("%Y-%m-%d") + ".txt"
-            log_path = log_dir / date_filename
-            payload = line.encode("utf-8")
-            with self._land_interact_log_lock:
-                with open(log_path, "ab") as log_file:
-                    log_file.write(payload)
-        except Exception:
-            pass
-
     def _sky_eye_setting_bool(self, key: str, default: bool = False) -> bool:
         raw = self.setting_manager.GetSetting(key)
         if raw is None:
@@ -1809,7 +1693,7 @@ class ARCCorePlugin(Plugin):
         pos_z: float,
         detail: str = "",
     ) -> None:
-        if not self._sky_eye_setting_bool("ENABLE_SKY_EYE", False):
+        if not self._sky_eye_setting_bool("ENABLE_SKY_EYE", True):
             return
         if player is None:
             return
@@ -2003,35 +1887,48 @@ class ARCCorePlugin(Plugin):
                             old_land_id = self.player_in_land_id_dict[player.name]
                             if self.is_land_id_changed(old_land_id, land_id):
                                 self.player_in_land_id_dict[player.name] = land_id
-                                
-                                # 进入新领地时发送提示
-                                if land_id is not None:
-                                    try:
-                                        new_land_name = self.get_land_name(land_id)
-                                        land_owner = self.get_land_display_owner_name(land_id)
-                                        
-                                        # 创建固定参数的闭包，避免循环变量捕获问题
-                                        def create_land_message_sender(target_player, land_name, owner_name, land_id):
-                                            def send_land_message():
-                                                try:
-                                                    # 发送领地信息字幕（公共领地只显示「公共领地」，不显示「领主：公共领地」）
-                                                    if self.is_public_land(land_id):
-                                                        subtitle = self.language_manager.GetText('PUBLIC_LAND_NAME')
-                                                    else:
-                                                        subtitle = self.language_manager.GetText('STEP_IN_LAND_SUBTITLE').format(owner_name)
-                                                    target_player.send_popup(
-                                                        f'{self.language_manager.GetText("STEP_IN_LAND_TITLE").format(land_name)}\n{subtitle}'
-                                                    )
-                                                    # 显示领地边界粒子效果
-                                                    land_info = self.get_land_info(land_id)
-                                                    if land_info:
-                                                        self.display_land_particle_boundary(target_player, land_info)
+
+                                try:
+                                    # 仅在「从某领地走出到无领地区」时提示离开；
+                                    # 领地A→领地B 直接以进入B 的提示覆盖，避免两条 popup 互相覆盖。
+                                    leave_text = (
+                                        self._build_land_transition_text(old_land_id, is_leaving=True)
+                                        if (old_land_id is not None and land_id is None)
+                                        else None
+                                    )
+                                    enter_text = (
+                                        self._build_land_transition_text(land_id, is_leaving=False)
+                                        if land_id is not None
+                                        else None
+                                    )
+
+                                    new_land_name = self.get_land_name(land_id) if land_id is not None else None
+                                    new_land_info = self.get_land_info(land_id) if land_id is not None else None
+                                    new_land_is_public = self.is_public_land(land_id) if land_id is not None else False
+
+                                    def create_land_message_sender(
+                                        target_player,
+                                        leave_message,
+                                        enter_message,
+                                        new_id,
+                                        new_name,
+                                        new_info,
+                                        is_public,
+                                    ):
+                                        def send_land_message():
+                                            try:
+                                                if leave_message:
+                                                    target_player.send_popup(leave_message)
+                                                if enter_message:
+                                                    target_player.send_popup(enter_message)
+                                                if new_id is not None and new_info:
+                                                    self.display_land_particle_boundary(target_player, new_info)
                                                     # 私人领地上架出售：非主人进入时弹出购买表单
-                                                    if land_info and not self.is_public_land(land_id):
-                                                        seller_key = str(land_info.get("owner_xuid") or "")
+                                                    if not is_public:
+                                                        seller_key = str(new_info.get("owner_xuid") or "")
                                                         seller_px = LandSystem.parse_land_owner_player_xuid(seller_key)
-                                                        listed = bool(land_info.get("for_sale"))
-                                                        list_price = float(land_info.get("sale_price") or 0)
+                                                        listed = bool(new_info.get("for_sale"))
+                                                        list_price = float(new_info.get("sale_price") or 0)
                                                         if (
                                                             seller_px is not None
                                                             and listed
@@ -2039,21 +1936,31 @@ class ARCCorePlugin(Plugin):
                                                             and str(seller_px) != str(target_player.xuid)
                                                         ):
                                                             self._show_land_purchase_offer_form(
-                                                                target_player, land_id, land_name, land_info
+                                                                target_player, new_id, new_name, new_info
                                                             )
-                                                except Exception as e:
-                                                    self.logger.warning(f"[ARC Core]Failed to send land message to {target_player.name}: {str(e)}")
-                                            return send_land_message
-                                        
-                                        # 创建消息发送器，固定当前玩家和领地信息
-                                        message_sender = create_land_message_sender(player, new_land_name, land_owner, land_id)
-                                        
-                                        # 在主线程中执行UI操作
-                                        if hasattr(self.server, 'scheduler'):
-                                            self.server.scheduler.run_task(self, message_sender, delay=0)
-                                        
-                                    except Exception as e:
-                                        self.logger.warning(f"[ARC Core]Error processing land change for {player.name}: {str(e)}")
+                                            except Exception as send_error:
+                                                self.logger.warning(
+                                                    f"[ARC Core]Failed to send land message to {target_player.name}: {str(send_error)}"
+                                                )
+                                        return send_land_message
+
+                                    message_sender = create_land_message_sender(
+                                        player,
+                                        leave_text,
+                                        enter_text,
+                                        land_id,
+                                        new_land_name,
+                                        new_land_info,
+                                        new_land_is_public,
+                                    )
+
+                                    if hasattr(self.server, "scheduler"):
+                                        self.server.scheduler.run_task(self, message_sender, delay=0)
+
+                                except Exception as e:
+                                    self.logger.warning(
+                                        f"[ARC Core]Error processing land change for {player.name}: {str(e)}"
+                                    )
                                         
                     except Exception as e:
                         self.logger.warning(f"[ARC Core]Error processing player {player.name} position: {str(e)}")
@@ -2836,53 +2743,173 @@ class ARCCorePlugin(Plugin):
                 return False
         return True
 
-    # UI Main menu
-    def show_main_menu(self, player: Player):
-        if not self.if_player_logined(player):
-            player_basic_info = self.get_player_basic_info(player)
-            if player_basic_info is None:
-                self.report_arc_error(
-                    "INFO0",
-                    f"show_main_menu (pre-login) get_player_basic_info returned None player={player.name!r}",
-                    player,
+    def _player_has_checked_in_today(self, player: Player) -> bool:
+        today = self._today_checkin_date_str()
+        row = self.database_manager.query_one(
+            "SELECT last_checkin_date FROM player_basic_info WHERE xuid = ?",
+            (str(player.xuid),),
+        )
+        last_date = (row.get("last_checkin_date") if row else None) or ""
+        return str(last_date).strip() == today
+
+    def require_sensitive_password_verified(
+        self,
+        player: Player,
+        on_verified: Callable[[Player], None],
+        on_cancel: Optional[Callable[[Player], None]] = None,
+    ) -> None:
+        """转账、创建/管理领地等敏感操作前要求密码；本会话内验证一次即可。"""
+        if self.player_sensitive_password_verified.get(player.name):
+            on_verified(player)
+            return
+        player_basic_info = self.get_player_basic_info(player)
+        if player_basic_info is None:
+            self.report_arc_error(
+                "AUTH0",
+                f"require_sensitive_password_verified get_player_basic_info None player={player.name!r}",
+                player,
+            )
+            return
+        if not player_basic_info.get("password"):
+            self._pending_sensitive_action_by_player[player.name] = {
+                "on_verified": on_verified,
+                "on_cancel": on_cancel or (lambda p: None),
+            }
+            hint = self.language_manager.GetText("SENSITIVE_ACTION_NEED_REGISTER_PASSWORD_HINT")
+            self.show_register_panel(player, hint or None)
+            return
+        self.show_sensitive_password_verify_modal(player, on_verified, on_cancel=on_cancel)
+
+    def show_sensitive_password_verify_modal(
+        self,
+        player: Player,
+        on_verified: Callable[[Player], None],
+        on_cancel: Optional[Callable[[Player], None]] = None,
+    ) -> None:
+        password_input = TextInput(
+            label=self.language_manager.GetText("LOGIN_PANEL_PASSWORD_INPUT_LABEL"),
+            placeholder=self.language_manager.GetText("LOGIN_PANEL_PASSWORD_INPUT_PLACEHOLDER"),
+        )
+        panel_title = self.language_manager.GetText("SENSITIVE_VERIFY_PANEL_TITLE")
+
+        def try_verify(p: Player, json_str: str):
+            data = json.loads(json_str)
+            if len(data) < 2:
+                p.send_message(
+                    self.language_manager.GetText("SENSITIVE_VERIFY_FAIL_PASSWORD_NOT_INPUT")
+                )
+                self.show_sensitive_password_verify_modal(
+                    p,
+                    on_verified,
+                    on_cancel=on_cancel,
                 )
                 return
-            self.update_player_name(player)
-            if player_basic_info['password'] is None:
-                self.show_register_panel(player)
+            if self._modal_choice_is_back(data, 0):
+                if on_cancel:
+                    on_cancel(p)
+                return
+            pwd = (data[1] or "").strip()
+            if not pwd:
+                p.send_message(
+                    self.language_manager.GetText("SENSITIVE_VERIFY_FAIL_PASSWORD_NOT_INPUT")
+                )
+                self.show_sensitive_password_verify_modal(
+                    p,
+                    on_verified,
+                    on_cancel=on_cancel,
+                )
+                return
+            if self.verify_player_password(p, pwd):
+                self.player_sensitive_password_verified[p.name] = True
+                on_verified(p)
             else:
-                self.show_login_panel(player)
-        else:
-            arc_menu = ActionForm(
-                title=self.language_manager.GetText('MAIN_MENU_TITLE'),
+                p.send_message(self.language_manager.GetText("SENSITIVE_VERIFY_FAIL_WRONG_PASSWORD"))
+                self.show_sensitive_password_verify_modal(
+                    p,
+                    on_verified,
+                    on_cancel=on_cancel,
+                )
+
+        verify_panel = ModalForm(
+            title=panel_title,
+            controls=[self._modal_nav_dropdown(), password_input],
+            on_close=None,
+            on_submit=try_verify,
+        )
+        player.send_form(verify_panel)
+
+    def _on_register_panel_closed_for_sensitive(self, player: Player) -> None:
+        pending = self._pending_sensitive_action_by_player.pop(player.name, None)
+        if pending and pending.get("on_cancel"):
+            pending["on_cancel"](player)
+
+    def _modal_nav_dropdown(self) -> Dropdown:
+        """Modal 内「返回上一级 / 继续」；默认继续。点窗口关闭仅关表单，不跳转。"""
+        return Dropdown(
+            label="",
+            options=[
+                self.language_manager.GetText("RETURN_BUTTON_TEXT"),
+                "继续",
+            ],
+            default_index=1,
+        )
+
+    @staticmethod
+    def _modal_choice_is_back(data: list, index: int = 0) -> bool:
+        if not isinstance(data, list) or len(data) <= index:
+            return False
+        raw = data[index]
+        try:
+            return int(raw) == 0
+        except (TypeError, ValueError):
+            return str(raw).strip() in ("0", "false", "False")
+
+    # UI Main menu
+    def show_main_menu(self, player: Player):
+        self.update_player_name(player)
+        checkin_first = not self._player_has_checked_in_today(player)
+        arc_menu = ActionForm(
+            title=self.language_manager.GetText('MAIN_MENU_TITLE'),
+        )
+        if checkin_first:
+            arc_menu.add_button(
+                self.language_manager.GetText('CHECKIN_MENU_BUTTON'),
+                on_click=self.show_daily_checkin_panel,
             )
-            arc_menu.add_button(self.language_manager.GetText('NEWBIE_GUIDE_BUTTON'), on_click=self.show_newbie_welcome_panel)
-            arc_menu.add_button(self.language_manager.GetText('TELEPORT_MENU_NAME'), on_click=self.show_teleport_menu)
-            arc_menu.add_button(self.language_manager.GetText('LAND_MENU_NAME'), on_click=self.show_land_main_menu)
-            arc_menu.add_button(self.language_manager.GetText('BANK_MENU_NAME'), on_click=self.show_bank_main_menu)
-            arc_menu.add_button(self.language_manager.GetText('GUILD_MENU_NAME'), on_click=self.show_guild_main_menu)
-            arc_menu.add_button(self.language_manager.GetText('CHECKIN_MENU_BUTTON'), on_click=self.show_daily_checkin_panel)
-            arc_menu.add_button(self.language_manager.GetText('MAIN_MENU_MY_INFO_NAME'), on_click=self.show_my_info_panel)
-            arc_menu.add_button(self.language_manager.GetText('MAIN_MENU_TOOLS_BUTTON'), on_click=self.show_arc_tools_menu)
-            if self.server.plugin_manager.get_plugin('ushop'):
-                arc_menu.add_button(self.language_manager.GetText('SHOP_MENU_NAME'), on_click=self.show_shop_menu)
-            if self.server.plugin_manager.get_plugin('arc_button_shop'):
-                arc_menu.add_button(self.language_manager.GetText('BUTTON_SHOP_MENU_NAME'), on_click=self.show_button_shop_menu)
-            if self.server.plugin_manager.get_plugin('arc_dtwt'):
-                arc_menu.add_button(self.language_manager.GetText('DTWT_MENU_NAME'), on_click=self.show_dtwt_panel)
-            if self.server.plugin_manager.get_plugin('up_and_down'):
-                arc_menu.add_button(self.language_manager.GetText('STOCK_MARKET_NAME'), on_click=self.show_stock_ui)
-            if player.is_op:
-                arc_menu.add_button(self.language_manager.GetText('OP_PANEL_NAME'), on_click=self.show_op_main_panel)
-            arc_menu.on_close = None
-            player.send_form(arc_menu)
+        arc_menu.add_button(self.language_manager.GetText('NEWBIE_GUIDE_BUTTON'), on_click=self.show_newbie_welcome_panel)
+        arc_menu.add_button(self.language_manager.GetText('TELEPORT_MENU_NAME'), on_click=self.show_teleport_menu)
+        arc_menu.add_button(self.language_manager.GetText('LAND_MENU_NAME'), on_click=self.show_land_main_menu)
+        arc_menu.add_button(self.language_manager.GetText('BANK_MENU_NAME'), on_click=self.show_bank_main_menu)
+        arc_menu.add_button(self.language_manager.GetText('GUILD_MENU_NAME'), on_click=self.show_guild_main_menu)
+        if not checkin_first:
+            arc_menu.add_button(
+                self.language_manager.GetText('CHECKIN_MENU_BUTTON'),
+                on_click=self.show_daily_checkin_panel,
+            )
+        arc_menu.add_button(self.language_manager.GetText('MAIN_MENU_TOOLS_BUTTON'), on_click=self.show_arc_tools_menu)
+        if self.server.plugin_manager.get_plugin('ushop'):
+            arc_menu.add_button(self.language_manager.GetText('SHOP_MENU_NAME'), on_click=self.show_shop_menu)
+        if self.server.plugin_manager.get_plugin('arc_button_shop'):
+            arc_menu.add_button(self.language_manager.GetText('BUTTON_SHOP_MENU_NAME'), on_click=self.show_button_shop_menu)
+        if self.server.plugin_manager.get_plugin('arc_dtwt'):
+            arc_menu.add_button(self.language_manager.GetText('DTWT_MENU_NAME'), on_click=self.show_dtwt_panel)
+        if self.server.plugin_manager.get_plugin('up_and_down'):
+            arc_menu.add_button(self.language_manager.GetText('STOCK_MARKET_NAME'), on_click=self.show_stock_ui)
+        if player.is_op:
+            arc_menu.add_button(self.language_manager.GetText('OP_PANEL_NAME'), on_click=self.show_op_main_panel)
+        arc_menu.on_close = None
+        player.send_form(arc_menu)
 
     def show_arc_tools_menu(self, player: Player):
-        """小喇叭、重生等快捷功能入口。"""
+        """我的信息、小喇叭、重生等快捷功能入口。"""
         tools_form = ActionForm(
             title=self.language_manager.GetText("MAIN_MENU_TOOLS_TITLE"),
             content=self.language_manager.GetText("MAIN_MENU_TOOLS_CONTENT"),
-            on_close=self.show_main_menu,
+            on_close=None,
+        )
+        tools_form.add_button(
+            self.language_manager.GetText("MAIN_MENU_MY_INFO_NAME"),
+            on_click=self.show_my_info_panel,
         )
         tools_form.add_button(
             self.language_manager.GetText("SMALL_HORN_MENU_BUTTON"),
@@ -2907,7 +2934,7 @@ class ARCCorePlugin(Plugin):
         newbie_form = ActionForm(
             title=self.language_manager.GetText('NEWBIE_GUIDE_PANEL_TITLE'),
             content=welcome_content,
-            on_close=self.show_main_menu
+            on_close=None,
         )
         newbie_form.add_button(
             self.language_manager.GetText('RETURN_BUTTON_TEXT'),
@@ -2963,7 +2990,7 @@ class ARCCorePlugin(Plugin):
         my_info_panel = ActionForm(
             title=self.language_manager.GetText('MY_INFO_PANEL_TITLE'),
             content=info_content,
-            on_close=self.show_main_menu
+            on_close=None,
         )
 
         # 未填写邀请人时显示“填写邀请人”按钮
@@ -2992,10 +3019,15 @@ class ARCCorePlugin(Plugin):
             on_click=self.show_my_achievements_hub
         )
 
-        # 返回主菜单
+        my_info_panel.add_button(
+            self.language_manager.GetText('CHANGE_PASSWORD_BUTTON'),
+            on_click=self.show_change_password_panel,
+        )
+
+        # 返回工具菜单
         my_info_panel.add_button(
             self.language_manager.GetText('RETURN_BUTTON_TEXT'),
-            on_click=self.show_main_menu
+            on_click=self.show_arc_tools_menu,
         )
 
         player.send_form(my_info_panel)
@@ -3005,7 +3037,7 @@ class ARCCorePlugin(Plugin):
         panel = ActionForm(
             title=self.language_manager.GetText('MY_ACHIEVEMENTS_HUB_TITLE'),
             content=self.language_manager.GetText('MY_ACHIEVEMENTS_HUB_CONTENT'),
-            on_close=self.show_my_info_panel,
+            on_close=None,
         )
         panel.add_button(
             self.language_manager.GetText('MY_ACHIEVEMENTS_UNLOCKED_LIST_BUTTON'),
@@ -3026,7 +3058,7 @@ class ARCCorePlugin(Plugin):
         panel = ActionForm(
             title=self.language_manager.GetText('MY_ACHIEVEMENTS_UNLOCKED_TITLE'),
             content=self.language_manager.GetText('MY_ACHIEVEMENTS_UNLOCKED_CONTENT'),
-            on_close=self.show_my_achievements_hub,
+            on_close=None,
         )
         for achievement_row in rows:
             unlock_title = str(achievement_row.get("unlock_title") or "").strip()
@@ -3056,7 +3088,7 @@ class ARCCorePlugin(Plugin):
         panel = ActionForm(
             title=self.language_manager.GetText('MY_ACHIEVEMENTS_LOCKED_TITLE'),
             content=self.language_manager.GetText('MY_ACHIEVEMENTS_LOCKED_CONTENT'),
-            on_close=self.show_my_achievements_hub,
+            on_close=None,
         )
         for achievement_row in rows:
             unlock_title = str(achievement_row.get("unlock_title") or "").strip()
@@ -3183,7 +3215,7 @@ class ARCCorePlugin(Plugin):
                 str(achievement_row.get("name") or unlock_title).strip()
             ),
             content=body,
-            on_close=back_cb,
+            on_close=None,
         )
         panel.add_button(self.language_manager.GetText('RETURN_BUTTON_TEXT'), on_click=back_cb)
         player.send_form(panel)
@@ -3197,7 +3229,7 @@ class ARCCorePlugin(Plugin):
         panel = ActionForm(
             title=self.language_manager.GetText('TITLE_MANAGE_TITLE'),
             content=content,
-            on_close=self.show_my_info_panel
+            on_close=None,
         )
         panel.add_button(self.language_manager.GetText('TITLE_UNEQUIP_BUTTON'), on_click=lambda p: self._title_set_equipped_and_back(p, None))
         for t in unlocked:
@@ -3329,7 +3361,10 @@ class ARCCorePlugin(Plugin):
             count = int(it.get("count", 1))
             if item_name and count > 0:
                 try:
-                    self.server.dispatch_command(self.server.command_sender, f"give {player.name} {item_name} {count}")
+                    self.server.dispatch_command(
+                        self.server.command_sender,
+                        f"give {format_mc_command_player_name(player.name)} {item_name} {count}",
+                    )
                 except Exception:
                     pass
 
@@ -3355,11 +3390,19 @@ class ARCCorePlugin(Plugin):
                 self.show_fill_inviter_panel(player, self.language_manager.GetText('FILL_INVITER_FAIL_SYSTEM_ERROR'))
                 return
 
-            if len(data) == 0 or not str(data[0]).strip():
+            if len(data) < 2:
                 self.show_fill_inviter_panel(player, self.language_manager.GetText('FILL_INVITER_FAIL_PLAYER_NOT_FOUND'))
                 return
 
-            inviter_name_input = str(data[0]).strip()
+            if self._modal_choice_is_back(data, 0):
+                self.show_my_info_panel(player)
+                return
+
+            if not str(data[1]).strip():
+                self.show_fill_inviter_panel(player, self.language_manager.GetText('FILL_INVITER_FAIL_PLAYER_NOT_FOUND'))
+                return
+
+            inviter_name_input = str(data[1]).strip()
             player_xuid = str(player.xuid)
 
             # 再次检查自己是否已经填写过邀请人
@@ -3426,8 +3469,8 @@ class ARCCorePlugin(Plugin):
 
         fill_inviter_panel = ModalForm(
             title=panel_title,
-            controls=[inviter_input],
-            on_close=self.show_my_info_panel,
+            controls=[self._modal_nav_dropdown(), inviter_input],
+            on_close=None,
             on_submit=try_set_inviter
         )
         player.send_form(fill_inviter_panel)
@@ -3451,7 +3494,7 @@ class ARCCorePlugin(Plugin):
             no_reward_panel = ActionForm(
                 title=self.language_manager.GetText('INVITE_REWARD_CLAIM_RESULT_TITLE'),
                 content=self.language_manager.GetText('INVITE_REWARD_CLAIM_NOTHING'),
-                on_close=self.show_my_info_panel
+                on_close=None,
             )
             player.send_form(no_reward_panel)
             return
@@ -3474,28 +3517,106 @@ class ARCCorePlugin(Plugin):
         result_panel = ActionForm(
             title=self.language_manager.GetText('INVITE_REWARD_CLAIM_RESULT_TITLE'),
             content=result_content,
-            on_close=self.show_my_info_panel
+            on_close=None,
         )
         player.send_form(result_panel)
 
-    # Register and login
-    def login_successfully(self, player: Player):
-        self.player_authentication_state[player.name] = True
-        self.show_main_menu(player) # 登录成功后自动弹出主菜单
-
-    def _on_login_form_closed(self, player: Player, is_register: bool):
-        """登录/注册表单被关闭时的回调；若未登录且开启强制登录则再次执行 /arc 逻辑强制打开菜单"""
-        if self.if_player_logined(player):
+    def show_change_password_panel(self, player: Player) -> None:
+        """我的信息入口：已设密码则验证旧密码后修改；未设密码则走注册设密流程并回到我的信息。"""
+        player_basic_info = self.get_player_basic_info(player)
+        if player_basic_info is None:
+            self.report_arc_error(
+                "PWD1",
+                f"show_change_password_panel get_player_basic_info returned None player={player.name!r}",
+                player,
+            )
             return
-        if self.force_login:
-            self.show_main_menu(player)
-        else:
-            if is_register:
-                self.show_register_panel(player)
-            else:
-                self.show_login_panel(player)
+        if not player_basic_info.get("password"):
+            hint = self.language_manager.GetText("CHANGE_PASSWORD_NEED_REGISTER_HINT")
+            self.show_register_panel(
+                player,
+                hint or self.language_manager.GetText("REGISTER_PANEL_TITLE"),
+                on_success_no_pending=self.show_my_info_panel,
+                on_close_after_sensitive=self.show_my_info_panel,
+            )
+            return
 
-    def show_register_panel(self, player: Player, hint_message=None):
+        old_password_input = TextInput(
+            label=self.language_manager.GetText("CHANGE_PASSWORD_OLD_LABEL"),
+            placeholder=self.language_manager.GetText("CHANGE_PASSWORD_OLD_PLACEHOLDER"),
+        )
+        new_password_input = TextInput(
+            label=self.language_manager.GetText("CHANGE_PASSWORD_NEW_LABEL"),
+            placeholder=self.language_manager.GetText("CHANGE_PASSWORD_NEW_PLACEHOLDER"),
+        )
+        confirm_password_input = TextInput(
+            label=self.language_manager.GetText("CHANGE_PASSWORD_CONFIRM_LABEL"),
+            placeholder=self.language_manager.GetText("CHANGE_PASSWORD_CONFIRM_PLACEHOLDER"),
+        )
+        panel_title = self.language_manager.GetText("CHANGE_PASSWORD_PANEL_TITLE")
+
+        def try_change_password(p: Player, json_str: str) -> None:
+            data = json.loads(json_str)
+            if len(data) < 4:
+                p.send_message(self.language_manager.GetText("CHANGE_PASSWORD_FAIL_INCOMPLETE"))
+                self.show_change_password_panel(p)
+                return
+            if self._modal_choice_is_back(data, 0):
+                self.show_my_info_panel(p)
+                return
+            old_password = (data[1] or "").strip()
+            new_password = (data[2] or "").strip()
+            confirm_password = (data[3] or "").strip()
+            if not old_password:
+                p.send_message(self.language_manager.GetText("CHANGE_PASSWORD_FAIL_OLD_EMPTY"))
+                self.show_change_password_panel(p)
+                return
+            if not self.verify_player_password(p, old_password):
+                p.send_message(self.language_manager.GetText("CHANGE_PASSWORD_FAIL_OLD_WRONG"))
+                self.show_change_password_panel(p)
+                return
+            if not new_password:
+                p.send_message(self.language_manager.GetText("CHANGE_PASSWORD_FAIL_NEW_EMPTY"))
+                self.show_change_password_panel(p)
+                return
+            if new_password != confirm_password:
+                p.send_message(self.language_manager.GetText("CHANGE_PASSWORD_FAIL_MISMATCH"))
+                self.show_change_password_panel(p)
+                return
+            if new_password == old_password:
+                p.send_message(self.language_manager.GetText("CHANGE_PASSWORD_FAIL_SAME_AS_OLD"))
+                self.show_change_password_panel(p)
+                return
+            if self.set_player_password(p, new_password):
+                self.player_sensitive_password_verified.pop(p.name, None)
+                p.send_message(self.language_manager.GetText("CHANGE_PASSWORD_SUCCESS"))
+                self.show_my_info_panel(p)
+            else:
+                p.send_message(self.language_manager.GetText("REGISTER_FAIL"))
+                self.show_change_password_panel(p)
+
+        change_panel = ModalForm(
+            title=panel_title,
+            controls=[
+                self._modal_nav_dropdown(),
+                old_password_input,
+                new_password_input,
+                confirm_password_input,
+            ],
+            on_close=None,
+            on_submit=try_change_password,
+        )
+        player.send_form(change_panel)
+
+    # Register and sensitive password (ARC 主菜单不再要求登录)
+    def show_register_panel(
+        self,
+        player: Player,
+        hint_message=None,
+        *,
+        on_success_no_pending: Optional[Callable[[Player], None]] = None,
+        on_close_after_sensitive: Optional[Callable[[Player], None]] = None,
+    ):
         password_input = TextInput(
             label=self.language_manager.GetText('REGISTER_PANEL_PASSWORD_INPUT_LABEL'),
             placeholder=self.language_manager.GetText('REGISTER_PANEL_PASSWORD_INPUT_PLACEHOLDER')
@@ -3506,67 +3627,63 @@ class ARCCorePlugin(Plugin):
         )
         panel_title = self.language_manager.GetText('REGISTER_PANEL_TITLE') if hint_message is None else hint_message
 
+        def register_panel_on_close(p: Player) -> None:
+            self._on_register_panel_closed_for_sensitive(p)
+
         def try_register(player: Player, json_str: str):
             data = json.loads(json_str)
-            if len(data) < 2:
-                self.show_register_panel(player, self.language_manager.GetText('REGISTER_FAIL_PASSWORD_NOT_INPUT'))
+            if len(data) < 3:
+                self.show_register_panel(
+                    player,
+                    self.language_manager.GetText('REGISTER_FAIL_PASSWORD_NOT_INPUT'),
+                    on_success_no_pending=on_success_no_pending,
+                    on_close_after_sensitive=on_close_after_sensitive,
+                )
                 return
-            password = data[0]
-            confirm_password = data[1]
+            if self._modal_choice_is_back(data, 0):
+                self._on_register_panel_closed_for_sensitive(player)
+                if on_close_after_sensitive:
+                    on_close_after_sensitive(player)
+                return
+            password = data[1]
+            confirm_password = data[2]
             if not password:
-                self.show_register_panel(player, self.language_manager.GetText('REGISTER_FAIL_PASSWORD_NOT_INPUT'))
+                self.show_register_panel(
+                    player,
+                    self.language_manager.GetText('REGISTER_FAIL_PASSWORD_NOT_INPUT'),
+                    on_success_no_pending=on_success_no_pending,
+                    on_close_after_sensitive=on_close_after_sensitive,
+                )
                 return
             if password != confirm_password:
-                self.show_register_panel(player, self.language_manager.GetText('REGISTER_FAIL_PASSWORD_MISMATCH'))
+                self.show_register_panel(
+                    player,
+                    self.language_manager.GetText('REGISTER_FAIL_PASSWORD_MISMATCH'),
+                    on_success_no_pending=on_success_no_pending,
+                    on_close_after_sensitive=on_close_after_sensitive,
+                )
                 return
             r = self.set_player_password(player, password)
             if r:
                 player.send_message(self.language_manager.GetText('REGISTER_SUCCESS'))
-                self.login_successfully(player)
+                pending = self._pending_sensitive_action_by_player.pop(player.name, None)
+                self.player_sensitive_password_verified[player.name] = True
+                if pending and pending.get("on_verified"):
+                    pending["on_verified"](player)
+                elif on_success_no_pending:
+                    on_success_no_pending(player)
+                else:
+                    self.show_main_menu(player)
             else:
                 player.send_message(self.language_manager.GetText('REGISTER_FAIL'))
 
         register_panel = ModalForm(
             title=panel_title,
-            controls=[password_input, confirm_password_input],
-            on_close=lambda p: self._on_login_form_closed(p, True),
+            controls=[self._modal_nav_dropdown(), password_input, confirm_password_input],
+            on_close=register_panel_on_close,
             on_submit=try_register
         )
         player.send_form(register_panel)
-
-    def show_login_panel(self, player: Player, hint_message=None):
-        password_input = TextInput(
-            label=self.language_manager.GetText('LOGIN_PANEL_PASSWORD_INPUT_LABEL'),
-            placeholder=self.language_manager.GetText('LOGIN_PANEL_PASSWORD_INPUT_PLACEHOLDER')
-        )
-        panel_title = self.language_manager.GetText('LOGIN_PANEL_TITLE') if hint_message is None else hint_message
-
-        def try_login(player: Player, json_str: str):
-            data = json.loads(json_str)
-            if len(data) == 0:
-                # 密码未输入，重新显示登录面板并提示
-                self.show_login_panel(player, self.language_manager.GetText('LOGIN_FAIL_PASSWORD_NOT_INPUT'))
-            else:
-                # 验证密码
-                if self.verify_player_password(player, data[0]):
-                    player.send_message(self.language_manager.GetText('LOGIN_SUCCESS'))
-                    self.login_successfully(player)
-                else:
-                    # 密码错误，重新显示登录面板
-                    self.show_login_panel(player, self.language_manager.GetText('LOGIN_FAIL_WRONG_PASSWORD'))
-
-        login_panel = ModalForm(
-            title=panel_title,
-            controls=[password_input],
-            on_close=lambda p: self._on_login_form_closed(p, False),
-            on_submit=try_login
-        )
-        player.send_form(login_panel)
-
-    def if_player_logined(self, player: Player):
-        if not player.name in self.player_authentication_state:
-            self.player_authentication_state[player.name] = False
-        return self.player_authentication_state[player.name]
 
     # Economy system（委托 Economy 模块，金钱以 float 存储，精确到分）
     def _round_money(self, value: float) -> float:
@@ -3982,9 +4099,6 @@ class ARCCorePlugin(Plugin):
 
     def show_daily_checkin_panel(self, player: Player):
         """每日签到：同一天仅一次，发放配置中的金钱与加权随机物品。"""
-        if not self.if_player_logined(player):
-            self.show_main_menu(player)
-            return
         player_xuid = str(player.xuid)
         today = self._today_checkin_date_str()
         row = self.database_manager.query_one(
@@ -4011,7 +4125,7 @@ class ARCCorePlugin(Plugin):
             panel = ActionForm(
                 title=self.language_manager.GetText("CHECKIN_PANEL_TITLE"),
                 content="\n\n".join(content_lines),
-                on_close=self.show_main_menu,
+                on_close=None,
             )
             panel.add_button(
                 self.language_manager.GetText("RETURN_BUTTON_TEXT"),
@@ -4082,7 +4196,8 @@ class ARCCorePlugin(Plugin):
                 continue
             try:
                 self.server.dispatch_command(
-                    self.server.command_sender, f"give {player.name} {item_id} {cnt}"
+                    self.server.command_sender,
+                    f"give {format_mc_command_player_name(player.name)} {item_id} {cnt}",
                 )
             except Exception:
                 pass
@@ -4096,7 +4211,8 @@ class ARCCorePlugin(Plugin):
                 continue
             try:
                 self.server.dispatch_command(
-                    self.server.command_sender, f"give {player.name} {item_id} {cnt}"
+                    self.server.command_sender,
+                    f"give {format_mc_command_player_name(player.name)} {item_id} {cnt}",
                 )
             except Exception:
                 pass
@@ -4162,7 +4278,7 @@ class ARCCorePlugin(Plugin):
         result_panel = ActionForm(
             title=self.language_manager.GetText("CHECKIN_PANEL_TITLE"),
             content=content,
-            on_close=self.show_main_menu,
+            on_close=None,
         )
         result_panel.add_button(self.language_manager.GetText("RETURN_BUTTON_TEXT"), on_click=self.show_main_menu)
         player.send_form(result_panel)
@@ -4184,7 +4300,7 @@ class ARCCorePlugin(Plugin):
         hub = ActionForm(
             title=self.language_manager.GetText("CHECKIN_CONFIG_TITLE"),
             content=hub_content,
-            on_close=self.show_op_main_panel,
+            on_close=None,
         )
         hub.add_button(
             self.language_manager.GetText("CHECKIN_CONFIG_MONEY_PICK_BUTTON"),
@@ -4333,7 +4449,7 @@ class ARCCorePlugin(Plugin):
                 continuous_checkin_money_increment_input,
                 guild_contribution_points_input,
             ],
-            on_close=self.show_checkin_config_panel,
+            on_close=None,
             on_submit=try_save,
         )
         player.send_form(form)
@@ -4355,7 +4471,7 @@ class ARCCorePlugin(Plugin):
         panel = ActionForm(
             title=self.language_manager.GetText("CHECKIN_REWARD_LIST_TITLE"),
             content=list_content,
-            on_close=self.show_checkin_config_panel,
+            on_close=None,
         )
         panel.add_button(
             self.language_manager.GetText("CHECKIN_REWARD_ADD_BUTTON"),
@@ -4388,7 +4504,7 @@ class ARCCorePlugin(Plugin):
             content=self.language_manager.GetText("CHECKIN_REWARD_ENTRY_MENU_CONTENT").format(
                 display_num, e["item_id"], e["item_count"], e["weight"]
             ),
-            on_close=self.show_checkin_reward_list_panel,
+            on_close=None,
         )
         sub.add_button(
             self.language_manager.GetText("CHECKIN_REWARD_EDIT_BUTTON"),
@@ -4417,7 +4533,7 @@ class ARCCorePlugin(Plugin):
             content=self.language_manager.GetText("CHECKIN_REWARD_DELETE_CONFIRM_CONTENT").format(
                 display_num, e["item_id"], e["item_count"]
             ),
-            on_close=self.show_checkin_reward_list_panel,
+            on_close=None,
         )
 
         def do_delete(pl: Player, del_index: int = entry_index):
@@ -4494,7 +4610,7 @@ class ARCCorePlugin(Plugin):
         form = ModalForm(
             title=self.language_manager.GetText("CHECKIN_REWARD_ADD_TITLE"),
             controls=[item_input, count_input, weight_input],
-            on_close=self.show_checkin_reward_list_panel,
+            on_close=None,
             on_submit=try_add,
         )
         player.send_form(form)
@@ -4562,7 +4678,7 @@ class ARCCorePlugin(Plugin):
         form = ModalForm(
             title=self.language_manager.GetText("CHECKIN_REWARD_EDIT_TITLE"),
             controls=[item_input, count_input, weight_input],
-            on_close=self.show_checkin_reward_list_panel,
+            on_close=None,
             on_submit=try_save,
         )
         player.send_form(form)
@@ -4656,7 +4772,7 @@ class ARCCorePlugin(Plugin):
             try:
                 self.server.dispatch_command(
                     self.server.command_sender,
-                    f"give {player.name} {item_name} {total_item_count}"
+                    f"give {format_mc_command_player_name(player.name)} {item_name} {total_item_count}",
                 )
             except Exception as e:
                 self.logger.error(f"{ColorFormat.RED}[ARC Core]Give invite reward item error: {str(e)}")
@@ -4792,9 +4908,6 @@ class ARCCorePlugin(Plugin):
         return f"{color}{plain}§r" if color else plain
 
     def show_guild_main_menu(self, player: Player):
-        if not self.if_player_logined(player):
-            self.show_main_menu(player)
-            return
         xuid = str(player.xuid)
         pending = self.guild_system.list_invites_for_player(xuid)
         mem = self.guild_system.get_membership(xuid)
@@ -4863,7 +4976,7 @@ class ARCCorePlugin(Plugin):
         form = ActionForm(
             title=self._guild_text("GUILD_MAIN_TITLE", "公会"),
             content="\n".join(lines),
-            on_close=self.show_main_menu,
+            on_close=None,
         )
         if pending:
             form.add_button(
@@ -4897,9 +5010,6 @@ class ARCCorePlugin(Plugin):
         page: int = 0,
         name_query: str = "",
     ):
-        if not self.if_player_logined(player):
-            self.show_main_menu(player)
-            return
         q = str(name_query or "").strip()
         all_rows = self.guild_system.list_guilds_directory(q)
         page = max(0, int(page))
@@ -4923,7 +5033,7 @@ class ARCCorePlugin(Plugin):
         form = ActionForm(
             title=self._guild_text("GUILD_BROWSE_TITLE", "全部公会"),
             content="\n".join([hint, filter_line, page_line]),
-            on_close=self.show_guild_main_menu,
+            on_close=None,
         )
 
         def _search(p: Player):
@@ -4993,9 +5103,6 @@ class ARCCorePlugin(Plugin):
     def show_guild_browse_search_modal(
         self, player: Player, *, page: int = 0, name_query: str = ""
     ):
-        if not self.if_player_logined(player):
-            self.show_main_menu(player)
-            return
         hint = Label(
             text=self._guild_text(
                 "GUILD_BROWSE_SEARCH_HINT",
@@ -5016,15 +5123,16 @@ class ARCCorePlugin(Plugin):
             except Exception:
                 self.show_guild_browse_menu(p, page=0, name_query=name_query)
                 return
-            kw = str(data[1]).strip() if len(data) > 1 else ""
+            if self._modal_choice_is_back(data, 0):
+                self.show_guild_browse_menu(p, page=page, name_query=name_query)
+                return
+            kw = str(data[2]).strip() if len(data) > 2 else ""
             self.show_guild_browse_menu(p, page=0, name_query=kw)
 
         form = ModalForm(
             title=self._guild_text("GUILD_BROWSE_SEARCH_TITLE", "搜索公会"),
-            controls=[hint, inp],
-            on_close=lambda p: self.show_guild_browse_menu(
-                p, page=page, name_query=name_query
-            ),
+            controls=[self._modal_nav_dropdown(), hint, inp],
+            on_close=None,
             on_submit=_submit,
         )
         player.send_form(form)
@@ -5037,9 +5145,6 @@ class ARCCorePlugin(Plugin):
         browse_page: int = 0,
         browse_query: str = "",
     ):
-        if not self.if_player_logined(player):
-            self.show_main_menu(player)
-            return
         g = self.guild_system.get_guild(int(guild_id))
         if not g:
             player.send_message(self._guild_err("GUILD_NOT_FOUND"))
@@ -5101,7 +5206,7 @@ class ARCCorePlugin(Plugin):
         form = ActionForm(
             title=self._guild_text("GUILD_PUBLIC_PREVIEW_TITLE", "公会预览"),
             content="\n".join(lines),
-            on_close=_back,
+            on_close=None,
         )
         if not viewer_mem:
             join_label = (
@@ -5198,7 +5303,7 @@ class ARCCorePlugin(Plugin):
         form = ActionForm(
             title=self._guild_text("GUILD_POLICY_TITLE", "入会审核"),
             content=desc,
-            on_close=_back_from_policy,
+            on_close=None,
         )
 
         def _set(p: Player, requires: bool):
@@ -5246,7 +5351,7 @@ class ARCCorePlugin(Plugin):
             content=self._guild_text(
                 "GUILD_REQUESTS_CONTENT", "选择一名申请人进行处理。"
             ),
-            on_close=self.show_guild_my_menu,
+            on_close=None,
         )
         if not rows:
             form.add_button(
@@ -5294,7 +5399,7 @@ class ARCCorePlugin(Plugin):
             content=self._guild_text(
                 "GUILD_REQUEST_ACTION_CONTENT", "申请人：{0}"
             ).format(disp),
-            on_close=self.show_guild_join_requests_menu,
+            on_close=None,
         )
 
         def _approve(p: Player, _rid: int = int(request_id)):
@@ -5360,7 +5465,7 @@ class ARCCorePlugin(Plugin):
         form = ActionForm(
             title=self._guild_text("GUILD_PENDING_TITLE", "公会邀请"),
             content=self._guild_text("GUILD_PENDING_CONTENT", "选择一条邀请查看详情。"),
-            on_close=self.show_guild_main_menu,
+            on_close=None,
         )
         for r in rows:
             gid = int(r["guild_id"])
@@ -5392,7 +5497,7 @@ class ARCCorePlugin(Plugin):
             content=self._guild_text(
                 "GUILD_INVITE_DETAIL_CONTENT", "公会：{0}"
             ).format(gname),
-            on_close=self.show_guild_pending_invites_menu,
+            on_close=None,
         )
 
         def _accept(p: Player, iid: int = invite_id):
@@ -5559,7 +5664,7 @@ class ARCCorePlugin(Plugin):
         form = ModalForm(
             title=self._guild_text("GUILD_CREATE_TITLE", "创建公会"),
             controls=[info, name_in, motto_in],
-            on_close=self.show_guild_main_menu,
+            on_close=None,
             on_submit=_submit,
         )
         player.send_form(form)
@@ -5591,7 +5696,7 @@ class ARCCorePlugin(Plugin):
         form = ActionForm(
             title=self._guild_text("GUILD_MY_TITLE", "我的公会"),
             content="\n".join(my_content_lines),
-            on_close=self.show_guild_main_menu,
+            on_close=None,
         )
         form.add_button(
             self._guild_text("GUILD_BTN_MEMBER_LIST", "成员列表"),
@@ -5691,7 +5796,7 @@ class ARCCorePlugin(Plugin):
         form = ActionForm(
             title=self._guild_text("GUILD_LANDS_TITLE", "公会领地"),
             content=list_intro,
-            on_close=self.show_guild_my_menu,
+            on_close=None,
         )
         if not lands_map:
             form.add_button(
@@ -5778,7 +5883,7 @@ class ARCCorePlugin(Plugin):
         form = ActionForm(
             title=self._guild_text("GUILD_LAND_TP_CONFIRM_TITLE", "传送到公会领地"),
             content=content,
-            on_close=self.show_guild_lands_menu,
+            on_close=None,
         )
 
         def _yes(p: Player, lid: int = int(land_id)):
@@ -5889,7 +5994,7 @@ class ARCCorePlugin(Plugin):
             content="\n".join(lines)
             if members
             else self._guild_text("GUILD_MEMBER_LIST_EMPTY", "暂无成员"),
-            on_close=self.show_guild_my_menu,
+            on_close=None,
         )
         form.add_button(
             self._guild_text("RETURN_BUTTON_TEXT", "返回"),
@@ -5936,7 +6041,7 @@ class ARCCorePlugin(Plugin):
         form = ActionForm(
             title=self._guild_text("GUILD_INVITE_ONLINE_TITLE", "邀请在线玩家"),
             content=f"{capacity_line}\n{base_content}",
-            on_close=self.show_guild_my_menu,
+            on_close=None,
         )
         if cur >= cap:
             form.add_button(
@@ -5995,7 +6100,7 @@ class ARCCorePlugin(Plugin):
         form = ActionForm(
             title=self._guild_text("GUILD_KICK_TITLE", "踢出成员"),
             content=self._guild_text("GUILD_KICK_CONTENT", "选择要移出公会的成员。"),
-            on_close=self.show_guild_my_menu,
+            on_close=None,
         )
         if not targets:
             form.add_button(
@@ -6038,7 +6143,7 @@ class ARCCorePlugin(Plugin):
             content=self._guild_text(
                 "GUILD_SET_ROLE_PICK_CONTENT", "选择一名成员（不含会长）。"
             ),
-            on_close=self.show_guild_my_menu,
+            on_close=None,
         )
         any_btn = False
         for m in members:
@@ -6069,7 +6174,7 @@ class ARCCorePlugin(Plugin):
         form = ActionForm(
             title=self._guild_text("GUILD_SET_ROLE_ACTION_TITLE", "职级操作"),
             content=self._guild_text("GUILD_SET_ROLE_ACTION_CONTENT", "选择新职级。"),
-            on_close=self.show_guild_set_role_pick_member,
+            on_close=None,
         )
 
         def _set(p: Player, new_r: str):
@@ -6102,7 +6207,7 @@ class ARCCorePlugin(Plugin):
             content=self._guild_text(
                 "GUILD_LEAVE_CONFIRM", "确定退出当前公会吗？"
             ),
-            on_close=self.show_guild_my_menu,
+            on_close=None,
         )
 
         def _yes(p: Player):
@@ -6133,7 +6238,7 @@ class ARCCorePlugin(Plugin):
                 "GUILD_DISBAND_CONFIRM",
                 "解散后所有成员将被移除，且不可恢复。确定吗？",
             ),
-            on_close=self.show_guild_my_menu,
+            on_close=None,
         )
 
         def _yes(p: Player):
@@ -6275,7 +6380,7 @@ class ARCCorePlugin(Plugin):
         form = ModalForm(
             title=self._guild_text("GUILD_RENAME_TITLE", "公会改名"),
             controls=[info, new_name_in],
-            on_close=self.show_guild_my_menu,
+            on_close=None,
             on_submit=_submit,
         )
         player.send_form(form)
@@ -6311,7 +6416,7 @@ class ARCCorePlugin(Plugin):
         form = ActionForm(
             title=self._guild_text("GUILD_UPGRADE_TIER_TITLE", "升级公会规模"),
             content=content,
-            on_close=self.show_guild_my_menu,
+            on_close=None,
         )
 
         if not candidate_tiers:
@@ -6384,7 +6489,7 @@ class ARCCorePlugin(Plugin):
         form = ActionForm(
             title=self._guild_text("GUILD_UPGRADE_TIER_CONFIRM_TITLE", "确认升级"),
             content=confirm_content,
-            on_close=self.show_guild_upgrade_tier_menu,
+            on_close=None,
         )
 
         def _yes(p: Player, _target: str = target):
@@ -6436,7 +6541,7 @@ class ARCCorePlugin(Plugin):
         form = ActionForm(
             title=self._guild_text("OP_GUILD_MANAGE_TITLE", "公会管理"),
             content=header,
-            on_close=self.show_op_main_panel,
+            on_close=None,
         )
         for g in guilds:
             try:
@@ -6501,7 +6606,7 @@ class ARCCorePlugin(Plugin):
         form = ActionForm(
             title=self._guild_text("OP_GUILD_DETAIL_TITLE", "公会详情"),
             content="\n".join(info_lines),
-            on_close=self.show_op_guild_manage_panel,
+            on_close=None,
         )
 
         def _change_tier(p: Player, _gid: int = gid):
@@ -6536,7 +6641,7 @@ class ARCCorePlugin(Plugin):
                 "OP_GUILD_TIER_CONTENT",
                 "公会：{0}\n当前规模：{1}（人数 {2}/{3}）",
             ).format(g.get("name", ""), self._guild_size_tier_label(cur_tier), cur_count, cur_cap),
-            on_close=lambda p, _gid=gid: self.show_op_guild_detail_panel(p, _gid),
+            on_close=None,
         )
 
         def _set_tier(p: Player, target_tier: str, _gid: int = gid):
@@ -6596,42 +6701,49 @@ class ARCCorePlugin(Plugin):
 
     def show_transfer_panel(self, player: Player):
         """显示在线玩家选择面板"""
-        online_players = self.server.online_players
-        # 过滤掉自己
-        available_players = [p for p in online_players if p.name != player.name]
-        
-        if not available_players:
-            # 没有其他在线玩家
-            no_players_form = ActionForm(
+
+        def open_transfer_panel(p: Player):
+            online_players = self.server.online_players
+            available_players = [x for x in online_players if x.name != p.name]
+
+            if not available_players:
+                no_players_form = ActionForm(
+                    title=self.language_manager.GetText('TRANSFER_PANEL_TITLE'),
+                    content=self.language_manager.GetText('TRANSFER_NO_ONLINE_PLAYERS_TEXT'),
+                    on_close=None,
+                )
+                no_players_form.add_button(
+                    self.language_manager.GetText('RETURN_BUTTON_TEXT'),
+                    on_click=self.show_bank_main_menu,
+                )
+                p.send_form(no_players_form)
+                return
+
+            player_select_panel = ActionForm(
                 title=self.language_manager.GetText('TRANSFER_PANEL_TITLE'),
-                content=self.language_manager.GetText('TRANSFER_NO_ONLINE_PLAYERS_TEXT'),
-                on_close=self.show_bank_main_menu
+                content=self.language_manager.GetText('TRANSFER_SELECT_PLAYER_CONTENT').format(
+                    self._format_money_display(self.get_player_money(p))
+                )
             )
-            player.send_form(no_players_form)
-            return
-        
-        # 创建玩家选择面板
-        player_select_panel = ActionForm(
-            title=self.language_manager.GetText('TRANSFER_PANEL_TITLE'),
-            content=self.language_manager.GetText('TRANSFER_SELECT_PLAYER_CONTENT').format(
-                self._format_money_display(self.get_player_money(player))
-            )
-        )
-        
-        # 为每个在线玩家添加按钮
-        for target_player in available_players:
+
+            for target_player in available_players:
+                player_select_panel.add_button(
+                    f"{target_player.name}",
+                    on_click=lambda sender, target=target_player: self.show_transfer_amount_panel(sender, target)
+                )
+
             player_select_panel.add_button(
-                f"{target_player.name}",
-                on_click=lambda sender, target=target_player: self.show_transfer_amount_panel(sender, target)
+                self.language_manager.GetText('RETURN_BUTTON_TEXT'),
+                on_click=self.show_bank_main_menu
             )
-        
-        # 添加返回按钮
-        player_select_panel.add_button(
-            self.language_manager.GetText('RETURN_BUTTON_TEXT'),
-            on_click=self.show_bank_main_menu
+
+            p.send_form(player_select_panel)
+
+        self.require_sensitive_password_verified(
+            player,
+            open_transfer_panel,
+            on_cancel=lambda p: self.show_bank_main_menu(p),
         )
-        
-        player.send_form(player_select_panel)
     
     def show_transfer_amount_panel(self, player: Player, target_player: Player):
         """显示转账金额输入面板"""
@@ -6651,8 +6763,11 @@ class ARCCorePlugin(Plugin):
 
         def try_transfer(sender: Player, json_str: str):
             data = json.loads(json_str)
+            if self._modal_choice_is_back(data, 0):
+                self.show_transfer_panel(sender)
+                return
             # 直接使用目标玩家对象和金额进行转账
-            error_code, receive_player, amount = self._validate_transfer_data_new(sender, target_player, data[1])
+            error_code, receive_player, amount = self._validate_transfer_data_new(sender, target_player, data[2])
             if error_code == 0:
                 if not self.decrease_player_money(sender, amount):
                     self.report_arc_error(
@@ -6693,14 +6808,18 @@ class ARCCorePlugin(Plugin):
             result_form = ActionForm(
                 title=self.language_manager.GetText('TRANSFER_RESULT_PANEL_TITLE'),
                 content=result_str,
-                on_close=self.show_bank_main_menu
+                on_close=None,
+            )
+            result_form.add_button(
+                self.language_manager.GetText('RETURN_BUTTON_TEXT'),
+                on_click=self.show_bank_main_menu,
             )
             sender.send_form(result_form)
 
         transfer_panel = ModalForm(
             title=self.language_manager.GetText('TRANSFER_PANEL_TITLE'),
-            controls=[info_label, money_amount_input],
-            on_close=lambda sender: self.show_transfer_panel(sender),
+            controls=[self._modal_nav_dropdown(), info_label, money_amount_input],
+            on_close=None,
             on_submit=try_transfer
         )
         player.send_form(transfer_panel)
@@ -6712,7 +6831,7 @@ class ARCCorePlugin(Plugin):
         *,
         on_panel_close: Any = None,
     ):
-        """显示小喇叭购买面板。on_panel_close 关闭表单时回调，默认回主菜单。"""
+        """显示小喇叭购买面板。on_panel_close 为显式「返回上一级」时的回调，默认回主菜单。"""
         close_cb = on_panel_close if on_panel_close is not None else self.show_main_menu
         panel_title = self.language_manager.GetText('SMALL_HORN_MENU_TITLE')
         if hint_message:
@@ -6743,14 +6862,18 @@ class ARCCorePlugin(Plugin):
                 )
                 return
 
-            if len(data) < 3:
+            if len(data) < 4:
                 self.show_small_horn_buy_panel(
                     sender, self.language_manager.GetText('SMALL_HORN_BUY_INVALID_INPUT'), on_panel_close=close_cb
                 )
                 return
 
-            valid_hours_text = str(data[1]).strip()
-            content = str(data[2]).strip()
+            if self._modal_choice_is_back(data, 0):
+                close_cb(sender)
+                return
+
+            valid_hours_text = str(data[2]).strip()
+            content = str(data[3]).strip()
             try:
                 valid_hours = int(valid_hours_text)
             except (TypeError, ValueError):
@@ -6818,8 +6941,8 @@ class ARCCorePlugin(Plugin):
 
         buy_form = ModalForm(
             title=panel_title,
-            controls=[info_label, valid_hours_input, content_input],
-            on_close=close_cb,
+            controls=[self._modal_nav_dropdown(), info_label, valid_hours_input, content_input],
+            on_close=None,
             on_submit=try_buy_small_horn
         )
         player.send_form(buy_form)
@@ -6930,7 +7053,11 @@ class ARCCorePlugin(Plugin):
             + self.language_manager.GetText("MONEY_RANK_PLYAER_RANK_INFO_TEXT").format(
                 player_balance, player_rank
             ),
-            on_close=self.show_bank_main_menu,
+            on_close=None,
+        )
+        rank_panel.add_button(
+            self.language_manager.GetText('RETURN_BUTTON_TEXT'),
+            on_click=self.show_bank_main_menu,
         )
         player.send_form(rank_panel)
     
@@ -7034,7 +7161,11 @@ class ARCCorePlugin(Plugin):
             no_warp_panel = ActionForm(
                 title=self.language_manager.GetText('PUBLIC_WARP_MENU_TITLE'),
                 content=self.language_manager.GetText('PUBLIC_WARP_NO_WARP_CONTENT'),
-                on_close=self.show_teleport_menu
+                on_close=None,
+            )
+            no_warp_panel.add_button(
+                self.language_manager.GetText('RETURN_BUTTON_TEXT'),
+                on_click=self.show_teleport_menu,
             )
             player.send_form(no_warp_panel)
             return
@@ -7042,7 +7173,7 @@ class ARCCorePlugin(Plugin):
         warp_menu = ActionForm(
             title=self.language_manager.GetText('PUBLIC_WARP_MENU_TITLE'),
             content=self.language_manager.GetText('PUBLIC_WARP_MENU_CONTENT').format(len(public_warps)),
-            on_close=self.show_teleport_menu
+            on_close=None,
         )
         
         for warp_name, warp_info in public_warps.items():
@@ -7055,7 +7186,12 @@ class ARCCorePlugin(Plugin):
                 warp_button_text,
                 on_click=lambda p=player, w_name=warp_name, w_info=warp_info: self.teleport_to_public_warp(p, w_name, w_info)
             )
-        
+
+        warp_menu.add_button(
+            self.language_manager.GetText('RETURN_BUTTON_TEXT'),
+            on_click=self.show_teleport_menu,
+        )
+
         player.send_form(warp_menu)
 
     def _get_all_cross_server_targets(self) -> list[Dict[str, Any]]:
@@ -7091,14 +7227,14 @@ class ARCCorePlugin(Plugin):
         return self.database_manager.delete('cross_server_targets', 'id = ?', (int(target_id),))
 
     def show_cross_server_menu(self, player: Player, on_close=None):
-        """显示跨服传送菜单。on_close 默认返回传送主菜单；单独打开时可传入例如 show_main_menu。"""
+        """显示跨服传送菜单。back_menu 用于「返回」按钮目标；关闭窗口不会自动跳转。"""
         back_menu = on_close if on_close is not None else self.show_teleport_menu
         targets = self._get_all_cross_server_targets()
         if not targets:
             no_target_panel = ActionForm(
                 title=self.language_manager.GetText('CROSS_SERVER_MENU_TITLE'),
                 content=self.language_manager.GetText('CROSS_SERVER_MENU_EMPTY'),
-                on_close=back_menu
+                on_close=None,
             )
             no_target_panel.add_button(
                 self.language_manager.GetText('RETURN_BUTTON_TEXT'),
@@ -7110,7 +7246,7 @@ class ARCCorePlugin(Plugin):
         cross_server_menu = ActionForm(
             title=self.language_manager.GetText('CROSS_SERVER_MENU_TITLE'),
             content=self.language_manager.GetText('CROSS_SERVER_MENU_CONTENT').format(len(targets)),
-            on_close=back_menu
+            on_close=None,
         )
         for target in targets:
             server_name = str(target.get('server_name') or '').strip()
@@ -7145,7 +7281,7 @@ class ARCCorePlugin(Plugin):
         home_menu = ActionForm(
             title=self.language_manager.GetText('HOME_MENU_TITLE'),
             content=self.language_manager.GetText('HOME_MENU_CONTENT').format(home_count, self.teleport_system.max_player_home_num),
-            on_close=self.show_teleport_menu
+            on_close=None,
         )
         
         # 显示现有传送点
@@ -7161,7 +7297,12 @@ class ARCCorePlugin(Plugin):
                 self.language_manager.GetText('HOME_ADD_NEW_BUTTON'),
                 on_click=self.show_create_home_panel
             )
-        
+
+        home_menu.add_button(
+            self.language_manager.GetText('RETURN_BUTTON_TEXT'),
+            on_click=self.show_teleport_menu,
+        )
+
         player.send_form(home_menu)
 
     def show_home_detail_menu(self, player: Player, home_name: str, home_info: Dict[str, Any]):
@@ -7175,9 +7316,9 @@ class ARCCorePlugin(Plugin):
                 int(home_info['y']),
                 int(home_info['z'])
             ),
-            on_close=self.show_home_menu
+            on_close=None,
         )
-        
+
         # 私人传送点传送按钮（显示价格）
         home_teleport_text = self.language_manager.GetText('HOME_TELEPORT_BUTTON')
         if self.teleport_system.teleport_cost_home > 0:
@@ -7186,12 +7327,17 @@ class ARCCorePlugin(Plugin):
             home_teleport_text,
             on_click=lambda p=player, h_name=home_name, h_info=home_info: self.teleport_to_home(p, h_name, h_info)
         )
-        
+
         detail_menu.add_button(
             self.language_manager.GetText('HOME_DELETE_BUTTON'),
             on_click=lambda p=player, h_name=home_name: self.confirm_delete_home(p, h_name)
         )
-        
+
+        detail_menu.add_button(
+            self.language_manager.GetText('RETURN_BUTTON_TEXT'),
+            on_click=self.show_home_menu,
+        )
+
         player.send_form(detail_menu)
 
     def show_create_home_panel(self, player: Player):
@@ -7204,12 +7350,19 @@ class ARCCorePlugin(Plugin):
 
         def try_create_home(player: Player, json_str: str):
             data = json.loads(json_str)
-            if not data or not data[0].strip():
+            if len(data) < 2:
                 player.send_message(self.language_manager.GetText('CREATE_HOME_EMPTY_NAME_ERROR'))
                 self.show_create_home_panel(player)
                 return
-            
-            home_name = data[0].strip()
+            if self._modal_choice_is_back(data, 0):
+                self.show_home_menu(player)
+                return
+            if not data[1] or not str(data[1]).strip():
+                player.send_message(self.language_manager.GetText('CREATE_HOME_EMPTY_NAME_ERROR'))
+                self.show_create_home_panel(player)
+                return
+
+            home_name = str(data[1]).strip()
             if self.player_home_exists(str(player.xuid), home_name):
                 player.send_message(self.language_manager.GetText('CREATE_HOME_NAME_EXISTS_ERROR').format(home_name))
                 self.show_create_home_panel(player)
@@ -7234,8 +7387,8 @@ class ARCCorePlugin(Plugin):
 
         create_panel = ModalForm(
             title=self.language_manager.GetText('CREATE_HOME_PANEL_TITLE'),
-            controls=[home_name_input],
-            on_close=self.show_home_menu,
+            controls=[self._modal_nav_dropdown(), home_name_input],
+            on_close=None,
             on_submit=try_create_home
         )
         
@@ -7246,9 +7399,14 @@ class ARCCorePlugin(Plugin):
         confirm_panel = ActionForm(
             title=self.language_manager.GetText('CONFIRM_DELETE_HOME_TITLE'),
             content=self.language_manager.GetText('CONFIRM_DELETE_HOME_CONTENT').format(home_name),
-            on_close=self.show_home_menu
+            on_close=None,
         )
-        
+
+        confirm_panel.add_button(
+            self.language_manager.GetText('RETURN_BUTTON_TEXT'),
+            on_click=self.show_home_menu,
+        )
+
         confirm_panel.add_button(
             self.language_manager.GetText('CONFIRM_DELETE_HOME_BUTTON'),
             on_click=lambda p=player, h_name=home_name: self.delete_home_confirmed(p, h_name)
@@ -7488,7 +7646,7 @@ class ARCCorePlugin(Plugin):
         request_menu = ActionForm(
             title=self.language_manager.GetText('PLAYER_TELEPORT_REQUEST_MENU_TITLE'),
             content=self.language_manager.GetText('PLAYER_TELEPORT_REQUEST_MENU_CONTENT'),
-            on_close=self.show_teleport_menu
+            on_close=None,
         )
         
         request_menu.add_button(
@@ -7508,7 +7666,12 @@ class ARCCorePlugin(Plugin):
                 self.language_manager.GetText('HANDLE_PENDING_REQUESTS_BUTTON').format(len(pending_requests)),
                 on_click=self.show_pending_requests_menu
             )
-        
+
+        request_menu.add_button(
+            self.language_manager.GetText('RETURN_BUTTON_TEXT'),
+            on_click=self.show_teleport_menu,
+        )
+
         player.send_form(request_menu)
 
     def show_send_tpa_request_panel(self, player: Player):
@@ -7518,7 +7681,11 @@ class ARCCorePlugin(Plugin):
             no_players_panel = ActionForm(
                 title=self.language_manager.GetText('SEND_TPA_REQUEST_TITLE'),
                 content=self.language_manager.GetText('NO_OTHER_PLAYERS_ONLINE'),
-                on_close=self.show_player_teleport_request_menu
+                on_close=None,
+            )
+            no_players_panel.add_button(
+                self.language_manager.GetText('RETURN_BUTTON_TEXT'),
+                on_click=self.show_player_teleport_request_menu,
             )
             player.send_form(no_players_panel)
             return
@@ -7526,15 +7693,20 @@ class ARCCorePlugin(Plugin):
         tpa_menu = ActionForm(
             title=self.language_manager.GetText('SEND_TPA_REQUEST_TITLE'),
             content=self.language_manager.GetText('SEND_TPA_REQUEST_CONTENT'),
-            on_close=self.show_player_teleport_request_menu
+            on_close=None,
         )
-        
+
         for target_player in online_players:
             tpa_menu.add_button(
                 self.language_manager.GetText('TPA_TARGET_BUTTON').format(target_player.name),
                 on_click=lambda p=player, t=target_player: self.send_tpa_request(p, t)
             )
-        
+
+        tpa_menu.add_button(
+            self.language_manager.GetText('RETURN_BUTTON_TEXT'),
+            on_click=self.show_player_teleport_request_menu,
+        )
+
         player.send_form(tpa_menu)
 
     def show_send_tphere_request_panel(self, player: Player):
@@ -7544,7 +7716,11 @@ class ARCCorePlugin(Plugin):
             no_players_panel = ActionForm(
                 title=self.language_manager.GetText('SEND_TPHERE_REQUEST_TITLE'),
                 content=self.language_manager.GetText('NO_OTHER_PLAYERS_ONLINE'),
-                on_close=self.show_player_teleport_request_menu
+                on_close=None,
+            )
+            no_players_panel.add_button(
+                self.language_manager.GetText('RETURN_BUTTON_TEXT'),
+                on_click=self.show_player_teleport_request_menu,
             )
             player.send_form(no_players_panel)
             return
@@ -7552,15 +7728,20 @@ class ARCCorePlugin(Plugin):
         tphere_menu = ActionForm(
             title=self.language_manager.GetText('SEND_TPHERE_REQUEST_TITLE'),
             content=self.language_manager.GetText('SEND_TPHERE_REQUEST_CONTENT'),
-            on_close=self.show_player_teleport_request_menu
+            on_close=None,
         )
-        
+
         for target_player in online_players:
             tphere_menu.add_button(
                 self.language_manager.GetText('TPHERE_TARGET_BUTTON').format(target_player.name),
                 on_click=lambda p=player, t=target_player: self.send_tphere_request(p, t)
             )
-        
+
+        tphere_menu.add_button(
+            self.language_manager.GetText('RETURN_BUTTON_TEXT'),
+            on_click=self.show_player_teleport_request_menu,
+        )
+
         player.send_form(tphere_menu)
 
     def send_tpa_request(self, sender: Player, target: Player):
@@ -7587,8 +7768,10 @@ class ARCCorePlugin(Plugin):
             return self.language_manager.GetText('TPHERE_INCOMING_REQUEST_FORM_CONTENT').format(sender_name)
         return self.language_manager.GetText('TPA_INCOMING_REQUEST_FORM_CONTENT').format(sender_name)
 
-    def _send_incoming_teleport_request_form(self, target_player: Player, on_close=None):
-        """向被请求方弹出接受/拒绝表单（从菜单进入时可传 on_close 返回上一级）。"""
+    def _send_incoming_teleport_request_form(
+        self, target_player: Player, return_to_menu: Optional[Callable[[Player], None]] = None
+    ):
+        """向被请求方弹出接受/拒绝表单；可选 return_to_menu 提供「返回」按钮打开上一级菜单。"""
         pending_requests = self.get_pending_requests_for_player(target_player)
         if not pending_requests:
             return
@@ -7596,7 +7779,7 @@ class ARCCorePlugin(Plugin):
         request_menu = ActionForm(
             title=self.language_manager.GetText('INCOMING_TP_REQUEST_TITLE'),
             content=self._incoming_teleport_request_form_content(request),
-            on_close=on_close,
+            on_close=None,
         )
         request_menu.add_button(
             self.language_manager.GetText('ACCEPT_REQUEST_BUTTON'),
@@ -7606,6 +7789,11 @@ class ARCCorePlugin(Plugin):
             self.language_manager.GetText('DENY_REQUEST_BUTTON'),
             on_click=lambda p=target_player: self.deny_teleport_request(p),
         )
+        if return_to_menu is not None:
+            request_menu.add_button(
+                self.language_manager.GetText('RETURN_BUTTON_TEXT'),
+                on_click=lambda p=target_player, cb=return_to_menu: cb(p),
+            )
         target_player.send_form(request_menu)
 
     def get_pending_requests_for_player(self, player: Player) -> list:
@@ -7619,7 +7807,9 @@ class ARCCorePlugin(Plugin):
             player.send_message(self.language_manager.GetText('NO_PENDING_REQUESTS'))
             self.show_player_teleport_request_menu(player)
             return
-        self._send_incoming_teleport_request_form(player, on_close=self.show_player_teleport_request_menu)
+        self._send_incoming_teleport_request_form(
+            player, return_to_menu=self.show_player_teleport_request_menu
+        )
 
     def accept_teleport_request(self, player: Player):
         """接受传送请求：此时从发起者扣除玩家互传费用（若配置大于 0）。"""
@@ -7699,7 +7889,7 @@ class ARCCorePlugin(Plugin):
         panel = ActionForm(
             title=self.language_manager.GetText('OP_TELEPORT_MANAGE_TITLE'),
             content=self.language_manager.GetText('OP_TELEPORT_MANAGE_CONTENT'),
-            on_close=self.show_op_main_panel,
+            on_close=None,
         )
         panel.add_button(
             self.language_manager.GetText('OP_TELEPORT_MANAGE_WARP_BUTTON'),
@@ -7824,7 +8014,7 @@ class ARCCorePlugin(Plugin):
             result = ActionForm(
                 title=self.language_manager.GetText('OP_TELEPORT_SETTINGS_TITLE'),
                 content=self.language_manager.GetText('OP_TELEPORT_SETTINGS_SAVED'),
-                on_close=self.show_op_teleport_manage_panel,
+                on_close=None,
             )
             result.add_button(self.language_manager.GetText('RETURN_BUTTON_TEXT'), on_click=self.show_op_teleport_manage_panel)
             p.send_form(result)
@@ -7844,7 +8034,7 @@ class ARCCorePlugin(Plugin):
                 in_cost_random,
                 in_cost_player,
             ],
-            on_close=self.show_op_teleport_manage_panel,
+            on_close=None,
             on_submit=try_save,
         )
         player.send_form(form)
@@ -7856,7 +8046,7 @@ class ARCCorePlugin(Plugin):
         panel = ActionForm(
             title=self.language_manager.GetText('OP_CROSS_SERVER_MANAGE_TITLE'),
             content=self.language_manager.GetText('OP_CROSS_SERVER_MANAGE_CONTENT').format(len(targets)),
-            on_close=self.show_op_teleport_manage_panel
+            on_close=None,
         )
         panel.add_button(
             self.language_manager.GetText('OP_CROSS_SERVER_ADD_BUTTON'),
@@ -7953,7 +8143,7 @@ class ARCCorePlugin(Plugin):
         form = ModalForm(
             title=self.language_manager.GetText('OP_CROSS_SERVER_CREATE_TITLE'),
             controls=[server_name_input, server_host_input, server_port_input],
-            on_close=self.show_op_cross_server_manage_menu,
+            on_close=None,
             on_submit=try_create_target
         )
         player.send_form(form)
@@ -7972,7 +8162,7 @@ class ARCCorePlugin(Plugin):
                 target.get('server_host', ''),
                 int(target.get('server_port') or 19132)
             ),
-            on_close=self.show_op_cross_server_manage_menu
+            on_close=None,
         )
         detail_menu.add_button(
             self.language_manager.GetText('OP_CROSS_SERVER_EDIT_BUTTON'),
@@ -8052,7 +8242,7 @@ class ARCCorePlugin(Plugin):
         form = ModalForm(
             title=self.language_manager.GetText('OP_CROSS_SERVER_EDIT_TITLE'),
             controls=[server_name_input, server_host_input, server_port_input],
-            on_close=lambda p=player: self.show_op_cross_server_detail_menu(p, target_id),
+            on_close=None,
             on_submit=try_edit_target
         )
         player.send_form(form)
@@ -8071,7 +8261,7 @@ class ARCCorePlugin(Plugin):
                 target.get('server_host', ''),
                 int(target.get('server_port') or 19132)
             ),
-            on_close=lambda p=player: self.show_op_cross_server_detail_menu(p, target_id)
+            on_close=None,
         )
         panel.add_button(
             self.language_manager.GetText('OP_CROSS_SERVER_DELETE_CONFIRM_BUTTON'),
@@ -8095,7 +8285,7 @@ class ARCCorePlugin(Plugin):
         warp_manage_menu = ActionForm(
             title=self.language_manager.GetText('OP_WARP_MANAGE_MENU_TITLE'),
             content=self.language_manager.GetText('OP_WARP_MANAGE_MENU_CONTENT'),
-            on_close=self.show_op_teleport_manage_panel
+            on_close=None,
         )
         
         warp_manage_menu.add_button(
@@ -8152,7 +8342,7 @@ class ARCCorePlugin(Plugin):
         create_panel = ModalForm(
             title=self.language_manager.GetText('CREATE_WARP_PANEL_TITLE'),
             controls=[warp_name_input],
-            on_close=self.show_op_warp_manage_menu,
+            on_close=None,
             on_submit=try_create_warp
         )
         
@@ -8169,7 +8359,7 @@ class ARCCorePlugin(Plugin):
         delete_menu = ActionForm(
             title=self.language_manager.GetText('DELETE_WARP_MENU_TITLE'),
             content=self.language_manager.GetText('DELETE_WARP_MENU_CONTENT'),
-            on_close=self.show_op_warp_manage_menu
+            on_close=None,
         )
         
         for warp_name, warp_info in public_warps.items():
@@ -8186,7 +8376,7 @@ class ARCCorePlugin(Plugin):
         confirm_panel = ActionForm(
             title=self.language_manager.GetText('CONFIRM_DELETE_WARP_TITLE'),
             content=self.language_manager.GetText('CONFIRM_DELETE_WARP_CONTENT').format(warp_name),
-            on_close=self.show_delete_warp_menu
+            on_close=None,
         )
         
         confirm_panel.add_button(
@@ -8328,6 +8518,62 @@ class ARCCorePlugin(Plugin):
     def get_land_display_owner_name(self, land_id: int) -> str:
         return self.format_land_owner_key_display(self.land_system.get_land_owner(land_id))
 
+    def _build_land_transition_text(self, land_id: int, is_leaving: bool) -> Optional[str]:
+        """构建进入/离开领地的单行提示文本。
+        - 私人领地：使用带公会与头衔的玩家展示名
+        - 公会领地：使用公会名（去色）
+        - 公共领地：仅显示领地名
+        无法解析时返回 None。
+        """
+        try:
+            land_name = self.get_land_name(land_id) or ""
+            owner_key = str(self.land_system.get_land_owner(land_id) or "").strip()
+            if not owner_key:
+                return None
+            # 公共领地
+            if self.land_system.is_public_land_owner(owner_key):
+                key_name = "LAND_LEAVE_PUBLIC" if is_leaving else "LAND_ENTER_PUBLIC"
+                template = self.language_manager.GetText(key_name) or (
+                    "§c已离开公共领地§r §e{0}§r" if is_leaving else "§a已进入公共领地§r §e{0}§r"
+                )
+                return template.format(land_name)
+            # 公会领地
+            guild_id = LandSystem.parse_land_owner_guild_id(owner_key)
+            if guild_id is not None:
+                guild_info = self.guild_system.get_guild(guild_id)
+                if guild_info and guild_info.get("name"):
+                    guild_name = guild_strip_mc_color_codes(guild_info.get("name") or "").strip()
+                    if not guild_name:
+                        guild_name = f"公会#{guild_id}"
+                else:
+                    guild_name = f"公会#{guild_id}"
+                key_name = "LAND_LEAVE_GUILD" if is_leaving else "LAND_ENTER_GUILD"
+                template = self.language_manager.GetText(key_name) or (
+                    "§c已离开公会§r §6{0}§r §c的领地§r §e{1}§r"
+                    if is_leaving
+                    else "§a已进入公会§r §6{0}§r §a的领地§r §e{1}§r"
+                )
+                return template.format(guild_name, land_name)
+            # 私人领地（带公会与头衔的玩家展示名）
+            player_xuid = LandSystem.parse_land_owner_player_xuid(owner_key)
+            if player_xuid is None:
+                player_xuid = owner_key
+            player_display = self.get_player_name_by_xuid(player_xuid, return_with_title=True)
+            if not player_display:
+                player_display = owner_key
+            key_name = "LAND_LEAVE_PRIVATE" if is_leaving else "LAND_ENTER_PRIVATE"
+            template = self.language_manager.GetText(key_name) or (
+                "§c已离开§r {0}§r §c的领地§r §e{1}§r"
+                if is_leaving
+                else "§a已进入§r {0}§r §a的领地§r §e{1}§r"
+            )
+            return template.format(player_display, land_name)
+        except Exception as build_error:
+            self.logger.warning(
+                f"[ARC Core]Failed to build land transition text for land {land_id}: {str(build_error)}"
+            )
+            return None
+
     def _op_force_delete_land_refund_xuid(self, owner_key: str) -> Optional[str]:
         """私人领地强制删除时退款目标 XUID（玩家领地→玩家；公会领地→会长）。"""
         ok = str(owner_key or "").strip()
@@ -8394,20 +8640,27 @@ class ARCCorePlugin(Plugin):
         player.send_form(land_main_menu)
 
     def show_own_land_menu(self, player: Player):
+        self.require_sensitive_password_verified(
+            player,
+            self._show_own_land_menu_impl,
+            on_cancel=lambda p: self.show_land_main_menu(p),
+        )
+
+    def _show_own_land_menu_impl(self, player: Player) -> None:
         player_land_num = self.get_player_land_count(str(player.xuid))
         if player_land_num == 0:
             own_land_panel = ActionForm(
                 title=self.language_manager.GetText('OWN_LAND_PANEL_TITLE'),
                 content=self.language_manager.GetText('OWN_LAND_PANEL_NO_LAND_EXIST_CONTENT').format(
                     self.get_player_land_count(str(player.xuid))),
-                on_close=self.show_land_main_menu
+                on_close=None,
             )
             player.send_form(own_land_panel)
             return
         else:
             own_land_panel = ActionForm(
                 title=self.language_manager.GetText('OWN_LAND_PANEL_TITLE'),
-                on_close=self.show_land_main_menu
+                on_close=None,
             )
             player_lands = self.get_player_lands(str(player.xuid))
             for land_id in player_lands.keys():
@@ -8438,7 +8691,7 @@ class ARCCorePlugin(Plugin):
                 (int(land_info['tp_x']), int(land_info['tp_y']), int(land_info['tp_z'])),
                 shared_user_name_str
             ),
-            on_close=self.show_own_land_menu
+            on_close=None,
         )
         
         # 领地传送按钮（显示价格）
@@ -8517,9 +8770,7 @@ class ARCCorePlugin(Plugin):
         form = ActionForm(
             title=self.language_manager.GetText('LAND_SALE_MODE_PANEL_TITLE'),
             content=content,
-            on_close=lambda p=player, l_id=land_id, li=self.get_land_info(land_id): self.show_own_land_detail_panel(
-                p, l_id, li
-            ),
+            on_close=None,
         )
         if for_sale and price > 0:
             form.add_button(
@@ -8579,7 +8830,7 @@ class ARCCorePlugin(Plugin):
         modal = ModalForm(
             title=self.language_manager.GetText('LAND_SALE_PRICE_MODAL_TITLE'),
             controls=[price_in],
-            on_close=lambda p, lid=land_id: self.show_land_sale_mode_panel(p, lid),
+            on_close=None,
             on_submit=on_submit,
         )
         player.send_form(modal)
@@ -8603,7 +8854,7 @@ class ARCCorePlugin(Plugin):
         form = ActionForm(
             title=self.language_manager.GetText('LAND_SALE_OFFER_FORM_TITLE'),
             content=content,
-            on_close=lambda _p=None: None,
+            on_close=None,
         )
         form.add_button(
             self.language_manager.GetText('LAND_SALE_OFFER_BUY_BUTTON'),
@@ -8729,7 +8980,7 @@ class ARCCorePlugin(Plugin):
         rename_panel = ModalForm(
             title=self.language_manager.GetText('RENAME_OWN_LAND_PANEL_TITLE'),
             controls=[new_name_input],
-            on_close=self.show_own_land_menu,
+            on_close=None,
             on_submit=try_change_name
         )
         player.send_form(rename_panel)
@@ -8745,7 +8996,7 @@ class ARCCorePlugin(Plugin):
         result_panel = ActionForm(
             title=self.language_manager.GetText('SET_LAND_TP_POS_RESULT_TITLE'),
             content=result,
-            on_close=lambda p=player, l_id=land_id, l_info=self.get_land_info(land_id): self.show_own_land_detail_panel(p, l_id, l_info)
+            on_close=None,
         )
         player.send_form(result_panel)
 
@@ -8796,7 +9047,7 @@ class ARCCorePlugin(Plugin):
             content=self.language_manager.GetText('CONFIRM_DELETE_LAND_CONTENT').format(
             land_id, deleta_land_info['land_name'], self.land_sell_refund_coefficient,
             self._format_money_display(return_money)),
-            on_close=self.show_own_land_detail_panel(player, land_id, deleta_land_info)
+            on_close=None,
         )
         confirm_panel.add_button(self.language_manager.GetText('CONFIRM_DELETE_LAND_BUTTON').format(land_id),
                                  on_click=lambda p=player, l_id=land_id, r_m=return_money: self.try_delete_land(p, l_id, r_m)
@@ -8828,7 +9079,7 @@ class ARCCorePlugin(Plugin):
             no_players_panel = ActionForm(
                 title=self.language_manager.GetText('TRANSFER_LAND_PANEL_TITLE'),
                 content=self.language_manager.GetText('NO_OTHER_PLAYERS_ONLINE'),
-                on_close=lambda p=player, l_id=land_id, l_info=self.get_land_info(land_id): self.show_own_land_detail_panel(p, l_id, l_info)
+                on_close=None,
             )
             player.send_form(no_players_panel)
             return
@@ -8836,7 +9087,7 @@ class ARCCorePlugin(Plugin):
         transfer_menu = ActionForm(
             title=self.language_manager.GetText('TRANSFER_LAND_PANEL_TITLE'),
             content=self.language_manager.GetText('TRANSFER_LAND_PANEL_CONTENT'),
-            on_close=lambda p=player, l_id=land_id, l_info=self.get_land_info(land_id): self.show_own_land_detail_panel(p, l_id, l_info)
+            on_close=None,
         )
         
         for target_player in online_players:
@@ -8865,7 +9116,7 @@ class ARCCorePlugin(Plugin):
                 land_info['land_name'], 
                 target_player.name
             ),
-            on_close=lambda p=player, l_id=land_id, l_info=land_info: self.show_own_land_detail_panel(p, l_id, l_info)
+            on_close=None,
         )
         confirm_panel.add_button(
             self.language_manager.GetText('CONFIRM_TRANSFER_LAND_BUTTON'),
@@ -8924,7 +9175,7 @@ class ARCCorePlugin(Plugin):
 
         auth_panel = ActionForm(
             title=self.language_manager.GetText('LAND_AUTH_MANAGE_TITLE'),
-            on_close=lambda p=player, l_id=land_id, l_info=land_info: self.show_own_land_detail_panel(p, l_id, l_info)
+            on_close=None,
         )
         
         auth_panel.add_button(
@@ -8947,7 +9198,7 @@ class ARCCorePlugin(Plugin):
             no_players_panel = ActionForm(
                 title=self.language_manager.GetText('LAND_AUTH_ADD_PANEL_TITLE'),
                 content=self.language_manager.GetText('NO_OTHER_PLAYERS_ONLINE'),
-                on_close=lambda p=player, l_id=land_id: self.show_land_auth_manage_panel(p, l_id)
+                on_close=None,
             )
             player.send_form(no_players_panel)
             return
@@ -8955,7 +9206,7 @@ class ARCCorePlugin(Plugin):
         add_auth_panel = ActionForm(
             title=self.language_manager.GetText('LAND_AUTH_ADD_PANEL_TITLE'),
             content=self.language_manager.GetText('LAND_AUTH_SELECT_PLAYER_CONTENT'),
-            on_close=lambda p=player, l_id=land_id: self.show_land_auth_manage_panel(p, l_id)
+            on_close=None,
         )
         
         for target_player in online_players:
@@ -8973,7 +9224,7 @@ class ARCCorePlugin(Plugin):
             no_auth_panel = ActionForm(
                 title=self.language_manager.GetText('LAND_AUTH_REMOVE_PANEL_TITLE'),
                 content=self.language_manager.GetText('LAND_AUTH_NO_SHARED_USERS'),
-                on_close=lambda p=player, l_id=land_id: self.show_land_auth_manage_panel(p, l_id)
+                on_close=None,
             )
             player.send_form(no_auth_panel)
             return
@@ -8981,7 +9232,7 @@ class ARCCorePlugin(Plugin):
         remove_auth_panel = ActionForm(
             title=self.language_manager.GetText('LAND_AUTH_REMOVE_PANEL_TITLE'),
             content=self.language_manager.GetText('LAND_AUTH_SELECT_REMOVE_CONTENT'),
-            on_close=lambda p=player, l_id=land_id: self.show_land_auth_manage_panel(p, l_id)
+            on_close=None,
         )
         
         for shared_uuid in land_info['shared_users']:
@@ -9072,7 +9323,7 @@ class ARCCorePlugin(Plugin):
         explosion_setting_panel = ActionForm(
             title=self.language_manager.GetText('LAND_EXPLOSION_SETTING_TITLE'),
             content=self.language_manager.GetText('LAND_EXPLOSION_CURRENT_STATUS').format(status_text),
-            on_close=lambda p=player, l_id=land_id, l_info=land_info: self.show_own_land_detail_panel(p, l_id, l_info)
+            on_close=None,
         )
         
         if current_allow_explosion:
@@ -9107,7 +9358,7 @@ class ARCCorePlugin(Plugin):
         public_interact_setting_panel = ActionForm(
             title=self.language_manager.GetText('LAND_PUBLIC_INTERACT_SETTING_TITLE'),
             content=self.language_manager.GetText('LAND_PUBLIC_INTERACT_CURRENT_STATUS').format(status_text),
-            on_close=lambda p=player, l_id=land_id, l_info=land_info: self.show_own_land_detail_panel(p, l_id, l_info)
+            on_close=None,
         )
         
         if current_allow_public_interact:
@@ -9146,9 +9397,7 @@ class ARCCorePlugin(Plugin):
             content=self.language_manager.GetText(
                 "LAND_GUILD_MEMBER_INTERACT_CURRENT_STATUS"
             ).format(status_text),
-            on_close=lambda p=player, l_id=land_id, l_info=land_info: self.show_own_land_detail_panel(
-                p, l_id, l_info
-            ),
+            on_close=None,
         )
         if cur:
             panel.add_button(
@@ -9168,6 +9417,12 @@ class ARCCorePlugin(Plugin):
                     p, l_id, True
                 ),
             )
+        panel.add_button(
+            self.language_manager.GetText("RETURN_BUTTON_TEXT"),
+            on_click=lambda p=player, l_id=land_id, l_info=land_info: self.show_own_land_detail_panel(
+                p, l_id, l_info
+            ),
+        )
         player.send_form(panel)
 
     def toggle_land_guild_member_interact_setting(
@@ -9265,7 +9520,7 @@ class ARCCorePlugin(Plugin):
         actor_interaction_setting_panel = ActionForm(
             title=self.language_manager.GetText('LAND_ACTOR_INTERACTION_SETTING_TITLE'),
             content=self.language_manager.GetText('LAND_ACTOR_INTERACTION_CURRENT_STATUS').format(status_text),
-            on_close=lambda p=player, l_id=land_id, l_info=land_info: self.show_own_land_detail_panel(p, l_id, l_info)
+            on_close=None,
         )
         
         if current_allow_actor_interaction:
@@ -9300,7 +9555,7 @@ class ARCCorePlugin(Plugin):
         actor_damage_setting_panel = ActionForm(
             title=self.language_manager.GetText('LAND_ACTOR_DAMAGE_SETTING_TITLE'),
             content=self.language_manager.GetText('LAND_ACTOR_DAMAGE_CURRENT_STATUS').format(status_text),
-            on_close=lambda p=player, l_id=land_id, l_info=land_info: self.show_own_land_detail_panel(p, l_id, l_info)
+            on_close=None,
         )
         
         if current_allow_actor_damage:
@@ -9315,7 +9570,14 @@ class ARCCorePlugin(Plugin):
                 self.language_manager.GetText('LAND_ACTOR_DAMAGE_TOGGLE_ENABLE_BUTTON'),
                 on_click=lambda p=player, l_id=land_id: self.toggle_land_actor_damage_setting(p, l_id, True)
             )
-        
+
+        actor_damage_setting_panel.add_button(
+            self.language_manager.GetText('RETURN_BUTTON_TEXT'),
+            on_click=lambda p=player, l_id=land_id, l_info=self.get_land_info(land_id): self.show_own_land_detail_panel(
+                p, l_id, l_info
+            ),
+        )
+
         player.send_form(actor_damage_setting_panel)
 
     def toggle_land_actor_interaction_setting(self, player: Player, land_id: int, allow_actor_interaction: bool):
@@ -9361,7 +9623,7 @@ class ARCCorePlugin(Plugin):
         panel = ActionForm(
             title=self.language_manager.GetText('LAND_FRAME_SETTING_TITLE'),
             content=self.language_manager.GetText('LAND_FRAME_CURRENT_STATUS').format(status_text),
-            on_close=lambda p=player, l_id=land_id, linfo=self.get_land_info(land_id): self.show_own_land_detail_panel(p, l_id, linfo)
+            on_close=None,
         )
         panel.add_button(self.language_manager.GetText('LAND_FRAME_TOGGLE_ENABLE_BUTTON'),
                          on_click=lambda p=player, l_id=land_id: self.toggle_land_frame_setting(p, l_id, True))
@@ -9402,6 +9664,7 @@ class ARCCorePlugin(Plugin):
         default_max_z = str(cached.get('max_z', math.floor(player.location.z)))
 
         controls = [
+            self._modal_nav_dropdown(),
             Label(text=self.language_manager.GetText('CREATE_LAND_FORM_DIMENSION_LABEL').format(dim_label)),
             TextInput(label=self.language_manager.GetText('CREATE_LAND_FORM_MIN_X'), placeholder='例如: -100', default_value=default_min_x),
             TextInput(label=self.language_manager.GetText('CREATE_LAND_FORM_MAX_X'), placeholder='例如: 100', default_value=default_max_x),
@@ -9414,13 +9677,16 @@ class ARCCorePlugin(Plugin):
         def on_submit(p: Player, json_str: str):
             try:
                 data = json.loads(json_str)
-                # data[0] is Label (ignored), data[1..6] are the text inputs
-                min_x_str = data[1]
-                max_x_str = data[2]
-                min_y_str = data[3]
-                max_y_str = data[4]
-                min_z_str = data[5]
-                max_z_str = data[6]
+                if self._modal_choice_is_back(data, 0):
+                    _create_guide_close(p)
+                    return
+                # data[1] is Label (ignored), data[2..7] are the text inputs
+                min_x_str = data[2]
+                max_x_str = data[3]
+                min_y_str = data[4]
+                max_y_str = data[5]
+                min_z_str = data[6]
+                max_z_str = data[7]
                 try:
                     min_x = int(min_x_str)
                     max_x = int(max_x_str)
@@ -9474,7 +9740,7 @@ class ARCCorePlugin(Plugin):
             title=self.language_manager.GetText('CREATE_LAND_FORM_TITLE'),
             controls=controls,
             on_submit=on_submit,
-            on_close=_create_guide_close,
+            on_close=None,
         )
         player.send_form(form)
 
@@ -9546,7 +9812,7 @@ class ARCCorePlugin(Plugin):
             info_panel = ActionForm(
                 title=self.language_manager.GetText('LAND_CURRENT_PANEL_TITLE'),
                 content=land_message + '\n' + self.language_manager.GetText('LAND_CURRENT_POSITION_SHARED_USERS').format(shared_str),
-                on_close=self.show_land_main_menu
+                on_close=None,
             )
 
             info_panel.add_button(
@@ -9657,9 +9923,13 @@ class ARCCorePlugin(Plugin):
 
     def start_interactive_land_creation(self, player: Player):
         """创建领地：先在世界中交互 4 个选点，再进入购买确认面板。"""
-        if not self.if_player_logined(player):
-            self.show_main_menu(player)
-            return
+        self.require_sensitive_password_verified(
+            player,
+            self._start_interactive_land_creation_impl,
+            on_cancel=lambda p: self.show_land_main_menu(p),
+        )
+
+    def _start_interactive_land_creation_impl(self, player: Player) -> None:
         self.player_new_land_creation_info.pop(player.name, None)
         self.player_land_pos1.pop(player.name, None)
         self.player_land_creation_pick[player.name] = {
@@ -9864,7 +10134,7 @@ class ARCCorePlugin(Plugin):
         purchase_form = ActionForm(
             title=self.language_manager.GetText("LAND_PENDING_PURCHASE_PANEL_TITLE"),
             content=content,
-            on_close=self.show_land_main_menu,
+            on_close=None,
         )
 
         def _preview(p: Player):
@@ -9920,6 +10190,7 @@ class ARCCorePlugin(Plugin):
             return
 
         controls = [
+            self._modal_nav_dropdown(),
             Label(text=self.language_manager.GetText("LAND_PENDING_EDIT_COORD_LABEL")),
             TextInput(
                 label=self.language_manager.GetText("CREATE_LAND_FORM_MIN_X"),
@@ -9950,13 +10221,16 @@ class ARCCorePlugin(Plugin):
         def on_submit(p: Player, json_str: str):
             try:
                 data = json.loads(json_str)
+                if self._modal_choice_is_back(data, 0):
+                    _edit_coord_close(p)
+                    return
                 try:
-                    raw_min_x = int(data[1])
-                    raw_max_x = int(data[2])
-                    raw_min_y = int(data[3])
-                    raw_max_y = int(data[4])
-                    raw_min_z = int(data[5])
-                    raw_max_z = int(data[6])
+                    raw_min_x = int(data[2])
+                    raw_max_x = int(data[3])
+                    raw_min_y = int(data[4])
+                    raw_max_y = int(data[5])
+                    raw_min_z = int(data[6])
+                    raw_max_z = int(data[7])
                 except (ValueError, TypeError, IndexError):
                     p.send_message(self.language_manager.GetText("CREATE_LAND_FORM_INVALID_COORD"))
                     return
@@ -10001,7 +10275,7 @@ class ARCCorePlugin(Plugin):
             title=self.language_manager.GetText("LAND_PENDING_EDIT_COORD_TITLE"),
             controls=controls,
             on_submit=on_submit,
-            on_close=_edit_coord_close,
+            on_close=None,
         )
         player.send_form(form)
 
@@ -10284,9 +10558,20 @@ class ARCCorePlugin(Plugin):
         self.land_system.set_land_teleport_point(land_id, cx, cy, cz)
 
     def _player_start_land_resize_redemarcation(self, player: Player, land_id: int):
-        if not self.if_player_logined(player):
-            self.show_main_menu(player)
-            return
+        def cancel_back_to_detail(p: Player):
+            land_info = self.get_land_info(land_id)
+            if land_info:
+                self.show_own_land_detail_panel(p, land_id, land_info)
+            else:
+                self.show_own_land_menu(p)
+
+        self.require_sensitive_password_verified(
+            player,
+            lambda p, lid=land_id: self._player_start_land_resize_redemarcation_impl(p, lid),
+            on_cancel=cancel_back_to_detail,
+        )
+
+    def _player_start_land_resize_redemarcation_impl(self, player: Player, land_id: int) -> None:
         land_info = self.get_land_info(land_id)
         if not land_info:
             player.send_message(self.language_manager.GetText("LAND_RESIZE_LAND_GONE"))
@@ -10552,7 +10837,7 @@ class ARCCorePlugin(Plugin):
         form = ActionForm(
             title=self.language_manager.GetText("LAND_RESIZE_CONFIRM_TITLE"),
             content=content,
-            on_close=_resize_close,
+            on_close=None,
         )
 
         def _resize_preview(p: Player):
@@ -10829,7 +11114,7 @@ class ARCCorePlugin(Plugin):
         panel = ActionForm(
             title=self.language_manager.GetText('SUB_LAND_MANAGE_PANEL_TITLE'),
             content=self.language_manager.GetText('SUB_LAND_MANAGE_PANEL_CONTENT').format(len(sub_lands)),
-            on_close=lambda p=player, l_id=land_id, l_info=land_info: self.show_own_land_detail_panel(p, l_id, l_info)
+            on_close=None,
         )
         panel.add_button(
             self.language_manager.GetText('SUB_LAND_CREATE_BUTTON_TEXT'),
@@ -10938,7 +11223,7 @@ class ARCCorePlugin(Plugin):
             title=self.language_manager.GetText('SUB_LAND_CREATE_FORM_TITLE'),
             controls=controls,
             on_submit=on_submit,
-            on_close=_back
+            on_close=None,
         )
         player.send_form(form)
 
@@ -10973,7 +11258,7 @@ class ARCCorePlugin(Plugin):
         panel = ActionForm(
             title=self.language_manager.GetText('SUB_LAND_DETAIL_PANEL_TITLE'),
             content=content,
-            on_close=_back
+            on_close=None,
         )
 
         if is_owner:
@@ -11008,7 +11293,13 @@ class ARCCorePlugin(Plugin):
 
         def on_submit(p: Player, json_str: str):
             data = json.loads(json_str)
-            new_name = (data[0] or '').strip()
+            if len(data) < 2:
+                p.send_message(self.language_manager.GetText('CREATE_HOME_EMPTY_NAME_ERROR'))
+                return
+            if self._modal_choice_is_back(data, 0):
+                self.show_sub_land_detail_panel(p, sub_land_id)
+                return
+            new_name = (data[1] or '').strip()
             if not new_name:
                 p.send_message(self.language_manager.GetText('CREATE_HOME_EMPTY_NAME_ERROR'))
                 return
@@ -11017,13 +11308,16 @@ class ARCCorePlugin(Plugin):
 
         form = ModalForm(
             title=self.language_manager.GetText('SUB_LAND_RENAME_PANEL_TITLE'),
-            controls=[TextInput(
-                label=self.language_manager.GetText('RENAME_OWN_LAND_PANEL_INPUT_LABEL').format(sub_land_id),
-                placeholder=sl_info['sub_land_name'],
-                default_value=sl_info['sub_land_name']
-            )],
+            controls=[
+                self._modal_nav_dropdown(),
+                TextInput(
+                    label=self.language_manager.GetText('RENAME_OWN_LAND_PANEL_INPUT_LABEL').format(sub_land_id),
+                    placeholder=sl_info['sub_land_name'],
+                    default_value=sl_info['sub_land_name'],
+                ),
+            ],
             on_submit=on_submit,
-            on_close=lambda p=player, sl=sub_land_id: self.show_sub_land_detail_panel(p, sl)
+            on_close=None,
         )
         player.send_form(form)
 
@@ -11045,7 +11339,7 @@ class ARCCorePlugin(Plugin):
         panel = ActionForm(
             title=self.language_manager.GetText('SUB_LAND_CONFIRM_DELETE_TITLE').format(sub_land_id),
             content=self.language_manager.GetText('SUB_LAND_CONFIRM_DELETE_CONTENT').format(sub_land_id, sl_info['sub_land_name']),
-            on_close=lambda p=player, sl=sub_land_id: self.show_sub_land_detail_panel(p, sl)
+            on_close=None,
         )
         panel.add_button(
             self.language_manager.GetText('SUB_LAND_CONFIRM_DELETE_BUTTON'),
@@ -11078,7 +11372,7 @@ class ARCCorePlugin(Plugin):
         panel = ActionForm(
             title=self.language_manager.GetText('LAND_AUTH_MANAGE_TITLE'),
             content=self.language_manager.GetText('SUB_LAND_AUTH_PANEL_CONTENT').format(sub_land_id, sl_info['sub_land_name']),
-            on_close=lambda p=player, sl=sub_land_id: self.show_sub_land_detail_panel(p, sl)
+            on_close=None,
         )
         panel.add_button(
             self.language_manager.GetText('LAND_AUTH_ADD_BUTTON'),
@@ -11124,7 +11418,7 @@ class ARCCorePlugin(Plugin):
         panel = ActionForm(
             title=self.language_manager.GetText('LAND_AUTH_ADD_PANEL_TITLE'),
             content=self.language_manager.GetText('LAND_AUTH_SELECT_PLAYER_CONTENT'),
-            on_close=lambda p=player, sl=sub_land_id: self.show_sub_land_auth_manage_panel(p, sl)
+            on_close=None,
         )
         for op in online_players:
             panel.add_button(
@@ -11149,7 +11443,7 @@ class ARCCorePlugin(Plugin):
         panel = ActionForm(
             title=self.language_manager.GetText('LAND_AUTH_REMOVE_PANEL_TITLE'),
             content=self.language_manager.GetText('LAND_AUTH_SELECT_REMOVE_CONTENT'),
-            on_close=lambda p=player, sl=sub_land_id: self.show_sub_land_auth_manage_panel(p, sl)
+            on_close=None,
         )
         for uid in sl_info['shared_users']:
             name = self.get_player_name_by_xuid(uid) or uid
@@ -11174,7 +11468,7 @@ class ARCCorePlugin(Plugin):
         panel = ActionForm(
             title=self.language_manager.GetText('OP_LAND_MANAGE_TITLE'),
             content=self.language_manager.GetText('OP_LAND_MANAGE_CONTENT'),
-            on_close=self.show_op_main_panel,
+            on_close=None,
         )
         panel.add_button(
             self.language_manager.GetText('OP_PANEL_MANAGE_ALL_LANDS'),
@@ -11196,7 +11490,7 @@ class ARCCorePlugin(Plugin):
         panel = ActionForm(
             title=self.language_manager.GetText('OP_TOOLS_TITLE'),
             content=self.language_manager.GetText('OP_TOOLS_CONTENT'),
-            on_close=self.show_op_main_panel,
+            on_close=None,
         )
         panel.add_button(
             self.language_manager.GetText('OP_PANEL_SWITCH_GAME_MODE'),
@@ -11249,7 +11543,7 @@ class ARCCorePlugin(Plugin):
         panel = ActionForm(
             title=self.language_manager.GetText("OP_ACHIEVEMENT_PANEL_TITLE"),
             content=self.language_manager.GetText("OP_ACHIEVEMENT_PANEL_CONTENT"),
-            on_close=self.show_op_main_panel,
+            on_close=None,
         )
         panel.add_button(self.language_manager.GetText("OP_ACHIEVEMENT_CREATE_BUTTON"),
                          on_click=self.show_op_achievement_create_panel)
@@ -11279,7 +11573,7 @@ class ARCCorePlugin(Plugin):
         panel = ActionForm(
             title=self.language_manager.GetText("OP_ACHIEVEMENT_LIST_TITLE"),
             content=self.language_manager.GetText("OP_ACHIEVEMENT_LIST_CONTENT"),
-            on_close=self.show_op_achievement_manage_panel,
+            on_close=None,
         )
         for achievement_row in achievement_rows:
             name = str(achievement_row.get("name") or "").strip()
@@ -11323,7 +11617,7 @@ class ARCCorePlugin(Plugin):
         form = ModalForm(
             title=self.language_manager.GetText("OP_ACHIEVEMENT_CREATE_TITLE"),
             controls=[name_input, title_input, enabled_input, hidden_input],
-            on_close=self.show_op_achievement_manage_panel,
+            on_close=None,
             on_submit=self._do_op_achievement_create,
         )
         player.send_form(form)
@@ -11381,7 +11675,7 @@ class ARCCorePlugin(Plugin):
                 f"条件数: {len(condition_rows)}\n"
                 "说明: 全部条件满足后才会解锁。"
             ),
-            on_close=self.show_op_achievement_list_panel,
+            on_close=None,
         )
         panel.add_button(
             "编辑基础信息",
@@ -11463,7 +11757,7 @@ class ARCCorePlugin(Plugin):
         form = ModalForm(
             title=f"编辑成就信息: {unlock_title}",
             controls=[name_input, title_input, enabled_input, hidden_input],
-            on_close=lambda p, ut=unlock_title: self.show_op_achievement_edit_panel(p, ut),
+            on_close=None,
             on_submit=lambda p, json_str, ut=unlock_title: self._do_op_achievement_save_meta(p, json_str, ut),
         )
         player.send_form(form)
@@ -11514,7 +11808,7 @@ class ARCCorePlugin(Plugin):
         form = ModalForm(
             title=f"新增条件: {unlock_title}",
             controls=[entity_input, required_input],
-            on_close=lambda p, ut=unlock_title: self.show_op_achievement_edit_panel(p, ut),
+            on_close=None,
             on_submit=lambda p, json_str, ut=unlock_title: self._do_op_achievement_create_condition(p, json_str, ut),
         )
         player.send_form(form)
@@ -11568,7 +11862,7 @@ class ARCCorePlugin(Plugin):
         panel = ActionForm(
             title=f"条件 #{condition_id}",
             content=condition_text,
-            on_close=lambda p, ut=unlock_title: self.show_op_achievement_edit_panel(p, ut),
+            on_close=None,
         )
         panel.add_button(
             "编辑条件",
@@ -11612,7 +11906,7 @@ class ARCCorePlugin(Plugin):
         form = ModalForm(
             title=f"编辑条件 #{condition_id}",
             controls=[entity_input, required_input],
-            on_close=lambda p, ut=unlock_title, c_id=condition_id: self.show_op_achievement_condition_panel(p, ut, c_id),
+            on_close=None,
             on_submit=lambda p, json_str, ut=unlock_title, c_id=condition_id: self._do_op_achievement_save_condition(p, json_str, ut, c_id),
         )
         player.send_form(form)
@@ -11697,7 +11991,7 @@ class ARCCorePlugin(Plugin):
         panel = ActionForm(
             title=self.language_manager.GetText('OP_TITLE_MANAGE_TITLE'),
             content=self.language_manager.GetText('OP_TITLE_MANAGE_CONTENT'),
-            on_close=self.show_op_main_panel
+            on_close=None,
         )
         panel.add_button(self.language_manager.GetText('OP_TITLE_ATTR_MANAGE_BUTTON'),
                          on_click=self.show_op_title_attr_list_panel)
@@ -11721,7 +12015,7 @@ class ARCCorePlugin(Plugin):
         panel = ActionForm(
             title=self.language_manager.GetText('OP_TITLE_ATTR_MANAGE_TITLE'),
             content=self.language_manager.GetText('OP_TITLE_ATTR_MANAGE_CONTENT'),
-            on_close=self.show_op_title_manage_panel
+            on_close=None,
         )
         for t in titles:
             defn = self.title_system.get_title_definition(t)
@@ -11734,7 +12028,7 @@ class ARCCorePlugin(Plugin):
         """OP 头衔管理：编辑属性 / 重命名。"""
         menu = ActionForm(
             title=self.language_manager.GetText('OP_TITLE_ATTR_EDIT_TITLE').format(title_name),
-            on_close=self.show_op_title_attr_list_panel,
+            on_close=None,
         )
         menu.add_button(
             self.language_manager.GetText('OP_TITLE_ATTR_EDIT_ATTR_BUTTON'),
@@ -11782,7 +12076,7 @@ class ARCCorePlugin(Plugin):
         form = ModalForm(
             title=self.language_manager.GetText('OP_TITLE_ATTR_EDIT_TITLE').format(title_name),
             controls=[rarity_input, desc_input, money_input, items_input],
-            on_close=self.show_op_title_attr_list_panel,
+            on_close=None,
             on_submit=lambda p, json_str: self._do_op_title_save_attr(p, json_str, title_name),
         )
         player.send_form(form)
@@ -11797,7 +12091,7 @@ class ARCCorePlugin(Plugin):
         form = ModalForm(
             title=self.language_manager.GetText('OP_TITLE_RENAME_PANEL_TITLE').format(title_name),
             controls=[rename_input],
-            on_close=self.show_op_title_attr_list_panel,
+            on_close=None,
             on_submit=lambda p, json_str: self._do_op_title_rename(p, json_str, title_name),
         )
         player.send_form(form)
@@ -11908,7 +12202,7 @@ class ARCCorePlugin(Plugin):
         form = ModalForm(
             title=self.language_manager.GetText('OP_TITLE_CREATE_TITLE'),
             controls=[name_input, rarity_input, desc_input, money_input, items_input],
-            on_close=self.show_op_title_manage_panel,
+            on_close=None,
             on_submit=lambda p, json_str: self._do_op_title_create(p, json_str)
         )
         player.send_form(form)
@@ -11948,7 +12242,7 @@ class ARCCorePlugin(Plugin):
         panel = ActionForm(
             title=self.language_manager.GetText('OP_TITLE_GRANT_TO_ALL_TITLE'),
             content=self.language_manager.GetText('OP_TITLE_GRANT_TO_ALL_SELECT_HINT'),
-            on_close=self.show_op_title_manage_panel
+            on_close=None,
         )
         for t in titles:
             panel.add_button(t, on_click=lambda p, title=t: self._do_op_grant_title_to_all(p, title))
@@ -11983,7 +12277,7 @@ class ARCCorePlugin(Plugin):
         form = ModalForm(
             title=self.language_manager.GetText('OP_TITLE_GRANT_TO_SINGLE_TITLE'),
             controls=[player_input],
-            on_close=self.show_op_title_manage_panel,
+            on_close=None,
             on_submit=lambda p, json_str: self._op_grant_single_on_player_entered(p, json_str)
         )
         player.send_form(form)
@@ -12015,7 +12309,7 @@ class ARCCorePlugin(Plugin):
         panel = ActionForm(
             title=self.language_manager.GetText('OP_TITLE_GRANT_TO_SINGLE_TITLE'),
             content=self.language_manager.GetText('OP_TITLE_GRANT_TO_SINGLE_SELECT_HINT').format(target_name),
-            on_close=self.show_op_title_manage_panel
+            on_close=None,
         )
         for t in titles:
             panel.add_button(t, on_click=lambda p, title=t, name=target_name, xuid=target_xuid: self._do_op_grant_title_to_single(p, name, xuid, title))
@@ -12055,7 +12349,7 @@ class ARCCorePlugin(Plugin):
             result_panel = ActionForm(
                 title=self.language_manager.GetText('OP_LAND_AT_POS_TITLE'),
                 content=self.language_manager.GetText('OP_LAND_AT_POS_NOT_FOUND').format(x, y, z),
-                on_close=self.show_op_land_manage_panel
+                on_close=None,
             )
             result_panel.add_button(self.language_manager.GetText('RETURN_BUTTON_TEXT'),
                                     on_click=self.show_op_land_manage_panel)
@@ -12069,7 +12363,7 @@ class ARCCorePlugin(Plugin):
         confirm = ActionForm(
             title=self.language_manager.GetText('OP_REBUILD_CHUNK_MAPPING_TITLE'),
             content=self.language_manager.GetText('OP_REBUILD_CHUNK_MAPPING_CONFIRM_CONTENT'),
-            on_close=self.show_op_land_manage_panel
+            on_close=None,
         )
         confirm.add_button(
             self.language_manager.GetText('OP_REBUILD_CHUNK_MAPPING_CONFIRM_BUTTON'),
@@ -12087,7 +12381,7 @@ class ARCCorePlugin(Plugin):
         result_panel = ActionForm(
             title=self.language_manager.GetText('OP_REBUILD_CHUNK_MAPPING_TITLE'),
             content=message,
-            on_close=self.show_op_land_manage_panel
+            on_close=None,
         )
         result_panel.add_button(self.language_manager.GetText('RETURN_BUTTON_TEXT'), on_click=self.show_op_land_manage_panel)
         player.send_form(result_panel)
@@ -12132,7 +12426,7 @@ class ARCCorePlugin(Plugin):
         confirm_panel = ActionForm(
             title=self.language_manager.GetText('OP_FORCE_DELETE_LAND_CONFIRM_TITLE').format(land_id),
             content=content,
-            on_close=lambda p=player, l_id=land_id, pg=from_page: self.show_op_land_detail_panel(p, l_id, pg)
+            on_close=None,
         )
         confirm_panel.add_button(
             self.language_manager.GetText('OP_FORCE_DELETE_LAND_CONFIRM_BUTTON'),
@@ -12246,14 +12540,6 @@ class ARCCorePlugin(Plugin):
                     self.hide_op_in_money_ranking = str(self.hide_op_in_money_ranking).lower() in ['true', '1', 'yes']
                 except (ValueError, AttributeError):
                     self.hide_op_in_money_ranking = True
-            self.force_login = self.setting_manager.GetSetting('FORCE_LOGIN')
-            if self.force_login is None:
-                self.force_login = False
-            else:
-                try:
-                    self.force_login = str(self.force_login).lower() in ['true', '1', 'yes']
-                except (ValueError, AttributeError):
-                    self.force_login = False
             self.small_horn_price_per_hour = self.setting_manager.GetSetting('SMALL_HORN_PRICE_PER_HOUR')
             try:
                 self.small_horn_price_per_hour = int(self.small_horn_price_per_hour)
@@ -12305,7 +12591,7 @@ class ARCCorePlugin(Plugin):
                 result_panel = ActionForm(
                     title=self.language_manager.GetText('INVITE_REWARD_CONFIG_TITLE'),
                     content=self.language_manager.GetText('FILL_INVITER_FAIL_SYSTEM_ERROR'),
-                    on_close=self.show_op_main_panel
+                    on_close=None,
                 )
                 p.send_form(result_panel)
                 return
@@ -12336,23 +12622,29 @@ class ARCCorePlugin(Plugin):
             result_panel = ActionForm(
                 title=self.language_manager.GetText('INVITE_REWARD_CONFIG_TITLE'),
                 content=self.language_manager.GetText('INVITE_REWARD_CONFIG_SAVED'),
-                on_close=self.show_op_main_panel
+                on_close=None,
             )
             p.send_form(result_panel)
 
         config_panel = ModalForm(
             title=self.language_manager.GetText('INVITE_REWARD_CONFIG_TITLE'),
             controls=[item_name_input, item_count_input, money_input, free_blocks_input],
-            on_close=self.show_op_main_panel,
+            on_close=None,
             on_submit=try_save_reward_config
         )
         player.send_form(config_panel)
 
     def switch_player_game_mode(self, player: Player):
         if player.game_mode == GameMode.CREATIVE:
-            self.server.dispatch_command(self.server.command_sender, f'gamemode 0 {player.name}')
+            self.server.dispatch_command(
+                self.server.command_sender,
+                f'gamemode 0 {format_mc_command_player_name(player.name)}',
+            )
         else:
-            self.server.dispatch_command(self.server.command_sender, f'gamemode 1 {player.name}')
+            self.server.dispatch_command(
+                self.server.command_sender,
+                f'gamemode 1 {format_mc_command_player_name(player.name)}',
+            )
 
     def clear_drop_item(self, player: Player):
         self.server.scheduler.run_task(self, self.delay_drop_item, delay=150)
@@ -12434,7 +12726,7 @@ class ARCCorePlugin(Plugin):
         command_input_form = ModalForm(
             title=self.language_manager.GetText('RUN_COMMAND_PANEL_TITLE'),
             controls=[command_input],
-            on_close=self.show_op_tools_panel,
+            on_close=None,
             on_submit=try_execute_command
         )
         player.send_form(command_input_form)
@@ -12444,7 +12736,7 @@ class ARCCorePlugin(Plugin):
         panel = ActionForm(
             title=self.language_manager.GetText('OP_ECONOMY_MANAGE_TITLE'),
             content=self.language_manager.GetText('OP_ECONOMY_MANAGE_CONTENT'),
-            on_close=self.show_op_main_panel,
+            on_close=None,
         )
         panel.add_button(
             self.language_manager.GetText('OP_ECONOMY_ADJUST_MONEY_BUTTON'),
@@ -12556,7 +12848,7 @@ class ARCCorePlugin(Plugin):
             result = ActionForm(
                 title=self.language_manager.GetText('OP_ECONOMY_SETTINGS_TITLE'),
                 content=self.language_manager.GetText('OP_ECONOMY_SETTINGS_SAVED'),
-                on_close=self.show_economy_manage_panel,
+                on_close=None,
             )
             result.add_button(self.language_manager.GetText('RETURN_BUTTON_TEXT'), on_click=self.show_economy_manage_panel)
             p.send_form(result)
@@ -12564,7 +12856,7 @@ class ARCCorePlugin(Plugin):
         form = ModalForm(
             title=self.language_manager.GetText('OP_ECONOMY_SETTINGS_TITLE'),
             controls=[in_init_money, in_hide_op_rank, in_richest_title],
-            on_close=self.show_economy_manage_panel,
+            on_close=None,
             on_submit=try_save,
         )
         player.send_form(form)
@@ -12575,7 +12867,7 @@ class ARCCorePlugin(Plugin):
         money_menu = ActionForm(
             title=self.language_manager.GetText('MONEY_MANAGE_MENU_TITLE'),
             content=self.language_manager.GetText('MONEY_MANAGE_MENU_CONTENT'),
-            on_close=self.show_economy_manage_panel
+            on_close=None,
         )
         money_menu.add_button(
             self.language_manager.GetText('MONEY_MANAGE_ADD_BUTTON'),
@@ -12594,7 +12886,7 @@ class ARCCorePlugin(Plugin):
             no_players_panel = ActionForm(
                 title=self.language_manager.GetText('MONEY_MANAGE_SELECT_PLAYER_TITLE'),
                 content=self.language_manager.GetText('NO_OTHER_PLAYERS_ONLINE'),
-                on_close=self.show_money_manage_menu
+                on_close=None,
             )
             player.send_form(no_players_panel)
             return
@@ -12602,7 +12894,7 @@ class ARCCorePlugin(Plugin):
         select_player_menu = ActionForm(
             title=self.language_manager.GetText('MONEY_MANAGE_SELECT_PLAYER_TITLE'),
             content=self.language_manager.GetText('MONEY_MANAGE_SELECT_PLAYER_CONTENT'),
-            on_close=self.show_money_manage_menu
+            on_close=None,
         )
         
         for target_player in online_players:
@@ -12661,7 +12953,7 @@ class ARCCorePlugin(Plugin):
         amount_input_form = ModalForm(
             title=self.language_manager.GetText('MONEY_MANAGE_INPUT_AMOUNT_TITLE'),
             controls=[amount_input],
-            on_close=lambda p=player: self.show_money_manage_select_player(p, operation_type),
+            on_close=None,
             on_submit=try_change_money
         )
         player.send_form(amount_input_form)
@@ -12676,7 +12968,7 @@ class ARCCorePlugin(Plugin):
             empty_panel = ActionForm(
                 title=self.language_manager.GetText('OP_ALL_LANDS_MENU_TITLE'),
                 content=self.language_manager.GetText('OP_ALL_LANDS_EMPTY'),
-                on_close=self.show_op_land_manage_panel
+                on_close=None,
             )
             player.send_form(empty_panel)
             return
@@ -12691,7 +12983,7 @@ class ARCCorePlugin(Plugin):
         menu = ActionForm(
             title=self.language_manager.GetText('OP_ALL_LANDS_MENU_TITLE'),
             content=self.language_manager.GetText('OP_ALL_LANDS_MENU_CONTENT').format(len(land_ids), page + 1),
-            on_close=self.show_op_land_manage_panel
+            on_close=None,
         )
         
         for land_id in page_land_ids:
@@ -12758,7 +13050,7 @@ class ARCCorePlugin(Plugin):
         detail_panel = ActionForm(
             title=self.language_manager.GetText('OP_LAND_DETAIL_TITLE').format(land_id),
             content=content,
-            on_close=lambda p=player, pg=from_page: self.show_op_all_lands_panel(p, pg)
+            on_close=None,
         )
         # 传送前往
         detail_panel.add_button(
@@ -12832,7 +13124,7 @@ class ARCCorePlugin(Plugin):
         confirm_panel = ActionForm(
             title=self.language_manager.GetText('OP_CONFIRM_SET_PUBLIC_TITLE'),
             content=self.language_manager.GetText('OP_CONFIRM_SET_PUBLIC_CONTENT').format(land_id),
-            on_close=lambda p=player, pg=from_page: self.show_op_land_detail_panel(p, land_id, pg)
+            on_close=None,
         )
         confirm_panel.add_button(
             self.language_manager.GetText('OP_CONFIRM_SET_PUBLIC_BUTTON'),
@@ -12883,7 +13175,7 @@ class ARCCorePlugin(Plugin):
         rename_panel = ModalForm(
             title=self.language_manager.GetText('RENAME_OWN_LAND_PANEL_TITLE'),
             controls=[new_name_input],
-            on_close=lambda p=player, l_id=land_id, pg=from_page: self.show_op_land_detail_panel(p, l_id, pg),
+            on_close=None,
             on_submit=try_change_name
         )
         player.send_form(rename_panel)
@@ -12902,7 +13194,7 @@ class ARCCorePlugin(Plugin):
         auth_panel = ActionForm(
             title=self.language_manager.GetText('OP_LAND_MANAGE_AUTH_BUTTON'),
             content=self.language_manager.GetText('LAND_AUTH_MANAGE_TITLE'),
-            on_close=lambda p=player, l_id=land_id, pg=from_page: self.show_op_land_detail_panel(p, l_id, pg)
+            on_close=None,
         )
         auth_panel.add_button(
             self.language_manager.GetText('LAND_AUTH_ADD_BUTTON'),
@@ -12926,14 +13218,14 @@ class ARCCorePlugin(Plugin):
             no_players_panel = ActionForm(
                 title=self.language_manager.GetText('LAND_AUTH_ADD_PANEL_TITLE'),
                 content=self.language_manager.GetText('NO_OTHER_PLAYERS_ONLINE'),
-                on_close=lambda p=player, l_id=land_id, pg=from_page: self.show_op_land_auth_manage_panel(p, l_id, pg)
+                on_close=None,
             )
             player.send_form(no_players_panel)
             return
         add_panel = ActionForm(
             title=self.language_manager.GetText('LAND_AUTH_ADD_PANEL_TITLE'),
             content=self.language_manager.GetText('LAND_AUTH_SELECT_PLAYER_CONTENT'),
-            on_close=lambda p=player, l_id=land_id, pg=from_page: self.show_op_land_auth_manage_panel(p, l_id, pg)
+            on_close=None,
         )
         for target_player in online_players:
             add_panel.add_button(
@@ -12949,14 +13241,14 @@ class ARCCorePlugin(Plugin):
             no_auth_panel = ActionForm(
                 title=self.language_manager.GetText('LAND_AUTH_REMOVE_PANEL_TITLE'),
                 content=self.language_manager.GetText('LAND_AUTH_NO_SHARED_USERS'),
-                on_close=lambda p=player, l_id=land_id, pg=from_page: self.show_op_land_auth_manage_panel(p, l_id, pg)
+                on_close=None,
             )
             player.send_form(no_auth_panel)
             return
         remove_panel = ActionForm(
             title=self.language_manager.GetText('LAND_AUTH_REMOVE_PANEL_TITLE'),
             content=self.language_manager.GetText('LAND_AUTH_SELECT_REMOVE_CONTENT'),
-            on_close=lambda p=player, l_id=land_id, pg=from_page: self.show_op_land_auth_manage_panel(p, l_id, pg)
+            on_close=None,
         )
         for shared_xuid in land_info['shared_users']:
             raw_name = self.get_player_name_by_xuid(shared_xuid, return_with_title=False)
@@ -13061,7 +13353,7 @@ class ARCCorePlugin(Plugin):
         settings_panel = ActionForm(
             title=self.language_manager.GetText('OP_PUBLIC_LAND_SETTINGS_BUTTON'),
             content=content,
-            on_close=lambda p=player, l_id=land_id, pg=from_page: self.show_op_land_detail_panel(p, l_id, pg)
+            on_close=None,
         )
         settings_panel.add_button(
             self.language_manager.GetText('LAND_PUBLIC_INTERACT_SETTING_BUTTON_TEXT'),
@@ -13133,7 +13425,7 @@ class ARCCorePlugin(Plugin):
         toggle_panel = ActionForm(
             title=title,
             content=status_text,
-            on_close=lambda p=player, l_id=land_id, pg=from_page: self.show_op_public_land_settings_panel(p, l_id, pg)
+            on_close=None,
         )
         enable_key = {
             'allow_public_interact': ('LAND_PUBLIC_INTERACT_TOGGLE_ENABLE_BUTTON', 'LAND_PUBLIC_INTERACT_TOGGLE_DISABLE_BUTTON'),

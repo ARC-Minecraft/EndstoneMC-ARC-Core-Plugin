@@ -5,6 +5,8 @@ import random
 import time
 from typing import Dict, Any, Optional, List, Tuple
 
+from endstone_arc_core.mc_command_format import format_mc_command_player_name
+
 
 def format_dimension_name(dimension: str) -> str:
     """将完整维度名称转换为 execute 命令所需格式"""
@@ -31,7 +33,7 @@ def format_dimension_name(dimension: str) -> str:
 def generate_tp_command_to_position(
     player_name: str, position: tuple, dimension: str = "overworld"
 ) -> str:
-    formatted_name = f'"{player_name}"' if " " in player_name else player_name
+    formatted_name = format_mc_command_player_name(player_name)
     formatted_dimension = format_dimension_name(dimension)
     return f'execute in {formatted_dimension} run tp {formatted_name} {" ".join([str(int(_)) for _ in position])}'
 
@@ -41,10 +43,8 @@ def generate_tp_command_to_player(
     target_player_name: str,
     dimension: str = "overworld",
 ) -> str:
-    formatted_player = f'"{player_name}"' if " " in player_name else player_name
-    formatted_target = (
-        f'"{target_player_name}"' if " " in target_player_name else target_player_name
-    )
+    formatted_player = format_mc_command_player_name(player_name)
+    formatted_target = format_mc_command_player_name(target_player_name)
     formatted_dimension = format_dimension_name(dimension)
     return f"execute in {formatted_dimension} run tp {formatted_player} {formatted_target}"
 
@@ -387,7 +387,7 @@ class TeleportSystem:
         try:
             self.server.dispatch_command(
                 self.server.command_sender,
-                f'effect "{player_name}" slow_falling 30 255 true',
+                f"effect {format_mc_command_player_name(player_name)} slow_falling 30 255 true",
             )
         except Exception as e:
             self._log("error", f"Failed to apply slow falling effect: {str(e)}")

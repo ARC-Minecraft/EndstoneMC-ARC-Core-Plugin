@@ -28,9 +28,6 @@ GUILD_LAND_TELEPORT_CONTRIB_COST=10
 # 仅当玩家已加入公会时生效；未加入公会则静默跳过；设为 0 关闭该功能
 KILL_REWARD_GUILD_CONTRIB_RATIO=0.5
 
-# 强制登录（为 True 时，玩家进入游戏强制打开 /arc 菜单登录或注册；关闭登录/注册界面且未正确输入密码时会再次强制打开）
-FORCE_LOGIN=False
-
 # 玩家经济（也可在 OP 面板 → 经济管理 → 经济参数配置 中修改）
 PLAYER_INIT_MONEY_NUM=2000
 HIDE_OP_IN_MONEY_RANKING=True
@@ -67,8 +64,11 @@ ENABLE_MSPT_EMERGENCY_SHUTDOWN=False
 # MSPT 上限（毫秒/刻），大于此值触发关服（默认 100）
 MSPT_EMERGENCY_SHUTDOWN_LIMIT=100
 
+# 全局拦截一切爆炸（苦力怕、TNT、末影水晶等 ActorExplodeEvent）；True=全部取消，False=仅按领地 allow_explosion 保护
+BLOCK_ALL_EXPLOSIONS=True
+
 # 天眼系统（Sky Eye）：玩家行为审计，日志目录 plugins/ARCCore/sky_eye/YYYYMMDD.txt（交互、放置、破坏、死亡、进出服、对实体交互等）
-ENABLE_SKY_EYE=False
+ENABLE_SKY_EYE=True
 # 按自然日保留日志的最长天数，更早日期的 .txt 会被删除；0 表示不自动删除旧文件
 SKY_EYE_MAX_RETENTION_DAYS=7
 
