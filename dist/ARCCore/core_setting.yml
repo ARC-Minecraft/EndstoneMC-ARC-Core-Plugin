@@ -1,3 +1,8 @@
+# =============================================================================
+# ARCCore 配置文件示例
+# 格式与 dist/ARCCore/core_setting.yml 一致：KEY=VALUE，按需复制到正式 core_setting.yml 使用
+# =============================================================================
+
 DEFAULT_LANGUAGE_CODE=ZH-CN
 DATABASE_PATH=ARCCore.db
 
@@ -5,11 +10,11 @@ DATABASE_PATH=ARCCore.db
 PLAYER_DATABASE_PATH=
 PLAYER_ECONOMY_DATABASE_PATH=
 PLAYER_TITLE_DATABASE_PATH=
-
-# 公会（为空时使用 DATABASE_PATH；多服填同一 SQLite 文件路径以共享公会数据）
 GUILD_DATABASE_PATH=
-# 创建公会费用（默认十万）
-GUILD_CREATE_COST=100000
+
+# 公会
+# 创建公会费用（默认十万；本示例留空表示沿用插件内置默认，请按实际部署填写）
+GUILD_CREATE_COST=
 # 公会规模：每个公会有 small / medium / large 三档规模等级，新建公会默认 small
 # 下列三个值为各等级的成员人数上限（含会长）；OP 可在「OP 面板 → 公会管理」中直接升级/降级公会规模（无消耗）
 GUILD_SIZE_SMALL_MAX=10
@@ -27,6 +32,9 @@ GUILD_LAND_TELEPORT_CONTRIB_COST=10
 # 计算公式：贡献点 = floor(击杀金钱奖励 * 比例)；例如击杀奖励 10 元，比例 0.5，则获得 5 公会贡献点
 # 仅当玩家已加入公会时生效；未加入公会则静默跳过；设为 0 关闭该功能
 KILL_REWARD_GUILD_CONTRIB_RATIO=0.5
+
+# 强制登录（为 True 时，玩家进入游戏强制打开 /arc 菜单登录或注册；关闭登录/注册界面且未正确输入密码时会再次强制打开）
+FORCE_LOGIN=True
 
 # 玩家经济（也可在 OP 面板 → 经济管理 → 经济参数配置 中修改）
 PLAYER_INIT_MONEY_NUM=2000
@@ -46,9 +54,9 @@ LAND_SALE_VAT_RATE=0.1
 LAND_MIN_SIZE=5
 DEFAULT_FREE_LAND_BLOCKS=1500
 # 仅允许在领地内放置的方块（逗号分隔方块 ID）；列表中的方块无法在荒野放置；在领地内需为拥有者或授权玩家（与既有建造权限一致）。留空表示不限制
-LAND_ONLY_PLACE_BLOCKS=
+LAND_ONLY_PLACE_BLOCKS=minecraft:beacon,minecraft:spawner,lfg_ff:structure_placer_block,minecraft:wither_skeleton_skull
 # 全局禁用方块（逗号分隔方块 ID）；列表中的方块对非 OP 玩家禁止放置和交互，OP 直接跳过检查。留空表示不限制
-DISABLED_BLOCKS=
+DISABLED_BLOCKS=minecraft:hopper,minecraft:observer
 
 # 广播间隔
 BROADCAST_INTERVAL=120
@@ -56,24 +64,11 @@ BROADCAST_INTERVAL=120
 SMALL_HORN_PRICE_PER_HOUR=60
 
 # 清道夫
-ENABLE_CLEANER=True
+ENABLE_CLEANER=False
 CLEANER_INTERVAL=300
 
-# 性能检测应急关服：为 True 时每 10 秒读取 Server.current_mspt，超过阈值则自动执行 stop 关服
-ENABLE_MSPT_EMERGENCY_SHUTDOWN=False
-# MSPT 上限（毫秒/刻），大于此值触发关服（默认 100）
-MSPT_EMERGENCY_SHUTDOWN_LIMIT=100
-
-# 全局拦截一切爆炸（苦力怕、TNT、末影水晶等 ActorExplodeEvent）；True=全部取消，False=仅按领地 allow_explosion 保护
-BLOCK_ALL_EXPLOSIONS=True
-
-# 天眼系统（Sky Eye）：玩家行为审计，日志目录 plugins/ARCCore/sky_eye/YYYYMMDD.txt（交互、放置、破坏、死亡、进出服、对实体交互等）
-ENABLE_SKY_EYE=True
-# 按自然日保留日志的最长天数，更早日期的 .txt 会被删除；0 表示不自动删除旧文件
-SKY_EYE_MAX_RETENTION_DAYS=7
-
 # 传送系统设置
-MAX_PLAYER_HOME_NUM=5
+MAX_PLAYER_HOME_NUM=10
 ENABLE_RANDOM_TELEPORT=true
 RANDOM_TELEPORT_CENTER_X=0
 RANDOM_TELEPORT_CENTER_Z=0
@@ -88,26 +83,26 @@ TELEPORT_COST_RANDOM=1000
 TELEPORT_COST_PLAYER=100
 
 # 每日签到（主菜单按钮；last_checkin_date 与服务器本地日期 YYYY-MM-DD 不同则可签到）
-CHECKIN_DAILY_MONEY=100
+CHECKIN_DAILY_MONEY=1000.0
 # 每日前 X 名签到额外奖励配置（0 表示关闭该项）
 # 前 X 名的额外金钱采用等差递减：第 1 名 = X*步长，第 2 名 = (X-1)*步长，...，第 X 名 = 1*步长
 CHECKIN_TOP_RANK_LIMIT=5
 CHECKIN_TOP_RANK_BONUS_ITEM_COUNT=1
-CHECKIN_TOP_RANK_BONUS_MONEY_STEP=50
+CHECKIN_TOP_RANK_BONUS_MONEY_STEP=200
 # 连续签到金钱递增步长：总存款 = 基础签到存款 + (连续天数-1)*步长
 CHECKIN_CONTINUOUS_DAYS_MONEY_INCREMENT=100
 # 每日签到额外发放的公会贡献点（同时加本人私人贡献与公会公共贡献；未加入公会则跳过；0 表示关闭）
-CHECKIN_GUILD_CONTRIBUTION_POINTS=10
+CHECKIN_GUILD_CONTRIBUTION_POINTS=100
 # 每日从奖励池中按权重不放回随机抽取的条数区间（含端点）；例如 1～3 表示每天随机 1、2 或 3 条
 CHECKIN_REWARD_PICK_MIN=1
-CHECKIN_REWARD_PICK_MAX=3
+CHECKIN_REWARD_PICK_MAX=2
 # JSON 数组：每项 [物品ID, 数量, 权重]；权重越大越容易被抽到。物品名参考基岩版 /give（可加命名空间如 mod:id）
 CHECKIN_REWARD_LIST=[["diamond",1,1],["netherite_scrap",1,2],["ancient_debris",1,2],["emerald",2,3],["enchanted_golden_apple",1,1],["golden_apple",1,5],["experience_bottle",4,12],["ender_pearl",4,8],["gold_ingot",8,5],["iron_ingot",8,10],["copper_ingot",16,25],["raw_iron",16,40],["raw_gold",8,28],["amethyst_shard",8,22],["lapis_lazuli",16,32],["redstone",16,32],["quartz",16,28],["glowstone",8,30],["shroomlight",4,18],["crying_obsidian",4,10],["oak_log",64,50],["spruce_log",32,48],["birch_log",32,48],["jungle_log",32,46],["acacia_log",32,46],["dark_oak_log",32,46],["mangrove_log",32,44],["cherry_log",32,44],["bamboo",32,55],["cobblestone",64,50],["stone",48,52],["deepslate",48,48],["cobbled_deepslate",64,50],["sand",64,70],["gravel",64,65],["clay_ball",32,60],["brick",32,48],["glass",32,58],["glass_pane",32,55],["lfg_ff:clear_glass",64,25],["pearlescent_froglight",8,25],["verdant_froglight",8,25],["ochre_froglight",8,25],["lantern",4,50],["soul_lantern",4,42],["torch",16,100],["soul_torch",16,55],["campfire",1,35],["chest",2,40],["crafting_table",1,45],["furnace",1,40],["ladder",16,50],["bread",8,100],["apple",8,100],["baked_potato",16,88],["cooked_beef",16,78],["cooked_porkchop",8,78],["cooked_chicken",8,80],["cooked_mutton",8,75],["pumpkin_pie",8,85],["cookie",16,92],["melon_slice",16,95],["carrot",16,98],["beetroot",16,95],["sweet_berries",16,92],["glow_berries",16,58],["honey_bottle",4,38],["sugar_cane",16,80],["white_wool",8,100],["string",16,68],["feather",16,72],["egg",16,85],["leather",8,52],["bone",16,58],["arrow",32,72],["flint",8,58],["slime_ball",8,32],["spider_eye",8,48],["coal",16,65],["charcoal",16,60],["book",4,52],["paper",32,68],["name_tag",1,10],["lead",4,35],["saddle",1,14],["bucket",1,25],["water_bucket",1,18],["shears",1,22],["fishing_rod",1,20],["flower_pot",4,58],["painting",1,48],["moss_block",16,45],["vine",16,52],["lily_pad",8,55],["nether_brick",32,38],["soul_sand",16,42],["magma_cream",4,25],["blaze_powder",2,15],["villager_spawn_egg",1,10],["iron_golem_spawn_egg",1,10],["cat_spawn_egg",1,25],["wolf_spawn_egg",1,25],["cow_spawn_egg",3,25],["sheep_spawn_egg",3,25],["chicken_spawn_egg",3,25],["pig_spawn_egg",3,25],["happy_ghast_spawn_egg",1,5],["horse_spawn_egg",1,25],["bee_spawn_egg",2,30],["fox_spawn_egg",2,28],["rabbit_spawn_egg",2,35]]
 
 # 邀请奖励
 INVITE_REWARD_ITEM_NAME=minecraft:diamond
 INVITE_REWARD_ITEM_COUNT=1
-INVITE_REWARD_MONEY=2000
+INVITE_REWARD_MONEY=0
 INVITE_REWARD_FREE_LAND_BLOCKS=10
 
 # 公共领地内白名单保护生物（逗号分隔，在此列表中的生物在公共领地内不可被伤害）
@@ -120,4 +115,44 @@ PUBLIC_LAND_INTERACT_BLOCK_BLACKLIST=minecraft:frame,minecraft:glow_frame,minecr
 # 默认头衔（逗号分隔，所有玩家拥有）
 DEFAULT_TITLE=见习冒险家
 # OP 专属头衔（仅一个，仅 OP 拥有；非 OP 进服时若正佩戴则自动解除）
-OP_TITLE=管理员
+OP_TITLE=监察使
+
+# 性能检测应急关服：为 True 时每 10 秒读取 Server.current_mspt，超过阈值则自动执行 stop 关服
+ENABLE_MSPT_EMERGENCY_SHUTDOWN=True
+# MSPT 上限（毫秒/刻），大于此值触发关服（默认 100）
+MSPT_EMERGENCY_SHUTDOWN_LIMIT=200
+
+# 天眼系统（Sky Eye）：玩家行为审计，日志目录 plugins/ARCCore/sky_eye/YYYYMMDD.txt（交互、放置、破坏、死亡、进出服、对实体交互等）
+ENABLE_SKY_EYE=True
+# 按自然日保留日志的最长天数，更早日期的 .txt 会被删除；0 表示不自动删除旧文件
+SKY_EYE_MAX_RETENTION_DAYS=7
+
+# =============================================================================
+# 跨服数据同步服务（v0.0.8.0）
+# 服主可选择以下两种模式之一：
+#   - 服务器端模式（开启后监听端口，接收其他服的同步请求）
+#   - 客户端模式（连接到服务器端，自动同步玩家数据）
+# 注意：两种模式互斥，不能同时开启
+# =============================================================================
+
+# ===== 服务器端模式配置 =====
+# ENABLE_SYNC_SERVER=True 时启用，监听端口接收其他服连接
+ENABLE_SYNC_SERVER=False
+# 服务器监听端口（服务器端与客户端的端口须保持一致）
+SYNC_SERVER_PORT=19999
+# 连接验证密钥（留空则不验证连接；填写后客户端须提供相同密钥）
+SYNC_SERVER_AUTH_KEY=
+
+# ===== 客户端模式配置 =====
+# ENABLE_SYNC_CLIENT=True 时启用，连接到服务器端
+ENABLE_SYNC_CLIENT=False
+# 服务器端 IP 地址
+SYNC_SERVER_IP=127.0.0.1
+# 服务器端端口（与服务器端 SYNC_SERVER_PORT 保持一致）
+SYNC_SERVER_PORT=19999
+# 本服唯一标识，用于服务器端识别（建议每个服填写不同值）
+SYNC_CLIENT_SERVER_ID=server_001
+# 本服显示名称（服务器端管理界面中显示）
+SYNC_CLIENT_SERVER_NAME=服务器01
+# 服务器端验证密钥（与服务器端 SYNC_SERVER_AUTH_KEY 保持一致，留空则不验证）
+SYNC_CLIENT_AUTH_KEY=

@@ -339,6 +339,27 @@ GUILD_UPGRADE_TO_MEDIUM_COST=10000
 GUILD_UPGRADE_TO_LARGE_COST=100000
 # 会长改名公会需支付的金钱（0 表示免费）
 GUILD_RENAME_COST=0
+
+# 跨服数据同步服务（v0.0.8.0）
+# 服主可选择以下两种模式之一：
+#   - 服务器端模式（开启后监听端口，接收其他服的同步请求）
+#   - 客户端模式（连接到服务器端，自动同步玩家数据）
+# 注意：两种模式互斥，不能同时开启
+
+# ===== 服务器端模式配置 =====
+# ENABLE_SYNC_SERVER=True 时启用，监听端口接收其他服连接
+ENABLE_SYNC_SERVER=False
+SYNC_SERVER_PORT=19999
+SYNC_SERVER_AUTH_KEY=                    # 留空则不验证连接；填写后客户端须提供相同密钥
+
+# ===== 客户端模式配置 =====
+# ENABLE_SYNC_CLIENT=True 时启用，连接到服务器端
+ENABLE_SYNC_CLIENT=False
+SYNC_SERVER_IP=127.0.0.1                # 服务器端 IP 地址
+SYNC_SERVER_PORT=19999                  # 服务器端端口（与服务器端 SYNC_SERVER_PORT 保持一致）
+SYNC_CLIENT_SERVER_ID=server_001        # 本服唯一标识，用于服务器端识别
+SYNC_CLIENT_SERVER_NAME=服务器01         # 本服显示名称
+SYNC_CLIENT_AUTH_KEY=                   # 服务器端验证密钥（与服务器端 SYNC_SERVER_AUTH_KEY 保持一致）
 ```
 
 ### broadcast.txt - 公告消息文件

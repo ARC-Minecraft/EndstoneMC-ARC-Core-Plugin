@@ -39,6 +39,7 @@ from endstone_arc_core.EntityDisplayNameManager import EntityDisplayNameManager
 from endstone_arc_core.KillRewardConfig import KillRewardConfig, normalize_entity_type_id
 from endstone_arc_core.arc_error_log import append_arc_error_log, format_context_lines
 from endstone_arc_core.sky_eye_log import append_sky_eye_record, prune_sky_eye_logs
+from endstone_arc_core.sync_server import SyncServer
 
 MAIN_PATH = 'plugins/ARCCore'
 # 天眼系统：玩家行为审计日志目录（按自然日 YYYYMMDD.txt）
@@ -167,6 +168,10 @@ class ARCCorePlugin(Plugin):
         )
         self.init_database()
         self._arc_error_log_path = str(Path(MAIN_PATH) / "error_log.txt")
+
+        # 跨服数据同步服务初始化
+        self.sync_server: Optional[SyncServer] = None
+        self._init_sync_service()
 
         # 首富头衔：缓存当前首富 xuid，避免每次都重复发放
         self.current_richest_xuid = None
@@ -462,9 +467,35 @@ class ARCCorePlugin(Plugin):
             except Exception:
                 pass
 
+    def _init_sync_service(self) -> None:
+        """初始化跨服数据同步服务（服务器端模式）"""
+        enable_sync_server = self.setting_manager.GetSetting('ENABLE_SYNC_SERVER')
+        if enable_sync_server and enable_sync_server.lower() == 'true':
+            sync_port = self.setting_manager.GetSetting('SYNC_SERVER_PORT')
+            sync_auth_key = self.setting_manager.GetSetting('SYNC_SERVER_AUTH_KEY') or ""
+            try:
+                sync_port = int(sync_port) if sync_port else 19999
+            except (ValueError, TypeError):
+                sync_port = 19999
+
+            self.sync_server = SyncServer(
+                database_manager=self.database_manager,
+                auth_key=sync_auth_key,
+                bind_port=sync_port,
+                logger=self.logger,
+            )
+            if self.sync_server.start():
+                self.logger.info(f"[ARC Core] Sync server started on port {sync_port}")
+            else:
+                self.logger.error("[ARC Core] Failed to start sync server")
+
     def on_disable(self) -> None:
         # 停止位置检测线程
         self.stop_position_thread()
+        # 停止跨服同步服务
+        if self.sync_server and self.sync_server.is_running():
+            self.sync_server.stop()
+            self.logger.info("[ARC Core] Sync server stopped.")
         self.logger.info(f"{ColorFormat.YELLOW}[ARC Core]Plugin disabled!")
 
     def _arc_persistent_error(
