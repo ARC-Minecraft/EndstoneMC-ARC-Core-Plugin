@@ -1340,43 +1340,44 @@ class ARCCorePlugin(Plugin):
             if not hasattr(event, 'block_list') or event.block_list is None:
                 # block_list 为 None 或不存在时，直接返回（让爆炸正常处理）
                 return
-            
+
             # 安全检查：block_list 必须是可迭代的对象
             block_list = event.block_list
             if not isinstance(block_list, (list, tuple, set)):
                 self.logger.warning("[ARC Core] on_actor_explode: block_list is not iterable, skipping")
                 return
-            
-            # 检查爆炸影响的方块是否在领地内
-            filtered_blocks = []
+
+            keep_coords = []  # 需保留（允许被炸）的方块坐标 (x, y, z)
             for block in block_list:
                 try:
-                    # 安全检查：确保 block 和 block.location 存在
-                    if not hasattr(block, 'location') or block.location is None:
-                        continue
-                    block_land_id = self.get_land_at_pos(dimension, math.floor(block.location.x), math.floor(block.location.z))
+                    # Block.x/y/z 是 int，直接读取坐标（避免构造 Location）
+                    bx, by, bz = block.x, block.y, block.z
+                except (AttributeError, TypeError, ValueError):
+                    # 无法读取坐标的方块按保护处理（不保留 → 不被炸）
+                    continue
+                try:
+                    block_land_id = self.get_land_at_pos(dimension, bx, bz)
                     if block_land_id is not None:
                         block_land_info = self.get_land_info(block_land_id)
                         if block_land_info and block_land_info.get('allow_explosion', False):
-                            # 如果该领地允许爆炸，保留这个方块在爆炸列表中
-                            filtered_blocks.append(block)
-                        # 如果不允许爆炸，则不添加到列表中（移除）
+                            keep_coords.append((bx, by, bz))  # 领地允许爆炸 → 保留
+                        # 否则：领地禁止爆炸 → 不保留（spared）
                     else:
-                        # 不在领地内的方块保持原样
-                        filtered_blocks.append(block)
+                        keep_coords.append((bx, by, bz))  # 荒野 → 保留
                 except (AttributeError, TypeError, ValueError):
-                    # 跳过无效的方块
+                    # 查询领地出错按保护处理（不保留 → 不被炸）
                     continue
-            
-            # 安全检查：只有在 filtered_blocks 有内容时才尝试更新
-            # 注意：直接赋值 event.block_list 可能在某些版本导致 SIGSEGV
-            # 因此我们只在方块数量减少时才更新（移除无效方块）
-            if len(filtered_blocks) < len(block_list):
+
+            # 仅在确实移除了方块时才写回（无变化时跳过 setter）
+            if len(keep_coords) < len(block_list):
                 try:
-                    event.block_list = filtered_blocks
+                    dim_obj = explosion_location.dimension
+                    fresh_blocks = [dim_obj.get_block_at(x, y, z) for (x, y, z) in keep_coords]
+                    event.block_list = fresh_blocks
                 except Exception as e:
-                    # 如果赋值失败，记录警告但不影响事件处理
-                    self.logger.warning(f"[ARC Core] Failed to update block_list: {str(e)}")
+                    # 写回失败则回退为整体取消，确保领地不被破坏
+                    self.logger.warning(f"[ARC Core] Failed to rebuild block_list: {str(e)}")
+                    event.is_cancelled = True
             
         except Exception as e:
             self.logger.error(f"Handle actor explode event error: {str(e)}")
