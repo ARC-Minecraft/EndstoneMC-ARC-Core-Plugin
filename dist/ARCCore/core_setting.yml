@@ -122,13 +122,16 @@ ENABLE_MSPT_EMERGENCY_SHUTDOWN=True
 # MSPT 上限（毫秒/刻），大于此值触发关服（默认 100）
 MSPT_EMERGENCY_SHUTDOWN_LIMIT=200
 
+# 全局爆炸拦截（默认开启）：True=取消一切爆炸事件；False=仅按领地 allow_explosion 保护
+BLOCK_ALL_EXPLOSIONS=True
+
 # 天眼系统（Sky Eye）：玩家行为审计，日志目录 plugins/ARCCore/sky_eye/YYYYMMDD.txt（交互、放置、破坏、死亡、进出服、对实体交互等）
 ENABLE_SKY_EYE=True
 # 按自然日保留日志的最长天数，更早日期的 .txt 会被删除；0 表示不自动删除旧文件
 SKY_EYE_MAX_RETENTION_DAYS=7
 
 # =============================================================================
-# 跨服数据同步服务（v0.0.8.0）
+# 跨服数据同步服务（v0.0.8）
 # 服主可选择以下两种模式之一：
 #   - 服务器端模式（开启后监听端口，接收其他服的同步请求）
 #   - 客户端模式（连接到服务器端，自动同步玩家数据）
