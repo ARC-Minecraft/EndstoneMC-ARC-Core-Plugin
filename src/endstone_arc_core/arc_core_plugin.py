@@ -40,6 +40,8 @@ from endstone_arc_core.KillRewardConfig import KillRewardConfig, normalize_entit
 from endstone_arc_core.arc_error_log import append_arc_error_log, format_context_lines
 from endstone_arc_core.sky_eye_log import append_sky_eye_record, prune_sky_eye_logs
 from endstone_arc_core.sync_server import SyncServer
+from endstone_arc_core.sync_client import SyncClient
+from endstone_arc_core.sync_config import resolve_sync_consumer_mode
 
 MAIN_PATH = 'plugins/ARCCore'
 # 天眼系统：玩家行为审计日志目录（按自然日 YYYYMMDD.txt）
@@ -131,22 +133,24 @@ class ARCCorePlugin(Plugin):
         self.language_manager = LanguageManager(default_language_dode if default_language_dode is not None else 'ZH-CN')
         self.database_manager = DatabaseManager(Path(MAIN_PATH) / self.setting_manager.GetSetting('DATABASE_PATH'))
 
-        # 跨服共享数据库路由：配置非空时，对应表的读写自动路由到指定数据库
-        player_db_path = self.setting_manager.GetSetting('PLAYER_DATABASE_PATH')
-        economy_db_path = self.setting_manager.GetSetting('PLAYER_ECONOMY_DATABASE_PATH')
-        title_db_path = self.setting_manager.GetSetting('PLAYER_TITLE_DATABASE_PATH')
-        if player_db_path:
-            self.database_manager.add_route('player_basic_info', player_db_path)
-        if economy_db_path:
-            self.database_manager.add_route('player_economy', economy_db_path)
-        if title_db_path:
-            for t in ('title_definitions', 'player_title_unlock_time', 'player_title_equipped'):
-                self.database_manager.add_route(t, title_db_path)
+        # 跨服数据消费方式：远程客户端 与 共享文件路径 互斥
+        self._sync_consumer_mode, self._sync_mode_conflict = resolve_sync_consumer_mode(self.setting_manager)
+        if self._sync_consumer_mode == "file":
+            player_db_path = self.setting_manager.GetSetting('PLAYER_DATABASE_PATH')
+            economy_db_path = self.setting_manager.GetSetting('PLAYER_ECONOMY_DATABASE_PATH')
+            title_db_path = self.setting_manager.GetSetting('PLAYER_TITLE_DATABASE_PATH')
+            if player_db_path:
+                self.database_manager.add_route('player_basic_info', player_db_path)
+            if economy_db_path:
+                self.database_manager.add_route('player_economy', economy_db_path)
+            if title_db_path:
+                for t in ('title_definitions', 'player_title_unlock_time', 'player_title_equipped'):
+                    self.database_manager.add_route(t, title_db_path)
 
-        guild_db_path = self.setting_manager.GetSetting('GUILD_DATABASE_PATH')
-        if guild_db_path:
-            for t in ('guilds', 'guild_members', 'guild_invites'):
-                self.database_manager.add_route(t, guild_db_path)
+            guild_db_path = self.setting_manager.GetSetting('GUILD_DATABASE_PATH')
+            if guild_db_path:
+                for t in ('guilds', 'guild_members', 'guild_invites'):
+                    self.database_manager.add_route(t, guild_db_path)
 
         self.economy = Economy(self.database_manager, self.setting_manager)
         self.teleport_system = TeleportSystem(self.database_manager, self.setting_manager)
@@ -169,9 +173,9 @@ class ARCCorePlugin(Plugin):
         self.init_database()
         self._arc_error_log_path = str(Path(MAIN_PATH) / "error_log.txt")
 
-        # 跨服数据同步服务初始化
+        # 跨服数据同步服务（在 on_enable 中启动，确保 logger 可用）
         self.sync_server: Optional[SyncServer] = None
-        self._init_sync_service()
+        self.sync_client: Optional[SyncClient] = None
 
         # 首富头衔：缓存当前首富 xuid，避免每次都重复发放
         self.current_richest_xuid = None
@@ -399,6 +403,12 @@ class ARCCorePlugin(Plugin):
     def on_enable(self) -> None:
         self.register_events(self)
         self.logger.info(f"{ColorFormat.YELLOW}[ARC Core]Plugin enabled!")
+        if self._sync_mode_conflict:
+            self.logger.warning(
+                "[ARC Core] ENABLE_SYNC_CLIENT 与共享数据库路径同时配置，"
+                "已忽略文件路径方式，仅使用远程客户端同步"
+            )
+        self._init_sync_service()
         self.economy.set_logger(self.logger)
 
         def _on_arc_persistent_error(error_code: str, detail: str, exc):
@@ -468,7 +478,7 @@ class ARCCorePlugin(Plugin):
                 pass
 
     def _init_sync_service(self) -> None:
-        """初始化跨服数据同步服务（服务器端模式）"""
+        """初始化跨服数据同步：同步中心（可选）与远程客户端（与文件路径互斥）。"""
         enable_sync_server = self.setting_manager.GetSetting('ENABLE_SYNC_SERVER')
         if enable_sync_server and enable_sync_server.lower() == 'true':
             sync_port = self.setting_manager.GetSetting('SYNC_SERVER_PORT')
@@ -489,10 +499,24 @@ class ARCCorePlugin(Plugin):
             else:
                 self.logger.error("[ARC Core] Failed to start sync server")
 
+        if self._sync_consumer_mode == "client":
+            self.sync_client = SyncClient(
+                database_manager=self.database_manager,
+                setting_manager=self.setting_manager,
+                logger=self.logger,
+            )
+            if self.sync_client.start():
+                self.logger.info("[ARC Core] Sync client connected to remote sync server")
+            else:
+                self.logger.error("[ARC Core] Failed to start sync client")
+
     def on_disable(self) -> None:
         # 停止位置检测线程
         self.stop_position_thread()
         # 停止跨服同步服务
+        if self.sync_client:
+            self.sync_client.stop()
+            self.logger.info("[ARC Core] Sync client stopped.")
         if self.sync_server and self.sync_server.is_running():
             self.sync_server.stop()
             self.logger.info("[ARC Core] Sync server stopped.")

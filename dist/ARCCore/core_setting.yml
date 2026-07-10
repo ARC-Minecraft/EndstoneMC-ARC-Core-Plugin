@@ -6,32 +6,37 @@
 DEFAULT_LANGUAGE_CODE=ZH-CN
 DATABASE_PATH=ARCCore.db
 
-# 跨服共享数据库路径（为空时使用默认 DATABASE_PATH；指定路径时从该数据库读取对应数据，实现多服共享）
+# =============================================================================
+# 跨服数据同步（v0.0.8）
+# 游戏服在以下两种方式中择一（互斥，不可同时启用）：
+#   A. 远程同步 — ENABLE_SYNC_CLIENT=True，作为客户端连接同步中心
+#   B. 文件同步 — ENABLE_SYNC_CLIENT=False，填写下方共享 SQLite 路径
+# 另：某一实例可单独作为「同步中心」开启 ENABLE_SYNC_SERVER 供其他服连接
+# =============================================================================
+
+# ----- 同步中心（可选；通常仅在一台机器或主库服开启） -----
+ENABLE_SYNC_SERVER=False
+SYNC_SERVER_PORT=19999
+SYNC_SERVER_AUTH_KEY=
+
+# ----- 方式 A：远程客户端同步（与下方文件路径互斥） -----
+ENABLE_SYNC_CLIENT=False
+SYNC_SERVER_IP=127.0.0.1
+SYNC_CLIENT_PORT=19999
+SYNC_CLIENT_SERVER_ID=server_001
+SYNC_CLIENT_SERVER_NAME=服务器01
+SYNC_CLIENT_AUTH_KEY=
+# 分项同步开关（仅远程客户端模式生效；关闭的类别不会拉取/接收推送）
+SYNC_CLIENT_SYNC_PLAYER=True
+SYNC_CLIENT_SYNC_ECONOMY=True
+SYNC_CLIENT_SYNC_TITLE=True
+SYNC_CLIENT_SYNC_GUILD=True
+
+# ----- 方式 B：共享数据库文件路径（与远程客户端互斥；路径留空则使用 DATABASE_PATH 主库） -----
 PLAYER_DATABASE_PATH=
 PLAYER_ECONOMY_DATABASE_PATH=
 PLAYER_TITLE_DATABASE_PATH=
 GUILD_DATABASE_PATH=
-
-# 公会
-# 创建公会费用（默认十万；本示例留空表示沿用插件内置默认，请按实际部署填写）
-GUILD_CREATE_COST=
-# 公会规模：每个公会有 small / medium / large 三档规模等级，新建公会默认 small
-# 下列三个值为各等级的成员人数上限（含会长）；OP 可在「OP 面板 → 公会管理」中直接升级/降级公会规模（无消耗）
-GUILD_SIZE_SMALL_MAX=10
-GUILD_SIZE_MEDIUM_MAX=20
-GUILD_SIZE_LARGE_MAX=40
-# 公会升级规模消耗的「公会公共贡献点」（玩家通过完成小游戏等方式获得，并由 api_add_guild_contribution 累加）
-# 会长 / 管理员可在「我的公会 → 升级公会规模」中花费公共贡献点升级；下列两个值为升级到对应等级的消耗
-GUILD_UPGRADE_TO_MEDIUM_COST=10000
-GUILD_UPGRADE_TO_LARGE_COST=100000
-# 会长在「我的公会 → 公会改名」中改名公会需支付的金钱（0 表示免费）
-GUILD_RENAME_COST=0
-# 成员在「我的公会 → 公会领地」传送到公会领地时消耗的个人公会贡献点（0 表示免费；不从存款扣费）
-GUILD_LAND_TELEPORT_CONTRIB_COST=10
-# 击杀生物 → 公会贡献点比例（搭配 kill_reward.txt 使用）
-# 计算公式：贡献点 = floor(击杀金钱奖励 * 比例)；例如击杀奖励 10 元，比例 0.5，则获得 5 公会贡献点
-# 仅当玩家已加入公会时生效；未加入公会则静默跳过；设为 0 关闭该功能
-KILL_REWARD_GUILD_CONTRIB_RATIO=0.5
 
 # 强制登录（为 True 时，玩家进入游戏强制打开 /arc 菜单登录或注册；关闭登录/注册界面且未正确输入密码时会再次强制打开）
 FORCE_LOGIN=True
@@ -57,6 +62,10 @@ DEFAULT_FREE_LAND_BLOCKS=1500
 LAND_ONLY_PLACE_BLOCKS=minecraft:beacon,minecraft:spawner,lfg_ff:structure_placer_block,minecraft:wither_skeleton_skull
 # 全局禁用方块（逗号分隔方块 ID）；列表中的方块对非 OP 玩家禁止放置和交互，OP 直接跳过检查。留空表示不限制
 DISABLED_BLOCKS=minecraft:hopper,minecraft:observer
+# 公共领地内白名单保护生物（逗号分隔，在此列表中的生物在公共领地内不可被伤害）
+PUBLIC_LAND_PROTECTED_ENTITIES=minecraft:villager_v2,minecraft:iron_golem,minecraft:snow_golem
+# 公共领地禁止交互的方块（开启了允许方块交互前提下）
+PUBLIC_LAND_INTERACT_BLOCK_BLACKLIST=minecraft:frame,minecraft:glow_frame,minecraft:oak_shelf,minecraft:spruce_shelf,minecraft:birch_shelf,minecraft:jungle_shelf,minecraft:acacia_shelf,minecraft:dark_oak_shelf,minecraft:mangrove_shelf,minecraft:cherry_shelf,minecraft:pale_oak_shelf,minecraft:bamboo_shelf,minecraft:crimson_shelf,minecraft:warped_shelf
 
 # 广播间隔
 BROADCAST_INTERVAL=120
@@ -105,12 +114,6 @@ INVITE_REWARD_ITEM_COUNT=1
 INVITE_REWARD_MONEY=0
 INVITE_REWARD_FREE_LAND_BLOCKS=10
 
-# 公共领地内白名单保护生物（逗号分隔，在此列表中的生物在公共领地内不可被伤害）
-PUBLIC_LAND_PROTECTED_ENTITIES=minecraft:villager_v2,minecraft:iron_golem,minecraft:snow_golem
-
-# 领地未开放「展示框」时禁止交互/破坏的方块（逗号分隔）；留空则使用内置默认（展示框、发光展示框及各材质展示架）
-PUBLIC_LAND_INTERACT_BLOCK_BLACKLIST=minecraft:frame,minecraft:glow_frame,minecraft:oak_shelf,minecraft:spruce_shelf,minecraft:birch_shelf,minecraft:jungle_shelf,minecraft:acacia_shelf,minecraft:dark_oak_shelf,minecraft:mangrove_shelf,minecraft:cherry_shelf,minecraft:pale_oak_shelf,minecraft:bamboo_shelf,minecraft:crimson_shelf,minecraft:warped_shelf
-
 # 头衔系统（聊天前显示佩戴的头衔，如 [管理员]玩家名: 消息）
 # 默认头衔（逗号分隔，所有玩家拥有）
 DEFAULT_TITLE=见习冒险家
@@ -130,32 +133,23 @@ ENABLE_SKY_EYE=True
 # 按自然日保留日志的最长天数，更早日期的 .txt 会被删除；0 表示不自动删除旧文件
 SKY_EYE_MAX_RETENTION_DAYS=7
 
-# =============================================================================
-# 跨服数据同步服务（v0.0.8）
-# 服主可选择以下两种模式之一：
-#   - 服务器端模式（开启后监听端口，接收其他服的同步请求）
-#   - 客户端模式（连接到服务器端，自动同步玩家数据）
-# 注意：两种模式互斥，不能同时开启
-# =============================================================================
-
-# ===== 服务器端模式配置 =====
-# ENABLE_SYNC_SERVER=True 时启用，监听端口接收其他服连接
-ENABLE_SYNC_SERVER=False
-# 服务器监听端口（服务器端与客户端的端口须保持一致）
-SYNC_SERVER_PORT=19999
-# 连接验证密钥（留空则不验证连接；填写后客户端须提供相同密钥）
-SYNC_SERVER_AUTH_KEY=
-
-# ===== 客户端模式配置 =====
-# ENABLE_SYNC_CLIENT=True 时启用，连接到服务器端
-ENABLE_SYNC_CLIENT=False
-# 服务器端 IP 地址
-SYNC_SERVER_IP=127.0.0.1
-# 服务器端端口（与服务器端 SYNC_SERVER_PORT 保持一致）
-SYNC_SERVER_PORT=19999
-# 本服唯一标识，用于服务器端识别（建议每个服填写不同值）
-SYNC_CLIENT_SERVER_ID=server_001
-# 本服显示名称（服务器端管理界面中显示）
-SYNC_CLIENT_SERVER_NAME=服务器01
-# 服务器端验证密钥（与服务器端 SYNC_SERVER_AUTH_KEY 保持一致，留空则不验证）
-SYNC_CLIENT_AUTH_KEY=
+# 公会
+# 创建公会费用（默认十万；本示例留空表示沿用插件内置默认，请按实际部署填写）
+GUILD_CREATE_COST=
+# 公会规模：每个公会有 small / medium / large 三档规模等级，新建公会默认 small
+# 下列三个值为各等级的成员人数上限（含会长）；OP 可在「OP 面板 → 公会管理」中直接升级/降级公会规模（无消耗）
+GUILD_SIZE_SMALL_MAX=10
+GUILD_SIZE_MEDIUM_MAX=20
+GUILD_SIZE_LARGE_MAX=40
+# 公会升级规模消耗的「公会公共贡献点」（玩家通过完成小游戏等方式获得，并由 api_add_guild_contribution 累加）
+# 会长 / 管理员可在「我的公会 → 升级公会规模」中花费公共贡献点升级；下列两个值为升级到对应等级的消耗
+GUILD_UPGRADE_TO_MEDIUM_COST=10000
+GUILD_UPGRADE_TO_LARGE_COST=100000
+# 会长在「我的公会 → 公会改名」中改名公会需支付的金钱（0 表示免费）
+GUILD_RENAME_COST=0
+# 成员在「我的公会 → 公会领地」传送到公会领地时消耗的个人公会贡献点（0 表示免费；不从存款扣费）
+GUILD_LAND_TELEPORT_CONTRIB_COST=10
+# 击杀生物 → 公会贡献点比例（搭配 kill_reward.txt 使用）
+# 计算公式：贡献点 = floor(击杀金钱奖励 * 比例)；例如击杀奖励 10 元，比例 0.5，则获得 5 公会贡献点
+# 仅当玩家已加入公会时生效；未加入公会则静默跳过；设为 0 关闭该功能
+KILL_REWARD_GUILD_CONTRIB_RATIO=0.5

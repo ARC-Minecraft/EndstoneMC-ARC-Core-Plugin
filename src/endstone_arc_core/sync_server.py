@@ -35,6 +35,7 @@ class ConnectedClient:
     server_name: str = ""
     authenticated: bool = False
     last_heartbeat: float = field(default_factory=time.time)
+    sync_tables: Set[str] = field(default_factory=set)
     
     def is_alive(self) -> bool:
         """检查连接是否存活（心跳超时 60 秒）"""
@@ -271,6 +272,12 @@ class SyncServer:
         client.server_id = server_id
         client.server_name = server_name
         client.authenticated = True
+
+        requested_tables = data.get('sync_tables')
+        if isinstance(requested_tables, list) and requested_tables:
+            client.sync_tables = {str(t) for t in requested_tables if str(t) in self._sync_tables}
+        else:
+            client.sync_tables = set(self._sync_tables)
         
         with self._clients_lock:
             self._clients.add(client)
@@ -460,12 +467,15 @@ class SyncServer:
 
     def _broadcast_push(self, table: SyncTable, operation: str, data: Dict, exclude: Optional[ConnectedClient] = None):
         """广播推送通知给所有已连接的客户端"""
+        table_name = ENUM_TO_TABLE.get(table)
         msg = build_push_notify(table, operation, data)
         disconnected = []
         
         with self._clients_lock:
             for client in self._clients:
                 if client is exclude:
+                    continue
+                if table_name and client.sync_tables and table_name not in client.sync_tables:
                     continue
                 if not client.is_alive():
                     disconnected.append(client)

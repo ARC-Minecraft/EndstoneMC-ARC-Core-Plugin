@@ -95,13 +95,21 @@ def decode_message(raw: bytes) -> tuple[SyncMessageType, Dict[str, Any]]:
     return msg_type, data
 
 
-def build_auth_request(server_id: str, server_name: str, auth_key: str) -> bytes:
+def build_auth_request(
+    server_id: str,
+    server_name: str,
+    auth_key: str,
+    sync_tables: Optional[List[str]] = None,
+) -> bytes:
     """构建认证请求"""
-    return encode_message(SyncMessageType.AUTH_REQUEST, {
+    payload = {
         'server_id': server_id,
         'server_name': server_name,
         'auth_key': auth_key,
-    })
+    }
+    if sync_tables is not None:
+        payload['sync_tables'] = sync_tables
+    return encode_message(SyncMessageType.AUTH_REQUEST, payload)
 
 
 def build_auth_response(success: bool, message: str = "") -> bytes:
