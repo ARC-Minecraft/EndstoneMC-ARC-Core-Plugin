@@ -164,3 +164,6 @@ wheelhouse/
 # IDE / editor local config
 .cursor/
 .joycode/
+
+# Local temp files
+temp/
