@@ -367,11 +367,11 @@ class TeleportSystem:
         self.server.dispatch_command(self.server.command_sender, cmd)
 
     def get_random_teleport_position(self) -> Tuple[int, int, int]:
-        angle = random.uniform(0, 2 * math.pi)
+        angle = random.uniform(0, 2 * math.pi)  # nosec B311 — 游戏内随机传送，非加密用途
         radius = getattr(self, "random_teleport_radius", 5000)
         center_x = getattr(self, "random_teleport_center_x", 0)
         center_z = getattr(self, "random_teleport_center_z", 0)
-        distance = random.uniform(0, radius)
+        distance = random.uniform(0, radius)  # nosec B311
         x = center_x + int(distance * math.cos(angle))
         z = center_z + int(distance * math.sin(angle))
         return (x, 256, z)

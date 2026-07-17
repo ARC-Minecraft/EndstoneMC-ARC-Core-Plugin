@@ -56,6 +56,21 @@ def parse_insert_columns_and_values(
     return dict(zip(cols, params))
 
 
+def select_all_sync_table(db, table: str) -> List[Dict[str, Any]]:
+    """全量 SELECT *；仅允许 SYNC_TABLE_PRIMARY_KEYS 白名单表。"""
+    table = table.lower()
+    if table not in SYNC_TABLE_PRIMARY_KEYS or not _IDENT_RE.fullmatch(table):
+        return []
+    return db.query_all("SELECT * FROM " + table, ()) or []
+
+
+def query_sync_table(
+    db, table: str, where: str, params: Sequence[Any]
+) -> List[Dict[str, Any]]:
+    """带 WHERE 的 SELECT *；表名白名单 + 值参数化。"""
+    return _select_rows(db, table, where, params)
+
+
 def _select_rows(db, table: str, where: str, params: Sequence[Any]) -> List[Dict[str, Any]]:
     """仅允许同步表白名单内的表名；值一律参数化。"""
     if (

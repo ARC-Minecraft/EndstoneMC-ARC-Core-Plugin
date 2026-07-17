@@ -41,13 +41,13 @@ class TitleSystem:
         """创建头衔相关表"""
         try:
             self.database_manager.execute(
-                "CREATE TABLE IF NOT EXISTS " + self._table_def + " (title TEXT PRIMARY KEY, rarity TEXT, description TEXT, reward_money REAL DEFAULT 0, reward_items TEXT DEFAULT '[]')"
+                "CREATE TABLE IF NOT EXISTS title_definitions (title TEXT PRIMARY KEY, rarity TEXT, description TEXT, reward_money REAL DEFAULT 0, reward_items TEXT DEFAULT '[]')"
             )
             self.database_manager.execute(
-                "CREATE TABLE IF NOT EXISTS " + self._table_unlock_time + " (xuid TEXT NOT NULL, title TEXT NOT NULL, unlocked_at TEXT, UNIQUE(xuid, title))"
+                "CREATE TABLE IF NOT EXISTS player_title_unlock_time (xuid TEXT NOT NULL, title TEXT NOT NULL, unlocked_at TEXT, UNIQUE(xuid, title))"
             )
             self.database_manager.execute(
-                "CREATE TABLE IF NOT EXISTS " + self._table_equipped + " (xuid TEXT PRIMARY KEY, title TEXT)"
+                "CREATE TABLE IF NOT EXISTS player_title_equipped (xuid TEXT PRIMARY KEY, title TEXT)"
             )
             self._seed_default_title_definitions()
             return True
@@ -71,7 +71,7 @@ class TitleSystem:
             reward_items = []
         try:
             self.database_manager.execute(
-                "INSERT OR IGNORE INTO " + self._table_def + " (title, rarity, description, reward_money, reward_items) VALUES (?, ?, ?, ?, ?)",
+                "INSERT OR IGNORE INTO title_definitions (title, rarity, description, reward_money, reward_items) VALUES (?, ?, ?, ?, ?)",
                 (title, rarity, description, reward_money, json.dumps(reward_items, ensure_ascii=False))
             )
             return True
@@ -81,7 +81,7 @@ class TitleSystem:
     def get_title_definition(self, title: str) -> Optional[Dict[str, Any]]:
         """获取头衔定义：rarity, description, reward_money, reward_items。"""
         row = self.database_manager.query_one(
-            "SELECT title, rarity, description, reward_money, reward_items FROM " + self._table_def + " WHERE title = ?",
+            "SELECT title, rarity, description, reward_money, reward_items FROM title_definitions WHERE title = ?",
             (title.strip(),)
         )
         if not row:
@@ -90,8 +90,8 @@ class TitleSystem:
         if row.get("reward_items"):
             try:
                 reward_items = json.loads(row["reward_items"])
-            except Exception:
-                pass
+            except (TypeError, ValueError, json.JSONDecodeError):
+                reward_items = []
         return {
             "title": row["title"],
             "rarity": row.get("rarity") or DEFAULT_RARITY,
@@ -107,7 +107,7 @@ class TitleSystem:
         title = title.strip()
         try:
             self.database_manager.execute(
-                "INSERT OR REPLACE INTO " + self._table_def + " (title, rarity, description, reward_money, reward_items) VALUES (?, ?, ?, ?, ?)",
+                "INSERT OR REPLACE INTO title_definitions (title, rarity, description, reward_money, reward_items) VALUES (?, ?, ?, ?, ?)",
                 (title, rarity, description, reward_money, json.dumps(reward_items, ensure_ascii=False))
             )
             return True
@@ -145,19 +145,19 @@ class TitleSystem:
 
             # 同步玩家解锁记录
             self.database_manager.execute(
-                f"UPDATE {self._table_unlock_time} SET title = ? WHERE title = ?",
+                "UPDATE player_title_unlock_time SET title = ? WHERE title = ?",
                 (new_title, old_title),
             )
 
             # 同步玩家佩戴记录
             self.database_manager.execute(
-                f"UPDATE {self._table_equipped} SET title = ? WHERE title = ?",
+                "UPDATE player_title_equipped SET title = ? WHERE title = ?",
                 (new_title, old_title),
             )
 
             # 删除旧定义（玩家记录已迁移到新名字）
             self.database_manager.execute(
-                f"DELETE FROM {self._table_def} WHERE title = ?",
+                "DELETE FROM title_definitions WHERE title = ?",
                 (old_title,),
             )
 
@@ -169,7 +169,7 @@ class TitleSystem:
         """所有头衔名：配置默认 + OP 头衔 + 数据库中自定义头衔（去重）。"""
         default = self.get_default_titles()
         op_t = self.get_op_title()
-        rows = self.database_manager.query_all("SELECT title FROM " + self._table_def, ())
+        rows = self.database_manager.query_all("SELECT title FROM title_definitions", ())
         db_titles = [r["title"] for r in rows if r.get("title")]
         seen = set()
         result = []
@@ -237,7 +237,7 @@ class TitleSystem:
         """玩家当前拥有的全部头衔（来自 player_title_unlock_time）。"""
         xuid = self._xuid(player)
         rows = self.database_manager.query_all(
-            "SELECT title FROM " + self._table_unlock_time + " WHERE xuid = ? ORDER BY title",
+            "SELECT title FROM player_title_unlock_time WHERE xuid = ? ORDER BY title",
             (xuid,)
         )
         return [r["title"] for r in rows if r.get("title")]
@@ -245,7 +245,7 @@ class TitleSystem:
     def get_title_unlock_time(self, player: Player, title: str) -> Optional[str]:
         """玩家某头衔的解锁时间（ISO 字符串），未解锁返回 None。"""
         row = self.database_manager.query_one(
-            "SELECT unlocked_at FROM " + self._table_unlock_time + " WHERE xuid = ? AND title = ?",
+            "SELECT unlocked_at FROM player_title_unlock_time WHERE xuid = ? AND title = ?",
             (self._xuid(player), title.strip())
         )
         return row.get("unlocked_at") if row else None
@@ -253,7 +253,7 @@ class TitleSystem:
     def get_equipped_title(self, player: Player) -> Optional[str]:
         """当前佩戴的头衔，未佩戴返回 None。"""
         row = self.database_manager.query_one(
-            "SELECT title FROM " + self._table_equipped + " WHERE xuid = ?",
+            "SELECT title FROM player_title_equipped WHERE xuid = ?",
             (self._xuid(player),)
         )
         if not row or row.get("title") is None:
@@ -266,7 +266,7 @@ class TitleSystem:
         if not xs:
             return None
         row = self.database_manager.query_one(
-            "SELECT title FROM " + self._table_equipped + " WHERE xuid = ?",
+            "SELECT title FROM player_title_equipped WHERE xuid = ?",
             (xs,),
         )
         if not row or row.get("title") is None:
@@ -288,14 +288,14 @@ class TitleSystem:
         xuid = self._xuid(player)
         if title is None or title == "":
             return self.database_manager.execute(
-                "DELETE FROM " + self._table_equipped + " WHERE xuid = ?", (xuid,)
+                "DELETE FROM player_title_equipped WHERE xuid = ?", (xuid,)
             )
         unlocked = self.get_unlocked_titles(player)
         if title not in unlocked:
             return False
-        self.database_manager.execute("DELETE FROM " + self._table_equipped + " WHERE xuid = ?", (xuid,))
+        self.database_manager.execute("DELETE FROM player_title_equipped WHERE xuid = ?", (xuid,))
         return self.database_manager.execute(
-            "INSERT INTO " + self._table_equipped + " (xuid, title) VALUES (?, ?)", (xuid, title)
+            "INSERT INTO player_title_equipped (xuid, title) VALUES (?, ?)", (xuid, title)
         )
 
     def unlock_title(self, player: Player, title: str) -> Tuple[bool, bool]:
@@ -319,7 +319,7 @@ class TitleSystem:
                 return True, False
             ok = bool(
                 self.database_manager.execute(
-                    "INSERT INTO " + self._table_unlock_time + " (xuid, title, unlocked_at) VALUES (?, ?, ?)",
+                    "INSERT INTO player_title_unlock_time (xuid, title, unlocked_at) VALUES (?, ?, ?)",
                     (xuid, title, unlocked_at),
                 )
             )
@@ -338,7 +338,7 @@ class TitleSystem:
         if not xs or not tt:
             return False
         row = self.database_manager.query_one(
-            "SELECT 1 FROM " + self._table_unlock_time + " WHERE xuid = ? AND title = ?",
+            "SELECT 1 FROM player_title_unlock_time WHERE xuid = ? AND title = ?",
             (xs, tt),
         )
         return row is not None
@@ -353,17 +353,17 @@ class TitleSystem:
 
             # 若正在佩戴该头衔，先取消佩戴
             row = self.database_manager.query_one(
-                "SELECT title FROM " + self._table_equipped + " WHERE xuid = ?",
+                "SELECT title FROM player_title_equipped WHERE xuid = ?",
                 (xuid,),
             )
             if row and row.get("title") == title:
                 self.database_manager.execute(
-                    "DELETE FROM " + self._table_equipped + " WHERE xuid = ?",
+                    "DELETE FROM player_title_equipped WHERE xuid = ?",
                     (xuid,),
                 )
 
             self.database_manager.execute(
-                "DELETE FROM " + self._table_unlock_time + " WHERE xuid = ? AND title = ?",
+                "DELETE FROM player_title_unlock_time WHERE xuid = ? AND title = ?",
                 (xuid, title),
             )
             return True
@@ -390,7 +390,7 @@ class TitleSystem:
                 continue
             self.ensure_title_definition(t)
             self.database_manager.execute(
-                "INSERT OR IGNORE INTO " + self._table_unlock_time + " (xuid, title, unlocked_at) VALUES (?, ?, ?)",
+                "INSERT OR IGNORE INTO player_title_unlock_time (xuid, title, unlocked_at) VALUES (?, ?, ?)",
                 (xuid, t, now_iso)
             )
         if op_title and not getattr(player, "is_op", False):

@@ -2,6 +2,7 @@
 """天眼系统：按日期将玩家行为追加到 plugins/ARCCore/sky_eye/YYYYMMDD.txt，并可按保留天数滚动删除。"""
 import re
 import threading
+from contextlib import suppress
 from datetime import date, datetime, timedelta
 from pathlib import Path
 from typing import Optional
@@ -60,7 +61,7 @@ def append_sky_eye_record(
     )
     global _last_prune_calendar_date
     with _file_lock:
-        try:
+        with suppress(OSError):
             log_root.mkdir(parents=True, exist_ok=True)
             if _last_prune_calendar_date != today:
                 prune_sky_eye_logs(log_root, retention_days)
@@ -68,5 +69,3 @@ def append_sky_eye_record(
             log_path = log_root / f"{today.strftime('%Y%m%d')}.txt"
             with log_path.open("a", encoding="utf-8") as log_file:
                 log_file.write(line)
-        except Exception:
-            pass

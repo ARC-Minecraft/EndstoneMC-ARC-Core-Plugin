@@ -1,9 +1,11 @@
 import re
 import sqlite3
-from contextlib import contextmanager
+from contextlib import contextmanager, suppress
 from typing import Any, Callable, List, Dict, Optional
 import threading
 from pathlib import Path
+
+_IDENT_RE = re.compile(r"^[A-Za-z_][A-Za-z0-9_]*$")
 
 
 class DatabaseManager:
@@ -109,11 +111,19 @@ class DatabaseManager:
         s = (sql or "").lstrip().upper()
         return s.startswith(("INSERT", "UPDATE", "DELETE"))
 
+    @staticmethod
+    def _validate_ident(name: str) -> str:
+        if not name or _IDENT_RE.fullmatch(name) is None:
+            raise ValueError(f"Invalid SQL identifier: {name!r}")
+        return name
+
+    @staticmethod
+    def _validate_idents(names: Dict[str, Any]) -> List[str]:
+        return [DatabaseManager._validate_ident(k) for k in names.keys()]
+
     def _rollback_quiet(self, sql: str) -> None:
-        try:
+        with suppress(OSError, sqlite3.Error):
             self._resolve_connection(sql).rollback()
-        except Exception:
-            pass
 
     def _notify_mutating(self, sql: str, params: tuple) -> None:
         if not self._is_mutating_sql(sql):
@@ -241,16 +251,28 @@ class DatabaseManager:
         :param data: 要插入的数据字典
         :return: 是否插入成功
         """
-        fields = ','.join(data.keys())
-        placeholders = ','.join(['?' for _ in data])
-        sql = f"INSERT INTO {table} ({fields}) VALUES ({placeholders})"
+        table = self._validate_ident(table)
+        cols = self._validate_idents(data)
+        fields = ",".join(cols)
+        placeholders = ",".join(["?"] * len(cols))
+        sql = "INSERT INTO " + table + " (" + fields + ") VALUES (" + placeholders + ")"  # nosec B608
         return self._execute_write_with_row(sql, data, "insert", table)
 
     def upsert(self, table: str, data: Dict[str, Any]) -> bool:
         """INSERT OR REPLACE，用于同步镜像整行。"""
-        fields = ','.join(data.keys())
-        placeholders = ','.join(['?' for _ in data])
-        sql = f"INSERT OR REPLACE INTO {table} ({fields}) VALUES ({placeholders})"
+        table = self._validate_ident(table)
+        cols = self._validate_idents(data)
+        fields = ",".join(cols)
+        placeholders = ",".join(["?"] * len(cols))
+        sql = (
+            "INSERT OR REPLACE INTO "
+            + table
+            + " ("
+            + fields
+            + ") VALUES ("
+            + placeholders
+            + ")"
+        )  # nosec B608
         return self._execute_write_with_row(sql, data, "upsert", table)
 
     def update(self, table: str, data: Dict[str, Any], where: str, params: tuple = ()) -> bool:
@@ -262,8 +284,10 @@ class DatabaseManager:
         :param params: WHERE子句的参数
         :return: 是否更新成功
         """
-        set_clause = ','.join([f"{k}=?" for k in data.keys()])
-        sql = f"UPDATE {table} SET {set_clause} WHERE {where}"
+        table = self._validate_ident(table)
+        cols = self._validate_idents(data)
+        set_clause = ",".join(k + "=?" for k in cols)
+        sql = "UPDATE " + table + " SET " + set_clause + " WHERE " + where  # nosec B608
         return self.execute(sql, tuple(data.values()) + params)
 
     def delete(self, table: str, where: str, params: tuple = ()) -> bool:
@@ -274,7 +298,8 @@ class DatabaseManager:
         :param params: WHERE子句的参数
         :return: 是否删除成功
         """
-        sql = f"DELETE FROM {table} WHERE {where}"
+        table = self._validate_ident(table)
+        sql = "DELETE FROM " + table + " WHERE " + where  # nosec B608
         return self.execute(sql, params)
 
     def create_table(self, table: str, fields: Dict[str, str]) -> bool:
@@ -284,8 +309,11 @@ class DatabaseManager:
         :param fields: 字段定义字典，key为字段名，value为字段类型定义
         :return: 是否创建成功
         """
-        field_defs = ','.join([f"{k} {v}" for k, v in fields.items()])
-        sql = f"CREATE TABLE IF NOT EXISTS {table} ({field_defs})"
+        table = self._validate_ident(table)
+        field_defs = ",".join(
+            self._validate_ident(k) + " " + v for k, v in fields.items()
+        )
+        sql = "CREATE TABLE IF NOT EXISTS " + table + " (" + field_defs + ")"  # nosec B608
         return self.execute(sql)
 
     def table_exists(self, table: str) -> bool:

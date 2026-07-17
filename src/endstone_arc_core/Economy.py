@@ -24,8 +24,8 @@ class Economy:
         if self._persistent_error_cb:
             try:
                 self._persistent_error_cb(error_code, detail, exc)
-            except Exception:
-                pass
+            except Exception as cb_err:
+                self._log("warning", f"persistent error callback failed: {cb_err}")
 
     def set_logger(self, logger):
         """设置日志记录器（插件 on_enable 后调用）"""

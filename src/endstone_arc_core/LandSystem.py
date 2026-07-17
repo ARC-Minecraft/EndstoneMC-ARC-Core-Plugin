@@ -110,8 +110,8 @@ class LandSystem:
         if self._persistent_error_cb:
             try:
                 self._persistent_error_cb(error_code, detail, exc)
-            except Exception:
-                pass
+            except Exception as cb_err:
+                self._log("warning", f"persistent error callback failed: {cb_err}")
 
     def _load_config(self):
         self.land_min_distance = self._parse_int("MIN_LAND_DISTANCE", 0)
@@ -152,8 +152,10 @@ class LandSystem:
 
     def _column_exists(self, table: str, column: str) -> bool:
         """检查表中是否存在指定列"""
+        if table not in ("lands", "sub_lands"):
+            return False
         try:
-            columns_info = self.db.query_all(f"PRAGMA table_info({table})")
+            columns_info = self.db.query_all("PRAGMA table_info(" + table + ")")  # nosec B608
             return any(col["name"] == column for col in columns_info)
         except Exception:
             return False
@@ -167,22 +169,36 @@ class LandSystem:
                 table, "owner_xuid"
             ):
                 return
-            n0 = self.db.execute_and_get_rowcount(
-                f"UPDATE {table} SET owner_xuid = ? WHERE owner_xuid = ?",
-                (self.LAND_OWNER_PUBLIC, "0"),
-            )
-            like_p = f"{self.LAND_OWNER_PLAYER_PREFIX}%"
-            like_g = f"{self.LAND_OWNER_GUILD_PREFIX}%"
-            n1 = self.db.execute_and_get_rowcount(
-                f"UPDATE {table} SET owner_xuid = ? || owner_xuid "
-                f"WHERE owner_xuid != ? AND owner_xuid NOT LIKE ? AND owner_xuid NOT LIKE ?",
-                (
-                    self.LAND_OWNER_PLAYER_PREFIX,
-                    self.LAND_OWNER_PUBLIC,
-                    like_p,
-                    like_g,
-                ),
-            )
+            if table == "lands":
+                n0 = self.db.execute_and_get_rowcount(
+                    "UPDATE lands SET owner_xuid = ? WHERE owner_xuid = ?",
+                    (self.LAND_OWNER_PUBLIC, "0"),
+                )
+                n1 = self.db.execute_and_get_rowcount(
+                    "UPDATE lands SET owner_xuid = ? || owner_xuid "
+                    "WHERE owner_xuid != ? AND owner_xuid NOT LIKE ? AND owner_xuid NOT LIKE ?",
+                    (
+                        self.LAND_OWNER_PLAYER_PREFIX,
+                        self.LAND_OWNER_PUBLIC,
+                        f"{self.LAND_OWNER_PLAYER_PREFIX}%",
+                        f"{self.LAND_OWNER_GUILD_PREFIX}%",
+                    ),
+                )
+            else:
+                n0 = self.db.execute_and_get_rowcount(
+                    "UPDATE sub_lands SET owner_xuid = ? WHERE owner_xuid = ?",
+                    (self.LAND_OWNER_PUBLIC, "0"),
+                )
+                n1 = self.db.execute_and_get_rowcount(
+                    "UPDATE sub_lands SET owner_xuid = ? || owner_xuid "
+                    "WHERE owner_xuid != ? AND owner_xuid NOT LIKE ? AND owner_xuid NOT LIKE ?",
+                    (
+                        self.LAND_OWNER_PLAYER_PREFIX,
+                        self.LAND_OWNER_PUBLIC,
+                        f"{self.LAND_OWNER_PLAYER_PREFIX}%",
+                        f"{self.LAND_OWNER_GUILD_PREFIX}%",
+                    ),
+                )
             touched = 0
             for n in (n0, n1):
                 if isinstance(n, int) and n > 0:
@@ -314,19 +330,18 @@ class LandSystem:
 
     def _upgrade_land_table(self) -> bool:
         try:
-            def _add_col(col: str, definition: str):
+            upgrades = (
+                ("allow_explosion", "ALTER TABLE lands ADD COLUMN allow_explosion INTEGER DEFAULT 0"),
+                ("allow_public_interact", "ALTER TABLE lands ADD COLUMN allow_public_interact INTEGER DEFAULT 0"),
+                ("allow_actor_interaction", "ALTER TABLE lands ADD COLUMN allow_actor_interaction INTEGER DEFAULT 0"),
+                ("allow_actor_damage", "ALTER TABLE lands ADD COLUMN allow_actor_damage INTEGER DEFAULT 0"),
+                ("allow_frame", "ALTER TABLE lands ADD COLUMN allow_frame INTEGER DEFAULT 0"),
+            )
+            for col, sql in upgrades:
                 if not self._column_exists("lands", col):
-                    ok = self.db.execute(f"ALTER TABLE lands ADD COLUMN {col} {definition}")
+                    ok = self.db.execute(sql)
                     msg = f"added {col}" if ok else f"failed to add {col}"
                     print(f"[ARC Core]Upgraded land table: {msg}")
-                    return ok
-                return None
-
-            _add_col("allow_explosion", "INTEGER DEFAULT 0")
-            _add_col("allow_public_interact", "INTEGER DEFAULT 0")
-            _add_col("allow_actor_interaction", "INTEGER DEFAULT 0")
-            _add_col("allow_actor_damage", "INTEGER DEFAULT 0")
-            _add_col("allow_frame", "INTEGER DEFAULT 0")
 
             if not self._column_exists("lands", "owner_paid_money"):
                 ok = self.db.execute(
@@ -384,7 +399,14 @@ class LandSystem:
                 "SELECT name FROM sqlite_master WHERE type='table' AND name LIKE 'chunk_lands_%'"
             )
             for row in tables:
-                self.db.execute(f"DROP TABLE IF EXISTS {row['name']}")
+                name = row.get("name") if isinstance(row, dict) else None
+                if (
+                    not isinstance(name, str)
+                    or not name.startswith("chunk_lands_")
+                    or not all(c.isalnum() or c == "_" for c in name)
+                ):
+                    continue
+                self.db.execute("DROP TABLE IF EXISTS " + name)  # nosec B608
 
             lands = self.db.query_all(
                 "SELECT land_id, dimension, min_x, max_x, min_z, max_z FROM lands"
@@ -939,12 +961,28 @@ class LandSystem:
 
     # ─── 领地设置 toggle ─────────────────────────────────────────────────────
 
+    _LAND_FLAG_COLUMNS = frozenset(
+        {
+            "allow_explosion",
+            "allow_public_interact",
+            "allow_actor_interaction",
+            "allow_actor_damage",
+            "allow_frame",
+        }
+    )
+
     def _set_land_flag(self, land_id: int, col: str, value: bool) -> bool:
+        if col not in self._LAND_FLAG_COLUMNS:
+            return False
+        sql = {
+            "allow_explosion": "UPDATE lands SET allow_explosion = ? WHERE land_id = ?",
+            "allow_public_interact": "UPDATE lands SET allow_public_interact = ? WHERE land_id = ?",
+            "allow_actor_interaction": "UPDATE lands SET allow_actor_interaction = ? WHERE land_id = ?",
+            "allow_actor_damage": "UPDATE lands SET allow_actor_damage = ? WHERE land_id = ?",
+            "allow_frame": "UPDATE lands SET allow_frame = ? WHERE land_id = ?",
+        }[col]
         try:
-            return bool(self.db.execute(
-                f"UPDATE lands SET {col} = ? WHERE land_id = ?",
-                (1 if value else 0, land_id),
-            ))
+            return bool(self.db.execute(sql, (1 if value else 0, land_id)))
         except Exception as e:
             self._log("error", f"Set land flag {col} error: {str(e)}")
             return False

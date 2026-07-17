@@ -5,6 +5,7 @@ import socket
 import threading
 import time
 import uuid
+from contextlib import suppress
 from typing import Any, Callable, Dict, List, Optional, Set
 from dataclasses import dataclass, field
 
@@ -25,7 +26,7 @@ from endstone_arc_core.sync_protocol import (
     build_qq_chat_downstream,
     build_error_response,
 )
-from endstone_arc_core.sync_write import iter_mirror_write_actions
+from endstone_arc_core.sync_write import iter_mirror_write_actions, query_sync_table, select_all_sync_table
 
 
 @dataclass(eq=False)
@@ -55,7 +56,7 @@ class SyncServer:
         self,
         database_manager,
         auth_key: str = "",
-        bind_host: str = "0.0.0.0",
+        bind_host: str = "0.0.0.0",  # nosec B104 — 跨服同步中心需监听所有网卡
         bind_port: int = 19999,
         logger=None,
         on_event_forward: Optional[Callable[[Dict[str, Any]], None]] = None,
@@ -134,18 +135,13 @@ class SyncServer:
         # 关闭所有客户端连接
         with self._clients_lock:
             for client in self._clients:
-                try:
+                with suppress(OSError):
                     client.conn.close()
-                except Exception:
-                    pass
             self._clients.clear()
-        
-        # 关闭服务器socket
+
         if self._socket:
-            try:
+            with suppress(OSError):
                 self._socket.close()
-            except Exception:
-                pass
             self._socket = None
         
         if self._server_thread and self._server_thread.is_alive():
@@ -340,11 +336,7 @@ class SyncServer:
                 client.conn.sendall(build_query_response(False, [], "Table not allowed"))
                 return
             
-            sql = f"SELECT * FROM {table_name}"
-            if where:
-                sql += f" WHERE {where}"
-            
-            results = self.db.query_all(sql, tuple(params))
+            results = query_sync_table(self.db, table_name, where, tuple(params))
             client.conn.sendall(build_query_response(True, results))
         except Exception as e:
             client.conn.sendall(build_query_response(False, [], str(e)))
@@ -482,7 +474,7 @@ class SyncServer:
                     client.conn.sendall(build_full_sync_response(False, [], "Table not allowed"))
                     return
                 
-                rows = self.db.query_all(f"SELECT * FROM {table_name}")
+                rows = select_all_sync_table(self.db, table_name)
                 client.conn.sendall(build_full_sync_response(True, rows))
                 self._log("info", f"Full sync for {table_name}: {len(rows)} rows to {client.server_name}")
             except Exception as e:
@@ -501,8 +493,7 @@ class SyncServer:
                 client.conn.sendall(build_query_response(False, [], "Table not allowed"))
                 return
             
-            sql = f"SELECT * FROM {table_name} WHERE {where}"
-            results = self.db.query_all(sql, tuple(params))
+            results = query_sync_table(self.db, table_name, where, tuple(params))
             client.conn.sendall(build_query_response(True, results))
         except Exception as e:
             client.conn.sendall(build_query_response(False, [], str(e)))

@@ -3,6 +3,7 @@
 import socket
 import threading
 import time
+from contextlib import suppress
 from typing import Any, Dict, Optional, Set
 
 from endstone_arc_core.sync_config import get_client_sync_tables, get_qq_relay_mode
@@ -162,10 +163,8 @@ class SyncClient:
             sock = self._socket
             self._socket = None
         if sock:
-            try:
+            with suppress(OSError):
                 sock.close()
-            except Exception:
-                pass
 
     def _interruptible_sleep(self, seconds: int) -> None:
         end = time.time() + seconds
@@ -310,11 +309,8 @@ class SyncClient:
     def _upsert_row(self, table: str, row: Dict[str, Any]) -> bool:
         if not row:
             return False
-        cols = list(row.keys())
-        placeholders = ",".join(["?"] * len(cols))
-        sql = f"INSERT OR REPLACE INTO {table} ({','.join(cols)}) VALUES ({placeholders})"
         with self.db.suppress_write_notify():
-            return self.db.execute(sql, tuple(row.values()))
+            return self.db.upsert(table, row)
 
     def _apply_push_update(self, table_name: str, data: Dict[str, Any]) -> None:
         row_data = {k: v for k, v in data.items() if not k.startswith("_")}

@@ -157,7 +157,7 @@ class AchievementSystem:
     def ensure_tables(self) -> bool:
         try:
             self.database_manager.execute(
-                "CREATE TABLE IF NOT EXISTS " + self._table_stats + " ("
+                "CREATE TABLE IF NOT EXISTS player_achievement_stats ("
                 "xuid TEXT NOT NULL, "
                 "stat_key TEXT NOT NULL, "
                 "count INTEGER NOT NULL DEFAULT 0, "
@@ -165,7 +165,7 @@ class AchievementSystem:
                 ")"
             )
             self.database_manager.execute(
-                "CREATE TABLE IF NOT EXISTS " + self._table_condition + " ("
+                "CREATE TABLE IF NOT EXISTS achievement_conditions ("
                 "id INTEGER PRIMARY KEY AUTOINCREMENT, "
                 "unlock_title TEXT NOT NULL, "
                 "condition_type TEXT NOT NULL, "
@@ -367,7 +367,7 @@ class AchievementSystem:
 
             legacy_rows = self.database_manager.query_all(
                 "SELECT name, stat_key, required_count, unlock_title, enabled "
-                "FROM " + self._legacy_table_def,
+                "FROM achievement_definitions",
                 (),
             )
             if not legacy_rows:
@@ -426,8 +426,8 @@ class AchievementSystem:
                 )
 
             self._save_json_config({"version": 1, "achievements": achievement_list})
-        except Exception:
-            pass
+        except (OSError, TypeError, ValueError, KeyError):
+            return
 
     def _ensure_json_definition_file(self) -> None:
         config_data = self._load_json_config()
@@ -436,7 +436,7 @@ class AchievementSystem:
 
         condition_rows = self.database_manager.query_all(
             "SELECT id, unlock_title, condition_type, target_id, required_count "
-            "FROM " + self._table_condition + " ORDER BY id ASC",
+            "FROM achievement_conditions ORDER BY id ASC",
             (),
         )
         if not condition_rows:
@@ -549,7 +549,7 @@ class AchievementSystem:
 
     def _get_stat_count(self, xuid: str, stat_key: str) -> int:
         row = self.database_manager.query_one(
-            "SELECT count FROM " + self._table_stats + " WHERE xuid = ? AND stat_key = ?",
+            "SELECT count FROM player_achievement_stats WHERE xuid = ? AND stat_key = ?",
             (xuid, stat_key),
         )
         if not row:
@@ -561,11 +561,11 @@ class AchievementSystem:
         if delta <= 0:
             return self._get_stat_count(xuid, stat_key)
         self.database_manager.execute(
-            "INSERT OR IGNORE INTO " + self._table_stats + " (xuid, stat_key, count) VALUES (?, ?, 0)",
+            "INSERT OR IGNORE INTO player_achievement_stats (xuid, stat_key, count) VALUES (?, ?, 0)",
             (xuid, stat_key),
         )
         self.database_manager.execute(
-            "UPDATE " + self._table_stats + " SET count = count + ? WHERE xuid = ? AND stat_key = ?",
+            "UPDATE player_achievement_stats SET count = count + ? WHERE xuid = ? AND stat_key = ?",
             (delta, xuid, stat_key),
         )
         return self._get_stat_count(xuid, stat_key)
@@ -588,11 +588,11 @@ class AchievementSystem:
             return
         key = self._achievement_unlock_stat_key(ut)
         self.database_manager.execute(
-            "INSERT OR IGNORE INTO " + self._table_stats + " (xuid, stat_key, count) VALUES (?, ?, 1)",
+            "INSERT OR IGNORE INTO player_achievement_stats (xuid, stat_key, count) VALUES (?, ?, 1)",
             (xs, key),
         )
         self.database_manager.execute(
-            "UPDATE " + self._table_stats + " SET count = 1 WHERE xuid = ? AND stat_key = ? AND count < 1",
+            "UPDATE player_achievement_stats SET count = 1 WHERE xuid = ? AND stat_key = ? AND count < 1",
             (xs, key),
         )
 
@@ -607,7 +607,7 @@ class AchievementSystem:
         out: Set[str] = set()
         try:
             for r in self.database_manager.query_all(
-                "SELECT DISTINCT xuid FROM " + self._table_stats,
+                "SELECT DISTINCT xuid FROM player_achievement_stats",
                 (),
             ):
                 x = str(r.get("xuid") or "").strip()
@@ -616,9 +616,8 @@ class AchievementSystem:
         except Exception:
             pass
         try:
-            tt = self.title_system._table_unlock_time
             for r in self.database_manager.query_all(
-                "SELECT DISTINCT xuid FROM " + tt,
+                "SELECT DISTINCT xuid FROM player_title_unlock_time",
                 (),
             ):
                 x = str(r.get("xuid") or "").strip()
@@ -897,7 +896,7 @@ class AchievementSystem:
             if old_k != new_k:
                 try:
                     self.database_manager.execute(
-                        "UPDATE " + self._table_stats + " SET stat_key = ? WHERE stat_key = ?",
+                        "UPDATE player_achievement_stats SET stat_key = ? WHERE stat_key = ?",
                         (new_k, old_k),
                     )
                 except Exception:
@@ -940,7 +939,7 @@ class AchievementSystem:
             return False
         try:
             self.database_manager.execute(
-                "DELETE FROM " + self._table_stats + " WHERE stat_key = ?",
+                "DELETE FROM player_achievement_stats WHERE stat_key = ?",
                 (self._achievement_unlock_stat_key(unlock_title),),
             )
         except Exception:

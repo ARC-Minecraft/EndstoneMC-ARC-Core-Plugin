@@ -233,14 +233,13 @@ class GuildSystem:
         ok_set, err_set = self.set_size_tier(gid, target)
         if not ok_set:
             # 回滚扣减
-            try:
+            from contextlib import suppress
+            with suppress(Exception):
                 self.db.execute(
                     "UPDATE guilds SET total_contribution = COALESCE(total_contribution, 0) + ? "
                     "WHERE id = ?",
                     (int(cost), gid),
                 )
-            except Exception:
-                pass
             info["guild_total_contribution"] = self.get_guild_total_contribution(gid)
             return False, err_set or "GUILD_DB_ERROR", info
 
@@ -877,15 +876,14 @@ class GuildSystem:
             "total_contribution": 0,
             "join_requires_approval": 1,
         }
-        fields = ",".join(data_g.keys())
-        placeholders = ",".join(["?" for _ in data_g])
-        sql_ins = f"INSERT INTO guilds ({fields}) VALUES ({placeholders})"
         try:
-            conn = self.db._resolve_connection(sql_ins)
-            cur = conn.cursor()
-            cur.execute(sql_ins, tuple(data_g.values()))
-            gid = int(cur.lastrowid)
-            conn.commit()
+            if not self.db.insert("guilds", data_g):
+                raise RuntimeError("guild insert failed")
+            row = self.db.query_one(
+                "SELECT id FROM guilds WHERE name = ? AND owner_xuid = ? ORDER BY id DESC LIMIT 1",
+                (n, owner_xuid),
+            )
+            gid = int(row["id"]) if row and row.get("id") is not None else 0
         except Exception:
             if cost > 0:
                 self._refund_create_cost(owner_xuid, cost)

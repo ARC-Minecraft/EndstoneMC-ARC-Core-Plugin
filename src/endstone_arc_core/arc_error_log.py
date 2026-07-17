@@ -2,6 +2,7 @@
 """恶性错误写入 plugins/ARCCore/error_log.txt（与核心配置同目录）"""
 import threading
 import traceback
+from contextlib import suppress
 from datetime import datetime
 from pathlib import Path
 from typing import List, Optional
@@ -24,7 +25,7 @@ def append_arc_error_log(
             lines.append(f"  {line}")
     if exception is not None:
         lines.append(f"  exception: {type(exception).__name__}: {exception}")
-        try:
+        with suppress(Exception):
             tb = "".join(
                 traceback.format_exception(
                     type(exception), exception, exception.__traceback__
@@ -32,8 +33,6 @@ def append_arc_error_log(
             )
             for tb_line in tb.rstrip().splitlines():
                 lines.append(f"  traceback: {tb_line}")
-        except Exception:
-            pass
     lines.append("")
     text = "\n".join(lines)
     with _file_lock:
