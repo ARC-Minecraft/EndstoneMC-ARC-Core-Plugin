@@ -83,21 +83,6 @@ class ARCCorePlugin(Plugin):
             "usages": ["/spawn"],
             "permissions": ["arc_core.command.common"],
         },
-        "landpos1": {
-            "description": "Set new land corner 1.",
-            "usages": ["/landpos1"],
-            "permissions": ["arc_core.command.common"],
-        },
-        "landpos2": {
-            "description": "Set new land corner 2.",
-            "usages": ["/landpos2"],
-            "permissions": ["arc_core.command.common"],
-        },
-        "landbuy": {
-            "description": "Buy the pending new land (alias of /land buy).",
-            "usages": ["/landbuy"],
-            "permissions": ["arc_core.command.common"],
-        },
         "land": {
             "description": "Land helpers: pos1, pos2, buy.",
             "usages": ["/land pos1", "/land pos2", "/land buy"],
@@ -121,7 +106,7 @@ class ARCCorePlugin(Plugin):
     }
     permissions = {
         "arc_core.command.common": {
-            "description": "Commands for all players (arc, suicide, spawn, land*, landpos*, connecttoserver, /arc guild).",
+            "description": "Commands for all players (arc, suicide, spawn, land, connecttoserver, /arc guild).",
             "default": True,
         },
         "arc_core.command.op": {
@@ -239,7 +224,7 @@ class ARCCorePlugin(Plugin):
         self._refresh_disabled_blocks()
         self._refresh_land_only_place_blocks()
         self.player_new_land_creation_info = {}  # {name: {'dimension': str, 'min_x': int, 'max_x': int, 'min_y': int, 'max_y': int, 'min_z': int, 'max_z': int}}
-        self.player_land_pos1 = {}  # {name: {'dimension': str, 'x': int, 'y': int, 'z': int}} 暂存/landpos1
+        self.player_land_pos1 = {}  # {name: {'dimension': str, 'x': int, 'y': int, 'z': int}} 暂存 /land pos1
         # 交互式圈地：rect_a → rect_b → y_min → y_max，值为 dict(step=..., dimension=..., ...)
         self.player_land_creation_pick: Dict[str, Dict[str, Any]] = {}
         # 上次成功写入一次选点的时间，用于防抖（与 player_land_creation_pick 同步清理）
@@ -662,24 +647,6 @@ class ARCCorePlugin(Plugin):
                 self._run_land_buy_for_player(player)
                 return True
             player.send_message(self.language_manager.GetText("LAND_COMMAND_USAGE"))
-            return True
-        if command.name == "landpos1":
-            player = self._resolve_player_for_command_sender(sender)
-            if player is None:
-                return True
-            self._run_land_pos1_for_player(player)
-            return True
-        if command.name == "landpos2":
-            player = self._resolve_player_for_command_sender(sender)
-            if player is None:
-                return True
-            self._run_land_pos2_for_player(player)
-            return True
-        if command.name == "landbuy":
-            player = self._resolve_player_for_command_sender(sender)
-            if player is None:
-                return True
-            self._run_land_buy_for_player(player)
             return True
         if command.name == 'pos1':
             if not isinstance(sender, Player):
@@ -9981,7 +9948,7 @@ class ARCCorePlugin(Plugin):
         self.show_pending_land_purchase_panel(player)
 
     def _execute_land_buy(self, player: Player):
-        """供 /landbuy 调用：打开购买确认面板（不再直接扣款购买）。"""
+        """供 /land buy 调用：打开购买确认面板（不再直接扣款购买）。"""
         self.show_pending_land_purchase_panel(player)
 
     def _visualize_pending_land(self, player: Player):
@@ -10120,7 +10087,7 @@ class ARCCorePlugin(Plugin):
         return False
 
     def show_pending_land_purchase_panel(self, player: Player):
-        """待购领地：粒子预览、坐标修改、确认购买；亦供 /landbuy 打开。"""
+        """待购领地：粒子预览、坐标修改、确认购买；亦供 /land buy 打开。"""
         info = self.player_new_land_creation_info.get(player.name)
         if not info:
             player.send_message(self.language_manager.GetText("LANDBUY_NO_PENDING_LAND"))
