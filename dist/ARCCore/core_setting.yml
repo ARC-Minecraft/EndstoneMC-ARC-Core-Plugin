@@ -26,11 +26,20 @@ SYNC_CLIENT_PORT=19999
 SYNC_CLIENT_SERVER_ID=server_001
 SYNC_CLIENT_SERVER_NAME=服务器01
 SYNC_CLIENT_AUTH_KEY=
+# 同步中心不可达或断线后的重连间隔（秒，默认 10）
+SYNC_CLIENT_RECONNECT_INTERVAL=10
 # 分项同步开关（仅远程客户端模式生效；关闭的类别不会拉取/接收推送）
 SYNC_CLIENT_SYNC_PLAYER=True
 SYNC_CLIENT_SYNC_ECONOMY=True
 SYNC_CLIENT_SYNC_TITLE=True
 SYNC_CLIENT_SYNC_GUILD=True
+
+# QQ 群消息发送方式（子服可选；默认 local）
+#   local — 本机安装并调用 qqsync_plugin（当前行为）
+#   host  — 经 ARC 同步中心转发到主机，由主机 qqsync 发送；
+#           群消息前缀使用本服 SYNC_CLIENT_SERVER_NAME；
+#           需 ENABLE_SYNC_CLIENT=True 且主机开启 ENABLE_SYNC_SERVER + 安装 qqsync
+QQ_RELAY_MODE=local
 
 # ----- 方式 B：共享数据库文件路径（与远程客户端互斥；路径留空则使用 DATABASE_PATH 主库） -----
 PLAYER_DATABASE_PATH=

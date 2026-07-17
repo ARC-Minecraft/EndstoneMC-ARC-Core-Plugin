@@ -71,3 +71,14 @@ def get_client_sync_tables(setting_manager) -> Set[str]:
         if setting_bool(setting_manager, setting_key, True):
             tables.update(SYNC_CATEGORY_TABLES[category])
     return tables
+
+
+def get_qq_relay_mode(setting_manager) -> Literal["local", "host"]:
+    """QQ 群消息发送方式：local=本机 qqsync；host=经同步中心由主机 qqsync 发送。"""
+    raw = setting_manager.GetSetting("QQ_RELAY_MODE")
+    if raw is None:
+        return "local"
+    mode = str(raw).strip().lower()
+    if mode in ("host", "relay", "center", "sync"):
+        return "host"
+    return "local"

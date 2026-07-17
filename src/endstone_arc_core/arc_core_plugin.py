@@ -21,6 +21,11 @@ from endstone_arc_core.LanguageManager import LanguageManager
 from endstone_arc_core.SettingManager import SettingManager
 from endstone_arc_core.TeleportSystem import TeleportSystem, generate_tp_command_to_position
 from endstone_arc_core.mc_command_format import format_mc_command_player_name
+from endstone_arc_core.dimension_utils import (
+    get_dimension_id,
+    translate_dimension_display,
+    migrate_spawn_locations_dimensions,
+)
 from endstone_arc_core.LandSystem import LandSystem
 from endstone_arc_core.TitleSystem import TitleSystem
 from endstone_arc_core.AchievementSystem import AchievementSystem
@@ -493,6 +498,7 @@ class ARCCorePlugin(Plugin):
                 auth_key=sync_auth_key,
                 bind_port=sync_port,
                 logger=self.logger,
+                on_event_forward=self._on_sync_event_forward,
             )
             if self.sync_server.start():
                 self.logger.info(f"[ARC Core] Sync server started on port {sync_port}")
@@ -504,11 +510,18 @@ class ARCCorePlugin(Plugin):
                 database_manager=self.database_manager,
                 setting_manager=self.setting_manager,
                 logger=self.logger,
+                on_qq_chat=self._on_qq_chat_downstream,
             )
             if self.sync_client.start():
-                self.logger.info("[ARC Core] Sync client connected to remote sync server")
+                self.logger.info(
+                    "[ARC Core] Sync client started "
+                    "(auto-reconnect if sync host is down)"
+                )
             else:
                 self.logger.error("[ARC Core] Failed to start sync client")
+
+        # 本地写库上行/主机写库广播（签到、经济、称号、公会等）
+        self.database_manager.set_write_notifier(self._on_db_write_for_sync)
 
     def on_disable(self) -> None:
         # 停止位置检测线程
@@ -571,7 +584,7 @@ class ARCCorePlugin(Plugin):
             if not isinstance(sender, Player):
                 sender.send_message(f'[ARC Core]This command only works for players.')
                 return True
-            dimension_name = sender.location.dimension.name
+            dimension_name = get_dimension_id(sender.location.dimension)
             new_spawn_pos = (sender.location.x, sender.location.y, sender.location.z)
             r = self.update_spawn_location(dimension_name, new_spawn_pos)
             if r:
@@ -620,8 +633,8 @@ class ARCCorePlugin(Plugin):
             if not isinstance(sender, Player):
                 sender.send_message(f'[ARC Core]This command only works for players.')
                 return True
-            if sender.location.dimension.name in self.spawn_pos_dict:
-                spawn_xyz = self.spawn_pos_dict[sender.location.dimension.name]
+            spawn_xyz = self.spawn_pos_dict.get(get_dimension_id(sender.location.dimension))
+            if spawn_xyz is not None:
                 self.server.dispatch_command(
                     self.server.command_sender,
                     f'tp {format_mc_command_player_name(sender.name)} '
@@ -776,7 +789,7 @@ class ARCCorePlugin(Plugin):
 
     def _run_land_pos1_for_player_verified(self, player: Player) -> None:
         self.player_land_pos1[player.name] = {
-            "dimension": player.location.dimension.name,
+            "dimension": get_dimension_id(player.location.dimension),
             "x": math.floor(player.location.x),
             "y": math.floor(player.location.y),
             "z": math.floor(player.location.z),
@@ -801,7 +814,7 @@ class ARCCorePlugin(Plugin):
             player.send_message(self.language_manager.GetText("CREATE_NEW_LAND_POS2_SET_FAIL_POS1_NOT_SET"))
             return
         pos1 = self.player_land_pos1[player.name]
-        if player.location.dimension.name != pos1["dimension"]:
+        if get_dimension_id(player.location.dimension) != pos1["dimension"]:
             player.send_message(self.language_manager.GetText("CREATE_NEW_LAND_POS2_SET_FAIL_DIMENSION_CHANGED"))
             return
         x2 = math.floor(player.location.x)
@@ -894,7 +907,7 @@ class ARCCorePlugin(Plugin):
                 self._sky_eye_append(
                     "PlayerJoin",
                     event.player,
-                    join_loc.dimension.name,
+                    get_dimension_id(join_loc.dimension),
                     float(join_loc.x),
                     float(join_loc.y),
                     float(join_loc.z),
@@ -953,7 +966,7 @@ class ARCCorePlugin(Plugin):
                 self._sky_eye_append(
                     "PlayerQuit",
                     event.player,
-                    quit_loc.dimension.name,
+                    get_dimension_id(quit_loc.dimension),
                     float(quit_loc.x),
                     float(quit_loc.y),
                     float(quit_loc.z),
@@ -989,7 +1002,7 @@ class ARCCorePlugin(Plugin):
         self._sky_eye_append(
             "BlockBreak",
             event.player,
-            block_loc.dimension.name,
+            get_dimension_id(block_loc.dimension),
             float(block_loc.x),
             float(block_loc.y),
             float(block_loc.z),
@@ -997,21 +1010,21 @@ class ARCCorePlugin(Plugin):
         )
         self._send_op_debug_message(
             event.player, 'BlockBreak', str(target_desc),
-            block_loc.dimension.name, block_loc.x, block_loc.y, block_loc.z
+            get_dimension_id(block_loc.dimension), block_loc.x, block_loc.y, block_loc.z
         )
         if event.player.is_op:
             return
 
-        if self.dtwt_plugin is not None and self.dtwt_plugin.api_judge_if_start_block(event.block.location.x, event.block.location.y, event.block.location.z, event.block.dimension.name):
+        if self.dtwt_plugin is not None and self.dtwt_plugin.api_judge_if_start_block(event.block.location.x, event.block.location.y, event.block.location.z, get_dimension_id(event.block.dimension)):
             # print('DTWT block break, ignore')
             return
 
-        if not self.land_operation_check(event.player, event.block.location.dimension.name,
+        if not self.land_operation_check(event.player, get_dimension_id(event.block.location.dimension),
                                     (event.block.location.x, event.block.location.y, event.block.location.z)):
             event.is_cancelled = True
         if not event.is_cancelled and self._is_frame_block(event.block):
             land_id = self.get_land_at_pos(
-                event.block.location.dimension.name,
+                get_dimension_id(event.block.location.dimension),
                 int(event.block.location.x), int(event.block.location.z),
                 int(event.block.location.y)
             )
@@ -1033,7 +1046,7 @@ class ARCCorePlugin(Plugin):
                 ):
                     event.is_cancelled = True
                     event.player.send_message(self.language_manager.GetText('LAND_FRAME_PROTECT_HINT'))
-        if not self.spawn_protect_check(event.player, event.block.location.dimension.name,
+        if not self.spawn_protect_check(event.player, get_dimension_id(event.block.location.dimension),
                                     (event.block.location.x, event.block.location.y, event.block.location.z)):
             event.is_cancelled = True
 
@@ -1145,7 +1158,7 @@ class ARCCorePlugin(Plugin):
         self._sky_eye_append(
             "BlockPlace",
             event.player,
-            block_loc.dimension.name,
+            get_dimension_id(block_loc.dimension),
             float(block_loc.x),
             float(block_loc.y),
             float(block_loc.z),
@@ -1153,11 +1166,11 @@ class ARCCorePlugin(Plugin):
         )
         self._send_op_debug_message(
             event.player, 'BlockPlace', str(target_desc),
-            block_loc.dimension.name, block_loc.x, block_loc.y, block_loc.z
+            get_dimension_id(block_loc.dimension), block_loc.x, block_loc.y, block_loc.z
         )
         if event.player.is_op:
             return
-        dimension_name = block_loc.dimension.name
+        dimension_name = get_dimension_id(block_loc.dimension)
         place_pos = (block_loc.x, block_loc.y, block_loc.z)
         if self._is_disabled_block(target_desc):
             event.is_cancelled = True
@@ -1184,7 +1197,7 @@ class ARCCorePlugin(Plugin):
             self._sky_eye_append(
                 "PlayerDeath",
                 event.player,
-                loc.dimension.name,
+                get_dimension_id(loc.dimension),
                 float(loc.x),
                 float(loc.y),
                 float(loc.z),
@@ -1196,7 +1209,7 @@ class ARCCorePlugin(Plugin):
         # 记录玩家死亡位置
         self.teleport_system.record_death_location(
             event.player.name,
-            event.player.location.dimension.name,
+            get_dimension_id(event.player.location.dimension),
             event.player.location.x,
             event.player.location.y,
             event.player.location.z,
@@ -1219,11 +1232,11 @@ class ARCCorePlugin(Plugin):
                     if block is not None and getattr(block, "location", None) is not None:
                         bl = block.location
                         if getattr(bl, "dimension", None) is not None:
-                            dim_name = bl.dimension.name
+                            dim_name = get_dimension_id(bl.dimension)
                         else:
                             ploc = getattr(event.player, "location", None)
                             dim_name = (
-                                ploc.dimension.name
+                                get_dimension_id(ploc.dimension)
                                 if ploc is not None and getattr(ploc, "dimension", None) is not None
                                 else ""
                             )
@@ -1244,7 +1257,7 @@ class ARCCorePlugin(Plugin):
                         self._sky_eye_append(
                             "BlockInteract",
                             event.player,
-                            pl.dimension.name,
+                            get_dimension_id(pl.dimension),
                             float(pl.x),
                             float(pl.y),
                             float(pl.z),
@@ -1255,7 +1268,7 @@ class ARCCorePlugin(Plugin):
                     self._sky_eye_append(
                         "AirInteract",
                         event.player,
-                        pl.dimension.name,
+                        get_dimension_id(pl.dimension),
                         float(pl.x),
                         float(pl.y),
                         float(pl.z),
@@ -1271,7 +1284,10 @@ class ARCCorePlugin(Plugin):
                 if block is not None and hasattr(block, 'location') and block.location is not None:
                     bl = block.location
                     target_desc = getattr(block, 'identifier', getattr(block, 'type', 'block'))
-                    dim_name = bl.dimension.name if hasattr(bl, 'dimension') and bl.dimension else getattr(event.player.location.dimension, 'name', '')
+                    if hasattr(bl, 'dimension') and bl.dimension:
+                        dim_name = get_dimension_id(bl.dimension)
+                    else:
+                        dim_name = get_dimension_id(getattr(event.player.location, 'dimension', None))
                     self._send_op_debug_message(event.player, 'BlockInteract', str(target_desc), dim_name, bl.x, bl.y, bl.z)
             if getattr(event.player, 'is_op', False):
                 return
@@ -1290,8 +1306,8 @@ class ARCCorePlugin(Plugin):
             try:
                 if (
                     self.dtwt_plugin is not None and
-                    hasattr(block, 'dimension') and block.dimension is not None and hasattr(block.dimension, 'name') and
-                    self.dtwt_plugin.api_judge_if_start_block(block_location.x, block_location.y, block_location.z, block.dimension.name)
+                    getattr(block, 'dimension', None) is not None and
+                    self.dtwt_plugin.api_judge_if_start_block(block_location.x, block_location.y, block_location.z, get_dimension_id(block.dimension))
                 ):
                     return
             except Exception:
@@ -1299,11 +1315,11 @@ class ARCCorePlugin(Plugin):
                 pass
 
             # 维度与坐标
-            if hasattr(block, 'dimension') and block.dimension is not None and hasattr(block.dimension, 'name'):
-                dimension = block.dimension.name
+            if getattr(block, 'dimension', None) is not None:
+                dimension = get_dimension_id(block.dimension)
             else:
                 # 回退到玩家维度
-                dimension = event.player.location.dimension.name if hasattr(event.player, 'location') and event.player.location else ''
+                dimension = get_dimension_id(event.player.location.dimension) if hasattr(event.player, 'location') and event.player.location else ''
 
             pos = (block_location.x, block_location.y, block_location.z)
 
@@ -1349,7 +1365,7 @@ class ARCCorePlugin(Plugin):
                 return
 
             explosion_location = event.location
-            dimension = explosion_location.dimension.name
+            dimension = get_dimension_id(explosion_location.dimension)
             
             # 检查爆炸位置是否在任何领地内
             land_id = self.get_land_at_pos(dimension, math.floor(explosion_location.x), math.floor(explosion_location.z))
@@ -1414,7 +1430,7 @@ class ARCCorePlugin(Plugin):
         self._sky_eye_append(
             "ActorInteract",
             event.player,
-            actor_location.dimension.name,
+            get_dimension_id(actor_location.dimension),
             float(actor_location.x),
             float(actor_location.y),
             float(actor_location.z),
@@ -1422,7 +1438,7 @@ class ARCCorePlugin(Plugin):
         )
         self._send_op_debug_message(
             event.player, 'ActorInteract', str(target_desc),
-            actor_location.dimension.name, actor_location.x, actor_location.y, actor_location.z
+            get_dimension_id(actor_location.dimension), actor_location.x, actor_location.y, actor_location.z
         )
         # OP玩家跳过检查
         if event.player.is_op:
@@ -1430,7 +1446,7 @@ class ARCCorePlugin(Plugin):
 
         # 获取生物位置
         actor_location = event.actor.location
-        dimension = actor_location.dimension.name
+        dimension = get_dimension_id(actor_location.dimension)
         ax = math.floor(actor_location.x)
         ay = math.floor(actor_location.y)
         az = math.floor(actor_location.z)
@@ -1463,7 +1479,7 @@ class ARCCorePlugin(Plugin):
         target_desc = getattr(event.actor, 'identifier', getattr(event.actor, 'type', 'actor'))
         self._send_op_debug_message(
             attacker, 'ActorDamage', str(target_desc),
-            actor_location.dimension.name, actor_location.x, actor_location.y, actor_location.z
+            get_dimension_id(actor_location.dimension), actor_location.x, actor_location.y, actor_location.z
         )
         # 如果玩家是op则不判断
         if attacker.is_op:
@@ -1471,7 +1487,7 @@ class ARCCorePlugin(Plugin):
 
         # 获取被攻击生物位置
         actor_location = event.actor.location
-        dimension = actor_location.dimension.name
+        dimension = get_dimension_id(actor_location.dimension)
         ax = math.floor(actor_location.x)
         ay = math.floor(actor_location.y)
         az = math.floor(actor_location.z)
@@ -1930,7 +1946,7 @@ class ARCCorePlugin(Plugin):
                     try:
                         # 获取玩家位置信息
                         player_pos = self.get_player_position_vector(player)
-                        dimension = player.location.dimension.name
+                        dimension = get_dimension_id(player.location.dimension)
                         land_id = self.get_land_at_pos(dimension, player_pos[0], player_pos[2], player_pos[1])
                         
                         # 使用锁保护共享数据
@@ -2732,7 +2748,9 @@ class ARCCorePlugin(Plugin):
             'spawn_y': 'INTEGER NOT NULL',
             'spawn_z': 'INTEGER NOT NULL'
         }
-        return self.database_manager.create_table('spawn_locations', fields)
+        ok = self.database_manager.create_table('spawn_locations', fields)
+        migrate_spawn_locations_dimensions(self.database_manager)
+        return ok
 
     def init_small_horn_orders_table(self) -> bool:
         """初始化小喇叭订单表。"""
@@ -2766,6 +2784,9 @@ class ARCCorePlugin(Plugin):
         :param coordinates: (x, y, z) 坐标元组
         :return: 是否更新成功
         """
+        from endstone_arc_core.dimension_utils import normalize_dimension_id
+
+        dimension = normalize_dimension_id(dimension)
         x, y, z = coordinates
         data = {
             'spawn_x': x,
@@ -2793,9 +2814,10 @@ class ARCCorePlugin(Plugin):
         }
 
     def spawn_protect_check(self, dimension_name: str, pos_x: float, pos_z: float) -> bool:
-        if dimension_name in self.spawn_pos_dict:
-            if math.fabs(pos_x - self.spawn_pos_dict[dimension_name][0]) <= self.spawn_protect_range and \
-                    math.fabs(pos_z - self.spawn_pos_dict[dimension_name][2]) <= self.spawn_protect_range:
+        spawn_xyz = self.spawn_pos_dict.get(dimension_name)
+        if spawn_xyz is not None:
+            if math.fabs(pos_x - spawn_xyz[0]) <= self.spawn_protect_range and \
+                    math.fabs(pos_z - spawn_xyz[2]) <= self.spawn_protect_range:
                 return False
         return True
 
@@ -7428,7 +7450,7 @@ class ARCCorePlugin(Plugin):
             success = self.create_player_home(
                 str(player.xuid),
                 home_name,
-                player.location.dimension.name,
+                get_dimension_id(player.location.dimension),
                 player.location.x,
                 player.location.y,
                 player.location.z
@@ -7580,7 +7602,7 @@ class ARCCorePlugin(Plugin):
         """执行传送"""
         message = self.language_manager.GetText('TELEPORT_SUCCESS').format(target_player.name)
         player.send_message(message)
-        target_dimension = target_player.location.dimension.name
+        target_dimension = get_dimension_id(target_player.location.dimension)
         self.teleport_system.execute_teleport_to_player(player.name, target_player.name, target_dimension)
 
     # Death Location Teleport
@@ -8381,7 +8403,7 @@ class ARCCorePlugin(Plugin):
             # 创建公共传送点
             success = self.create_public_warp(
                 warp_name,
-                player.location.dimension.name,
+                get_dimension_id(player.location.dimension),
                 player.location.x,
                 player.location.y,
                 player.location.z,
@@ -9042,7 +9064,7 @@ class ARCCorePlugin(Plugin):
         player.send_form(rename_panel)
 
     def set_player_pos_as_land_tp_pos(self, player: Player, land_id: int):
-        on_land_id = self.get_land_at_pos(player.location.dimension.name, math.floor(player.location.x), math.floor(player.location.z))
+        on_land_id = self.get_land_at_pos(get_dimension_id(player.location.dimension), math.floor(player.location.x), math.floor(player.location.z))
         if on_land_id is None or on_land_id != land_id:
             result = self.language_manager.GetText('SET_LAND_TP_POS_FAIL_OUT_LAND')
         else:
@@ -9707,11 +9729,12 @@ class ARCCorePlugin(Plugin):
     def show_create_new_land_guide(self, player: Player):
         """显示创建领地的坐标输入表单，可预填上次设定的值"""
         cached = self.player_new_land_creation_info.get(player.name, {})
-        dim_label = (
-            cached.get("dimension", player.location.dimension.name)
+        dim_raw = (
+            cached.get("dimension", get_dimension_id(player.location.dimension))
             if cached.get("resize_land_id") is not None
-            else player.location.dimension.name
+            else get_dimension_id(player.location.dimension)
         )
+        dim_label = self._translate_dimension_name(dim_raw)
         default_min_x = str(cached.get('min_x', math.floor(player.location.x)))
         default_max_x = str(cached.get('max_x', math.floor(player.location.x)))
         default_min_y = str(cached.get('min_y', math.floor(player.location.y)))
@@ -9759,9 +9782,9 @@ class ARCCorePlugin(Plugin):
                 min_z, max_z = min(min_z, max_z), max(min_z, max_z)
                 prev = self.player_new_land_creation_info.get(p.name, {})
                 dim_use = (
-                    prev.get("dimension", p.location.dimension.name)
+                    prev.get("dimension", get_dimension_id(p.location.dimension))
                     if prev.get("resize_land_id") is not None
-                    else p.location.dimension.name
+                    else get_dimension_id(p.location.dimension)
                 )
                 new_info = {
                     'dimension': dim_use,
@@ -9814,7 +9837,7 @@ class ARCCorePlugin(Plugin):
                 return
             
             x, y, z = pos
-            dimension = player.location.dimension.name
+            dimension = get_dimension_id(player.location.dimension)
             
             # 获取当前位置的领地ID（传入 y 做三维判断，与进入领地提示一致）
             land_id = self.get_land_at_pos(dimension, x, z, y)
@@ -9990,7 +10013,7 @@ class ARCCorePlugin(Plugin):
         self.player_land_pos1.pop(player.name, None)
         self.player_land_creation_pick[player.name] = {
             "step": "rect_a",
-            "dimension": player.location.dimension.name,
+            "dimension": get_dimension_id(player.location.dimension),
         }
         self.player_land_pick_last_event_ts.pop(player.name, None)
         player.send_message(self.language_manager.GetText("LAND_CREATION_PICK_RECT_A"))
@@ -10013,10 +10036,10 @@ class ARCCorePlugin(Plugin):
         if last_ok_ts is not None and (now_ts - last_ok_ts) < self._land_creation_pick_debounce_sec:
             event.is_cancelled = True
             return True
-        if hasattr(block, "dimension") and block.dimension is not None and hasattr(block.dimension, "name"):
-            dimension = block.dimension.name
+        if hasattr(block, "dimension") and block.dimension is not None:
+            dimension = get_dimension_id(block.dimension)
         else:
-            dimension = player.location.dimension.name if hasattr(player, "location") and player.location else ""
+            dimension = get_dimension_id(player.location.dimension) if hasattr(player, "location") and player.location else ""
         if dimension != state.get("dimension"):
             player.send_message(self.language_manager.GetText("LAND_CREATION_PICK_WRONG_DIM"))
             return False
@@ -10294,7 +10317,7 @@ class ARCCorePlugin(Plugin):
                 min_y, max_y = min(raw_min_y, raw_max_y), max(raw_min_y, raw_max_y)
                 min_z, max_z = min(raw_min_z, raw_max_z), max(raw_min_z, raw_max_z)
                 p_new = self.player_new_land_creation_info.get(p.name, {})
-                dim = p_new.get("dimension", p.location.dimension.name)
+                dim = p_new.get("dimension", get_dimension_id(p.location.dimension))
                 merged = {
                     "dimension": dim,
                     "min_x": min_x,
@@ -10655,10 +10678,10 @@ class ARCCorePlugin(Plugin):
         else:
             player.send_message(self.language_manager.GetText("LAND_RESIZE_NOT_OWNER"))
             return
-        if player.location.dimension.name != land_info["dimension"]:
+        if get_dimension_id(player.location.dimension) != land_info["dimension"]:
             player.send_message(
                 self.language_manager.GetText("LAND_RESIZE_WRONG_DIMENSION").format(
-                    land_info["dimension"]
+                    self._translate_dimension_name(land_info["dimension"])
                 )
             )
             return
@@ -10675,10 +10698,10 @@ class ARCCorePlugin(Plugin):
         if not land_info:
             player.send_message(self.language_manager.GetText("LAND_RESIZE_LAND_GONE"))
             return
-        if player.location.dimension.name != land_info["dimension"]:
+        if get_dimension_id(player.location.dimension) != land_info["dimension"]:
             player.send_message(
                 self.language_manager.GetText("LAND_RESIZE_WRONG_DIMENSION").format(
-                    land_info["dimension"]
+                    self._translate_dimension_name(land_info["dimension"])
                 )
             )
             return
@@ -12398,7 +12421,7 @@ class ARCCorePlugin(Plugin):
             )
             return
         x, y, z = pos
-        dimension = player.location.dimension.name
+        dimension = get_dimension_id(player.location.dimension)
 
         land_id = self.get_land_at_pos(dimension, x, z, y)
         if land_id is None:
@@ -12732,6 +12755,22 @@ class ARCCorePlugin(Plugin):
         else:
             self.op_debug_mode.add(player.name)
             player.send_message(self.language_manager.GetText('OP_DEBUG_MODE_TOGGLED_ON'))
+            try:
+                dim_id = get_dimension_id(player.location.dimension)
+                dim_label = self._translate_dimension_name(dim_id)
+                loc = player.location
+                player.send_message(
+                    self.language_manager.GetText('OP_DEBUG_MSG').format(
+                        'PlayerLocation',
+                        player.name,
+                        dim_id if dim_id == dim_label else f'{dim_label} ({dim_id})',
+                        int(loc.x) if loc.x == math.floor(loc.x) else loc.x,
+                        int(loc.y) if loc.y == math.floor(loc.y) else loc.y,
+                        int(loc.z) if loc.z == math.floor(loc.z) else loc.z,
+                    )
+                )
+            except Exception:
+                pass
         self.show_op_tools_panel(player)
 
     def record_coordinate_1(self, player: Player):
@@ -13961,7 +14000,7 @@ class ARCCorePlugin(Plugin):
         """发送死亡播报消息"""
         try:
             player_name = self._format_death_broadcast_player_display(event.player)
-            dimension_raw = event.player.location.dimension.name
+            dimension_raw = get_dimension_id(event.player.location.dimension)
             dimension = self._translate_dimension_name(dimension_raw)
             x = int(event.player.location.x)
             y = int(event.player.location.y)
@@ -14007,13 +14046,20 @@ class ARCCorePlugin(Plugin):
             for player in self.server.online_players:
                 player.send_message(game_message)
 
-            # 发送到QQ群（通过 qqsync API）
+            # 发送到QQ群（本机 qqsync 或经同步中心主机转发）
             try:
-                qqsync = self.server.plugin_manager.get_plugin('qqsync_plugin')
-                if qqsync:
-                    qqsync.api_send_raw(qq_message)
-                else:
-                    self.logger.warning("[ARC Core] QQSync 插件未找到，无法发送死亡消息到群")
+                equipped = self.title_system.get_equipped_title(event.player)
+                display_name = self.format_player_display_label_with_guild(
+                    getattr(event.player, "name", "") or "",
+                    equipped,
+                    str(event.player.xuid),
+                )
+                self._notify_qqsync(
+                    "custom",
+                    display_name,
+                    getattr(event.player, "name", "") or "",
+                    qq_message,
+                )
             except Exception as e:
                 self.logger.error(f"[ARC Core] 发送死亡消息到QQ群失败: {e}")
                 
@@ -14167,27 +14213,8 @@ class ARCCorePlugin(Plugin):
             return str(entity) if entity else ""
 
     def _translate_dimension_name(self, dimension_name: str) -> str:
-        """翻译维度名称"""
-        try:
-            if not dimension_name:
-                return ""
-            
-            # 将维度名称转换为大写并添加前缀
-            dimension_key = f"DIMENSION_{dimension_name.upper()}"
-            
-            # 使用 LanguageManager 获取翻译
-            translation = self.language_manager.GetText(dimension_key)
-            
-            # 如果找到了翻译，返回翻译结果
-            if translation:
-                return translation
-            
-            # 如果没找到翻译，返回原字符串
-            return dimension_name
-            
-        except Exception as e:
-            self.logger.error(f"[ARC Core] 翻译维度名称错误: {str(e)}")
-            return dimension_name
+        """将维度标识转为显示名：原版走语言文件，自定义/未知返回完整 ID。"""
+        return translate_dimension_display(dimension_name, self.language_manager)
 
     def _send_to_qq_group(self, message: str):
         """
@@ -14195,6 +14222,17 @@ class ARCCorePlugin(Plugin):
         :param message: 要发送的消息
         """
         try:
+            from endstone_arc_core.sync_config import get_qq_relay_mode
+            if get_qq_relay_mode(self.setting_manager) == "host":
+                if self.sync_client and self.sync_client.is_running():
+                    if self.sync_client.send_event_forward(
+                        "custom", "", "", message
+                    ):
+                        return
+                self.logger.warning(
+                    "[ARC Core] QQ_RELAY_MODE=host 但同步客户端未连接，无法转发群消息"
+                )
+                return
             qqsync = self.server.plugin_manager.get_plugin('qqsync_plugin')
             if qqsync is None:
                 self.logger.warning("[ARC Core] QQSync 插件未找到，无法发送群消息")
@@ -14205,16 +14243,115 @@ class ARCCorePlugin(Plugin):
         except Exception as e:
             self.logger.error(f"[ARC Core] QQ群消息发送异常: {str(e)}")
 
+    def _on_sync_event_forward(self, data: dict):
+        """主机：处理子服经 SyncServer 转发来的 QQ/群事件。"""
+        try:
+            qqsync = self.server.plugin_manager.get_plugin('qqsync_plugin')
+            if qqsync is None:
+                self.logger.warning(
+                    "[ARC Core] 收到子服 QQ 转发但主机未安装 qqsync_plugin"
+                )
+                return
+            event_type = data.get('event_type', 'custom') or 'custom'
+            display_name = data.get('display_name', '') or ''
+            raw_player_name = data.get('raw_player_name', '') or ''
+            message = data.get('message', '') or ''
+            source_server_id = data.get('server_id', '') or ''
+            source_server_name = data.get('server_name', '') or ''
+            qqsync.api_send_event(
+                event_type,
+                display_name,
+                raw_player_name,
+                message,
+                source_server_name=source_server_name or None,
+                source_server_id=source_server_id or None,
+            )
+        except Exception as e:
+            self.logger.error(f"[ARC Core] Handle sync event forward error: {e}")
+
+    def _on_db_write_for_sync(self, kind: str, table: str, **kwargs):
+        """本地写库成功后：子服上行到中心 / 主机广播给子服。"""
+        try:
+            from endstone_arc_core.sync_protocol import TABLE_TO_ENUM
+            if table not in TABLE_TO_ENUM:
+                return
+            if self.sync_client and self.sync_client.is_running():
+                self.sync_client.mirror_local_write(kind, table, **kwargs)
+                return
+            if self.sync_server and self.sync_server.is_running():
+                self.sync_server.mirror_local_write(kind, table, **kwargs)
+        except Exception as e:
+            try:
+                self.logger.error(f"[ARC Core] Sync mirror write error: {e}")
+            except Exception:
+                pass
+
+    def api_broadcast_qq_chat(
+        self, display_name: str, message: str, group_name: str = ""
+    ) -> bool:
+        """
+        供主机 qqsync 调用：把 QQ 群聊经 SyncServer 下发到各子服。
+        主机本机玩家仍由 qqsync 自己广播；此 API 只负责同步客户端。
+        """
+        try:
+            if not self.sync_server or not self.sync_server.is_running():
+                return False
+            self.sync_server.broadcast_qq_chat(display_name, message, group_name or "")
+            return True
+        except Exception as e:
+            self.logger.error(f"[ARC Core] api_broadcast_qq_chat error: {e}")
+            return False
+
+    def _on_qq_chat_downstream(self, data: dict):
+        """子服：收到主机下发的 QQ 群聊，广播给本机在线玩家。"""
+        try:
+            display_name = str(data.get("display_name") or "")
+            message = str(data.get("message") or "")
+            group_name = str(data.get("group_name") or "")
+            if not display_name or not message:
+                return
+            from_server = "地球Online服务器"
+            if group_name.strip():
+                from_server = f"{from_server}·{group_name.strip()}"
+            game_message = (
+                f"{ColorFormat.GRAY}[跨服|{from_server}] {ColorFormat.AQUA}{display_name}"
+                f"{ColorFormat.GRAY}: {ColorFormat.WHITE}{message}"
+            )
+
+            def send():
+                try:
+                    for player in self.server.online_players:
+                        player.send_message(game_message)
+                except Exception as e:
+                    self.logger.error(f"[ARC Core] Deliver QQ chat error: {e}")
+
+            self.server.scheduler.run_task(self, send, delay=1)
+        except Exception as e:
+            self.logger.error(f"[ARC Core] QQ chat downstream error: {e}")
+
     def _notify_qqsync(self, event_type: str, display_name: str,
                         raw_player_name: str, message: str = ""):
         """
-        通知 qqsync 插件发送事件消息到 QQ 群。
+        通知 qqsync 发送事件消息到 QQ 群。
+        QQ_RELAY_MODE=local：本机 qqsync_plugin
+        QQ_RELAY_MODE=host：经同步中心转发，由主机 qqsync 发送（带上子服名）
         :param event_type: "join" | "quit" | "chat" | "death" | "custom"
         :param display_name: 带头衔的显示名 (含 § 颜色码)
         :param raw_player_name: 原始玩家名
         :param message: 额外消息内容
         """
         try:
+            from endstone_arc_core.sync_config import get_qq_relay_mode
+            if get_qq_relay_mode(self.setting_manager) == "host":
+                if self.sync_client and self.sync_client.is_running():
+                    if self.sync_client.send_event_forward(
+                        event_type, display_name, raw_player_name, message
+                    ):
+                        return
+                self.logger.warning(
+                    "[ARC Core] QQ_RELAY_MODE=host 但同步客户端未连接，跳过 QQ 转发"
+                )
+                return
             qqsync = self.server.plugin_manager.get_plugin('qqsync_plugin')
             if qqsync is None:
                 return

@@ -32,6 +32,10 @@ class SyncMessageType(IntEnum):
     PULL_REQUEST = 0x32          # 拉取数据请求（客户端主动拉取）
     PUSH_NOTIFY = 0x33           # 服务器推送通知（服务器端数据变更）
 
+    # 事件转发（子服 QQ 群消息经同步中心转主机 qqsync）
+    EVENT_FORWARD = 0x40         # 子服 → 主机：游戏事件转发
+    QQ_CHAT_DOWNSTREAM = 0x41    # 主机 → 子服：QQ 群消息下发到游戏
+
     # 错误和响应
     ERROR_RESPONSE = 0xFF         # 错误响应
 
@@ -217,4 +221,36 @@ def build_push_notify(table: SyncTable, operation: str, row_data: Dict) -> bytes
         'table': int(table),
         'operation': operation,  # 'insert', 'update', 'delete'
         'data': row_data,
+    })
+
+
+def build_event_forward(
+    event_type: str,
+    display_name: str,
+    raw_player_name: str,
+    message: str = "",
+    server_id: str = "",
+    server_name: str = "",
+) -> bytes:
+    """构建子服 → 主机的 QQ/群事件转发消息"""
+    return encode_message(SyncMessageType.EVENT_FORWARD, {
+        'event_type': event_type,
+        'display_name': display_name,
+        'raw_player_name': raw_player_name,
+        'message': message,
+        'server_id': server_id,
+        'server_name': server_name,
+    })
+
+
+def build_qq_chat_downstream(
+    display_name: str,
+    message: str,
+    group_name: str = "",
+) -> bytes:
+    """构建主机 → 子服的 QQ 群聊下发消息"""
+    return encode_message(SyncMessageType.QQ_CHAT_DOWNSTREAM, {
+        'display_name': display_name,
+        'message': message,
+        'group_name': group_name or "",
     })

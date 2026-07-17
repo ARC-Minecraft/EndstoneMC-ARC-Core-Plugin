@@ -1,6 +1,7 @@
 import re
 import sqlite3
-from typing import Any, List, Dict, Optional
+from contextlib import contextmanager
+from typing import Any, Callable, List, Dict, Optional
 import threading
 from pathlib import Path
 
@@ -17,7 +18,37 @@ class DatabaseManager:
         # 表路由：table_name -> db_path。未注册的表使用默认 db_path。
         self._table_routes: Dict[str, str] = {}
 
+        # 写库通知（跨服同步上行）；线程内 suppress 时可关闭
+        self._write_notifier: Optional[Callable[..., None]] = None
+
         self._ensure_db_exists()
+
+    def set_write_notifier(self, notifier: Optional[Callable[..., None]]) -> None:
+        """注册本地写库成功后的回调：notifier(kind, table, **kwargs)。"""
+        self._write_notifier = notifier
+
+    @contextmanager
+    def suppress_write_notify(self):
+        """抑制写库通知（用于接收远端同步、同步中心落库，避免回环）。"""
+        prev = getattr(self._local, "suppress_write_notify", False)
+        self._local.suppress_write_notify = True
+        try:
+            yield
+        finally:
+            self._local.suppress_write_notify = prev
+
+    def _emit_write(self, kind: str, table: str, **kwargs) -> None:
+        if not self._write_notifier:
+            return
+        if getattr(self._local, "suppress_write_notify", False):
+            return
+        table_l = (table or "").lower()
+        if not table_l:
+            return
+        try:
+            self._write_notifier(kind, table_l, **kwargs)
+        except Exception as e:
+            print(f"Database write notifier error: {e}")
 
     def _ensure_db_exists(self):
         """确保默认数据库文件存在"""
@@ -81,6 +112,11 @@ class DatabaseManager:
             return m.group(1).lower()
         return None
 
+    @staticmethod
+    def _is_mutating_sql(sql: str) -> bool:
+        s = (sql or "").lstrip().upper()
+        return s.startswith("INSERT") or s.startswith("UPDATE") or s.startswith("DELETE")
+
     # ---- 旧的线程本地连接（兼容未路由的调用） ----
 
     @property
@@ -115,6 +151,10 @@ class DatabaseManager:
             cursor = conn.cursor()
             cursor.execute(sql, params)
             conn.commit()
+            if self._is_mutating_sql(sql):
+                table = self._extract_table_name(sql)
+                if table:
+                    self._emit_write("sql", table, sql=sql, params=params)
             return True
         except Exception as e:
             print(f"Execute SQL error: {str(e)}")
@@ -136,8 +176,14 @@ class DatabaseManager:
             conn.commit()
             rowcount = cursor.rowcount
             if rowcount is None:
-                return 0
-            return int(rowcount)
+                rowcount = 0
+            else:
+                rowcount = int(rowcount)
+            if rowcount > 0 and self._is_mutating_sql(sql):
+                table = self._extract_table_name(sql)
+                if table:
+                    self._emit_write("sql", table, sql=sql, params=params)
+            return rowcount
         except Exception as e:
             print(f"Execute SQL error: {str(e)}")
             try:
@@ -194,6 +240,33 @@ class DatabaseManager:
             cursor = conn.cursor()
             cursor.execute(sql, tuple(data.values()))
             conn.commit()
+            out = dict(data)
+            if cursor.lastrowid and "id" not in out:
+                out["id"] = cursor.lastrowid
+            self._emit_write("insert", table.lower(), data=out)
+            return True
+        except Exception as e:
+            print(f"Execute SQL error: {str(e)}")
+            try:
+                self._resolve_connection(sql).rollback()
+            except Exception:
+                pass
+            return False
+
+    def upsert(self, table: str, data: Dict[str, Any]) -> bool:
+        """INSERT OR REPLACE，用于同步镜像整行。"""
+        fields = ','.join(data.keys())
+        placeholders = ','.join(['?' for _ in data])
+        sql = f"INSERT OR REPLACE INTO {table} ({fields}) VALUES ({placeholders})"
+        try:
+            conn = self._resolve_connection(sql)
+            cursor = conn.cursor()
+            cursor.execute(sql, tuple(data.values()))
+            conn.commit()
+            out = dict(data)
+            if cursor.lastrowid and "id" not in out:
+                out["id"] = cursor.lastrowid
+            self._emit_write("upsert", table.lower(), data=out)
             return True
         except Exception as e:
             print(f"Execute SQL error: {str(e)}")
@@ -214,7 +287,26 @@ class DatabaseManager:
         """
         set_clause = ','.join([f"{k}=?" for k in data.keys()])
         sql = f"UPDATE {table} SET {set_clause} WHERE {where}"
-        return self.execute(sql, tuple(data.values()) + params)
+        try:
+            conn = self._resolve_connection(sql)
+            cursor = conn.cursor()
+            cursor.execute(sql, tuple(data.values()) + params)
+            conn.commit()
+            self._emit_write(
+                "update",
+                table.lower(),
+                data=dict(data),
+                where=where,
+                params=params,
+            )
+            return True
+        except Exception as e:
+            print(f"Execute SQL error: {str(e)}")
+            try:
+                self._resolve_connection(sql).rollback()
+            except Exception:
+                pass
+            return False
 
     def delete(self, table: str, where: str, params: tuple = ()) -> bool:
         """
@@ -225,7 +317,20 @@ class DatabaseManager:
         :return: 是否删除成功
         """
         sql = f"DELETE FROM {table} WHERE {where}"
-        return self.execute(sql, params)
+        try:
+            conn = self._resolve_connection(sql)
+            cursor = conn.cursor()
+            cursor.execute(sql, params)
+            conn.commit()
+            self._emit_write("delete", table.lower(), where=where, params=params)
+            return True
+        except Exception as e:
+            print(f"Execute SQL error: {str(e)}")
+            try:
+                self._resolve_connection(sql).rollback()
+            except Exception:
+                pass
+            return False
 
     def create_table(self, table: str, fields: Dict[str, str]) -> bool:
         """

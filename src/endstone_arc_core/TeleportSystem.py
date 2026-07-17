@@ -6,28 +6,12 @@ import time
 from typing import Dict, Any, Optional, List, Tuple
 
 from endstone_arc_core.mc_command_format import format_mc_command_player_name
+from endstone_arc_core.dimension_utils import format_dimension_for_command
 
 
 def format_dimension_name(dimension: str) -> str:
-    """将完整维度名称转换为 execute 命令所需格式"""
-    dimension_mapping = {
-        "minecraft:overworld": "overworld",
-        "minecraft:the_nether": "the_nether",
-        "minecraft:the_end": "the_end",
-        "Overworld": "overworld",
-        "TheNether": "the_nether",
-        "TheEnd": "the_end",
-        "overworld": "overworld",
-        "the_nether": "the_nether",
-        "the_end": "the_end",
-        "nether": "the_nether",
-        "end": "the_end",
-    }
-    if dimension in dimension_mapping:
-        return dimension_mapping[dimension]
-    if ":" in dimension:
-        return dimension.split(":")[1]
-    return dimension
+    """将维度标识转换为 execute in 所需格式（原版短名，自定义保留 namespace:key）。"""
+    return format_dimension_for_command(dimension)
 
 
 def generate_tp_command_to_position(
@@ -154,9 +138,14 @@ class TeleportSystem:
                 "z": "REAL NOT NULL",
                 "created_time": "INTEGER NOT NULL",
             }
-            return self.db.create_table("public_warps", warp_fields) and self.db.create_table(
+            ok = self.db.create_table("public_warps", warp_fields) and self.db.create_table(
                 "player_homes", home_fields
             )
+            from endstone_arc_core.dimension_utils import migrate_dimension_column
+
+            migrate_dimension_column(self.db, "public_warps", "dimension")
+            migrate_dimension_column(self.db, "player_homes", "dimension")
+            return ok
         except Exception as e:
             self._log("error", f"Init teleport tables error: {str(e)}")
             return False
@@ -172,6 +161,9 @@ class TeleportSystem:
         creator_xuid: str,
     ) -> bool:
         try:
+            from endstone_arc_core.dimension_utils import normalize_dimension_id
+
+            dimension = normalize_dimension_id(dimension)
             warp_data = {
                 "warp_name": warp_name,
                 "dimension": dimension,
@@ -226,6 +218,9 @@ class TeleportSystem:
         z: float,
     ) -> bool:
         try:
+            from endstone_arc_core.dimension_utils import normalize_dimension_id
+
+            dimension = normalize_dimension_id(dimension)
             home_data = {
                 "owner_xuid": owner_xuid,
                 "home_name": home_name,

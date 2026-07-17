@@ -195,9 +195,9 @@ class LandSystem:
             print(f"[ARC Core]Migrate owner_xuid in {table} error: {str(e)}")
 
     def _get_dimension_table(self, dimension: str) -> str:
-        dim_name = dimension.split(":")[-1].lower()
-        dim_name = "".join(c if c.isalnum() else "_" for c in dim_name)
-        return f"chunk_lands_{dim_name}"
+        from endstone_arc_core.dimension_utils import chunk_table_suffix
+
+        return f"chunk_lands_{chunk_table_suffix(dimension)}"
 
     def _get_chunk_key(self, x: int, z: int) -> str:
         return f"{x >> 4}_{z >> 4}"
@@ -292,6 +292,21 @@ class LandSystem:
                     return False
                 print("[ARC Core]Created new land table with all fields")
             self._migrate_land_owner_keys_in_table("lands")
+            from endstone_arc_core.dimension_utils import (
+                migrate_dimension_column,
+                has_legacy_chunk_land_tables,
+            )
+
+            migrated = migrate_dimension_column(self.db, "lands", "dimension")
+            if migrated > 0 or has_legacy_chunk_land_tables(self.db):
+                ok, n_dims, n_lands, err = self.rebuild_chunk_land_mapping()
+                if ok:
+                    print(
+                        f"[ARC Core]Rebuilt chunk_lands after dimension migrate "
+                        f"(dims={n_dims}, lands={n_lands})"
+                    )
+                else:
+                    print(f"[ARC Core]Rebuild chunk_lands failed: {err}")
             return True
         except Exception as e:
             print(f"[ARC Core]Init land tables error: {str(e)}")
@@ -411,9 +426,12 @@ class LandSystem:
         owner_paid_money: float = 0.0,
     ) -> Optional[int]:
         try:
+            from endstone_arc_core.dimension_utils import normalize_dimension_id
+
             owner_xuid = self.normalize_owner_key_for_write(owner_xuid)
             if not owner_xuid:
                 return None
+            dimension = normalize_dimension_id(dimension)
             if not self._ensure_dimension_table(dimension):
                 return None
             self.db.execute(

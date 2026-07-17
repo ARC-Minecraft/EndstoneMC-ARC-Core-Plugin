@@ -5,7 +5,7 @@ import socket
 import threading
 import time
 import uuid
-from typing import Any, Dict, List, Optional, Set
+from typing import Any, Callable, Dict, List, Optional, Set
 from dataclasses import dataclass, field
 
 from endstone_arc_core.sync_protocol import (
@@ -22,13 +22,15 @@ from endstone_arc_core.sync_protocol import (
     build_full_sync_response,
     build_heartbeat,
     build_push_notify,
+    build_qq_chat_downstream,
     build_error_response,
 )
+from endstone_arc_core.sync_write import parse_delete_where, resolve_rows_after_write
 
 
-@dataclass
+@dataclass(eq=False)
 class ConnectedClient:
-    """已连接的客户端"""
+    """已连接的客户端（按对象身份参与 set，字段可变）"""
     conn: socket.socket
     addr: tuple
     server_id: str = ""
@@ -56,6 +58,7 @@ class SyncServer:
         bind_host: str = "0.0.0.0",
         bind_port: int = 19999,
         logger=None,
+        on_event_forward: Optional[Callable[[Dict[str, Any]], None]] = None,
     ):
         """
         初始化同步服务器
@@ -65,12 +68,14 @@ class SyncServer:
         :param bind_host: 绑定地址
         :param bind_port: 绑定端口
         :param logger: 日志记录器
+        :param on_event_forward: 子服 EVENT_FORWARD 回调（主机侧转 qqsync）
         """
         self.db = database_manager
         self.auth_key = auth_key
         self.bind_host = bind_host
         self.bind_port = bind_port
         self.logger = logger
+        self.on_event_forward = on_event_forward
         
         self._socket: Optional[socket.socket] = None
         self._running = False
@@ -248,6 +253,8 @@ class SyncServer:
                 self._handle_full_sync(client, data)
             elif msg_type == SyncMessageType.PULL_REQUEST:
                 self._handle_pull(client, data)
+            elif msg_type == SyncMessageType.EVENT_FORWARD:
+                self._handle_event_forward(client, data)
             else:
                 conn = client.conn
                 conn.sendall(build_error_response(2, f"Unknown message type: {msg_type}"))
@@ -274,8 +281,11 @@ class SyncServer:
         client.authenticated = True
 
         requested_tables = data.get('sync_tables')
-        if isinstance(requested_tables, list) and requested_tables:
-            client.sync_tables = {str(t) for t in requested_tables if str(t) in self._sync_tables}
+        if isinstance(requested_tables, list):
+            # 空列表表示仅事件转发、不同步任何表
+            client.sync_tables = {
+                str(t) for t in requested_tables if str(t) in self._sync_tables
+            }
         else:
             client.sync_tables = set(self._sync_tables)
         
@@ -292,6 +302,28 @@ class SyncServer:
             client.conn.sendall(build_heartbeat())
         except Exception:
             pass
+
+    def _handle_event_forward(self, client: ConnectedClient, data: Dict):
+        """处理子服 QQ/群事件转发（不要求响应，避免与数据同步阻塞）"""
+        payload = {
+            'event_type': str(data.get('event_type', 'custom') or 'custom'),
+            'display_name': str(data.get('display_name', '') or ''),
+            'raw_player_name': str(data.get('raw_player_name', '') or ''),
+            'message': str(data.get('message', '') or ''),
+            # 优先用认证时登记的身份，防止客户端伪造；仅作补充时用 payload
+            'server_id': client.server_id or str(data.get('server_id', '') or ''),
+            'server_name': client.server_name or str(data.get('server_name', '') or ''),
+        }
+        if not self.on_event_forward:
+            self._log(
+                "warning",
+                f"EVENT_FORWARD from {payload['server_name']} ignored (no handler)",
+            )
+            return
+        try:
+            self.on_event_forward(payload)
+        except Exception as e:
+            self._log("error", f"EVENT_FORWARD handler error: {e}")
 
     def _handle_query(self, client: ConnectedClient, data: Dict):
         """处理查询请求"""
@@ -316,7 +348,7 @@ class SyncServer:
             self._log("error", f"Query error: {e}")
 
     def _handle_insert(self, client: ConnectedClient, data: Dict):
-        """处理插入请求"""
+        """处理插入/整行 upsert 请求"""
         try:
             table_enum = SyncTable(data.get('table', 0))
             table_name = ENUM_TO_TABLE.get(table_enum)
@@ -326,7 +358,8 @@ class SyncServer:
                 client.conn.sendall(build_data_response(False, 0, "Table not allowed"))
                 return
             
-            success = self.db.insert(table_name, row_data)
+            with self.db.suppress_write_notify():
+                success = self.db.upsert(table_name, row_data)
             
             # 广播给其他客户端
             if success:
@@ -350,11 +383,17 @@ class SyncServer:
                 client.conn.sendall(build_data_response(False, 0, "Table not allowed"))
                 return
             
-            success = self.db.update(table_name, row_data, where, tuple(params))
+            with self.db.suppress_write_notify():
+                success = self.db.update(table_name, row_data, where, tuple(params))
             
             # 广播给其他客户端
             if success:
-                self._broadcast_push(SyncTable(table_enum), 'update', {**row_data, '_where': where, '_params': params})
+                self._broadcast_push(
+                    SyncTable(table_enum),
+                    'update',
+                    {**row_data, '_where': where, '_params': params},
+                    exclude=client,
+                )
             
             client.conn.sendall(build_data_response(success, 1 if success else 0))
         except Exception as e:
@@ -373,11 +412,17 @@ class SyncServer:
                 client.conn.sendall(build_data_response(False, 0, "Table not allowed"))
                 return
             
-            success = self.db.delete(table_name, where, tuple(params))
+            with self.db.suppress_write_notify():
+                success = self.db.delete(table_name, where, tuple(params))
             
             # 广播给其他客户端
             if success:
-                self._broadcast_push(SyncTable(table_enum), 'delete', {'_where': where, '_params': params})
+                self._broadcast_push(
+                    SyncTable(table_enum),
+                    'delete',
+                    {'_where': where, '_params': params},
+                    exclude=client,
+                )
             
             client.conn.sendall(build_data_response(success, 1 if success else 0))
         except Exception as e:
@@ -400,14 +445,23 @@ class SyncServer:
                     continue
                 
                 if op_type == 'insert':
-                    success = self.db.insert(table_name, op.get('data', {}))
+                    with self.db.suppress_write_notify():
+                        success = self.db.upsert(table_name, op.get('data', {}))
                     results.append({'success': success})
                 elif op_type == 'update':
-                    success = self.db.update(table_name, op.get('data', {}), 
-                                           op.get('where', ''), tuple(op.get('params', [])))
+                    with self.db.suppress_write_notify():
+                        success = self.db.update(
+                            table_name,
+                            op.get('data', {}),
+                            op.get('where', ''),
+                            tuple(op.get('params', [])),
+                        )
                     results.append({'success': success})
                 elif op_type == 'delete':
-                    success = self.db.delete(table_name, op.get('where', ''), tuple(op.get('params', [])))
+                    with self.db.suppress_write_notify():
+                        success = self.db.delete(
+                            table_name, op.get('where', ''), tuple(op.get('params', []))
+                        )
                     results.append({'success': success})
                 else:
                     results.append({'success': False, 'error': 'Unknown operation type'})
@@ -507,6 +561,50 @@ class SyncServer:
         
         if disconnected:
             self._log("info", f"Cleaned up {len(disconnected)} dead clients")
+
+    def mirror_local_write(self, kind: str, table: str, **kwargs) -> None:
+        """主机本地写库后广播给已连接的子服（库已改好，只推送）。"""
+        if table not in self._sync_tables:
+            return
+        table_enum = TABLE_TO_ENUM.get(table)
+        if table_enum is None:
+            return
+        try:
+            sql = str(kwargs.get("sql") or "")
+            if kind == "delete" or sql.lstrip().upper().startswith("DELETE"):
+                where = kwargs.get("where") or parse_delete_where(sql)
+                params = list(kwargs.get("params") or ())
+                if where:
+                    self._broadcast_push(
+                        table_enum, "delete", {"_where": where, "_params": params}
+                    )
+                return
+
+            rows = resolve_rows_after_write(self.db, table, **kwargs)
+            for row in rows:
+                if row:
+                    self._broadcast_push(table_enum, "insert", row)
+        except Exception as e:
+            self._log("error", f"Mirror local write {table}/{kind} error: {e}")
+
+    def broadcast_qq_chat(
+        self, display_name: str, message: str, group_name: str = ""
+    ) -> None:
+        """将 QQ 群聊下发给所有已认证子服。"""
+        if not display_name or not message:
+            return
+        msg = build_qq_chat_downstream(display_name, message, group_name)
+        disconnected = []
+        with self._clients_lock:
+            for client in self._clients:
+                if not client.authenticated:
+                    continue
+                try:
+                    client.conn.sendall(msg)
+                except Exception:
+                    disconnected.append(client)
+            for client in disconnected:
+                self._clients.discard(client)
 
     def get_connected_count(self) -> int:
         """获取已连接的客户端数量"""
