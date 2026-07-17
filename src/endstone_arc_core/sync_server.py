@@ -25,7 +25,7 @@ from endstone_arc_core.sync_protocol import (
     build_qq_chat_downstream,
     build_error_response,
 )
-from endstone_arc_core.sync_write import parse_delete_where, resolve_rows_after_write
+from endstone_arc_core.sync_write import iter_mirror_write_actions
 
 
 @dataclass(eq=False)
@@ -230,40 +230,42 @@ class SyncServer:
         try:
             msg_type, data = decode_message(raw_msg)
             client.last_heartbeat = time.time()
-            
+
             if msg_type == SyncMessageType.AUTH_REQUEST:
                 self._handle_auth(client, data)
-            elif msg_type == SyncMessageType.HEARTBEAT:
-                self._handle_heartbeat(client)
-            elif not client.authenticated:
-                conn = client.conn
-                conn.sendall(build_error_response(1, "Not authenticated"))
                 return
-            elif msg_type == SyncMessageType.QUERY_REQUEST:
-                self._handle_query(client, data)
-            elif msg_type == SyncMessageType.INSERT_REQUEST:
-                self._handle_insert(client, data)
-            elif msg_type == SyncMessageType.UPDATE_REQUEST:
-                self._handle_update(client, data)
-            elif msg_type == SyncMessageType.DELETE_REQUEST:
-                self._handle_delete(client, data)
-            elif msg_type == SyncMessageType.BATCH_SYNC_REQUEST:
-                self._handle_batch_sync(client, data)
-            elif msg_type == SyncMessageType.FULL_SYNC_REQUEST:
-                self._handle_full_sync(client, data)
-            elif msg_type == SyncMessageType.PULL_REQUEST:
-                self._handle_pull(client, data)
-            elif msg_type == SyncMessageType.EVENT_FORWARD:
-                self._handle_event_forward(client, data)
+            if msg_type == SyncMessageType.HEARTBEAT:
+                self._handle_heartbeat(client)
+                return
+            if not client.authenticated:
+                client.conn.sendall(build_error_response(1, "Not authenticated"))
+                return
+
+            handler = self._AUTHED_HANDLERS.get(msg_type)
+            if handler:
+                handler(self, client, data)
             else:
-                conn = client.conn
-                conn.sendall(build_error_response(2, f"Unknown message type: {msg_type}"))
+                client.conn.sendall(
+                    build_error_response(2, f"Unknown message type: {msg_type}")
+                )
         except Exception as e:
             self._log("error", f"Process message error: {e}")
             try:
                 client.conn.sendall(build_error_response(3, str(e)))
             except Exception:
                 pass
+
+    # 已认证后的消息分发（避免长 elif 链抬高圈复杂度）
+    _AUTHED_HANDLERS = {
+        SyncMessageType.QUERY_REQUEST: lambda self, c, d: self._handle_query(c, d),
+        SyncMessageType.INSERT_REQUEST: lambda self, c, d: self._handle_insert(c, d),
+        SyncMessageType.UPDATE_REQUEST: lambda self, c, d: self._handle_update(c, d),
+        SyncMessageType.DELETE_REQUEST: lambda self, c, d: self._handle_delete(c, d),
+        SyncMessageType.BATCH_SYNC_REQUEST: lambda self, c, d: self._handle_batch_sync(c, d),
+        SyncMessageType.FULL_SYNC_REQUEST: lambda self, c, d: self._handle_full_sync(c, d),
+        SyncMessageType.PULL_REQUEST: lambda self, c, d: self._handle_pull(c, d),
+        SyncMessageType.EVENT_FORWARD: lambda self, c, d: self._handle_event_forward(c, d),
+    }
 
     def _handle_auth(self, client: ConnectedClient, data: Dict):
         """处理认证请求"""
@@ -305,23 +307,24 @@ class SyncServer:
 
     def _handle_event_forward(self, client: ConnectedClient, data: Dict):
         """处理子服 QQ/群事件转发（不要求响应，避免与数据同步阻塞）"""
-        payload = {
-            'event_type': str(data.get('event_type', 'custom') or 'custom'),
-            'display_name': str(data.get('display_name', '') or ''),
-            'raw_player_name': str(data.get('raw_player_name', '') or ''),
-            'message': str(data.get('message', '') or ''),
-            # 优先用认证时登记的身份，防止客户端伪造；仅作补充时用 payload
-            'server_id': client.server_id or str(data.get('server_id', '') or ''),
-            'server_name': client.server_name or str(data.get('server_name', '') or ''),
-        }
         if not self.on_event_forward:
             self._log(
                 "warning",
-                f"EVENT_FORWARD from {payload['server_name']} ignored (no handler)",
+                f"EVENT_FORWARD from {client.server_name or data.get('server_name') or '?'} "
+                "ignored (no handler)",
             )
             return
         try:
-            self.on_event_forward(payload)
+            self.on_event_forward(
+                {
+                    "event_type": str(data.get("event_type") or "custom"),
+                    "display_name": str(data.get("display_name") or ""),
+                    "raw_player_name": str(data.get("raw_player_name") or ""),
+                    "message": str(data.get("message") or ""),
+                    "server_id": client.server_id or str(data.get("server_id") or ""),
+                    "server_name": client.server_name or str(data.get("server_name") or ""),
+                }
+            )
         except Exception as e:
             self._log("error", f"EVENT_FORWARD handler error: {e}")
 
@@ -347,138 +350,123 @@ class SyncServer:
             client.conn.sendall(build_query_response(False, [], str(e)))
             self._log("error", f"Query error: {e}")
 
-    def _handle_insert(self, client: ConnectedClient, data: Dict):
-        """处理插入/整行 upsert 请求"""
+    def _apply_client_mutation(
+        self,
+        client: ConnectedClient,
+        data: Dict,
+        *,
+        log_label: str,
+        mutate,
+        push_op: str,
+        push_data: Dict,
+    ) -> None:
+        """校验表权限 → 抑制通知写库 → 成功则广播 → 回响应。"""
         try:
             table_enum = SyncTable(data.get('table', 0))
             table_name = ENUM_TO_TABLE.get(table_enum)
-            row_data = data.get('data', {})
-            
             if table_name not in self._sync_tables:
                 client.conn.sendall(build_data_response(False, 0, "Table not allowed"))
                 return
-            
             with self.db.suppress_write_notify():
-                success = self.db.upsert(table_name, row_data)
-            
-            # 广播给其他客户端
+                success = mutate(table_name)
             if success:
-                self._broadcast_push(SyncTable(table_enum), 'insert', row_data, exclude=client)
-            
+                self._broadcast_push(
+                    SyncTable(table_enum), push_op, push_data, exclude=client
+                )
             client.conn.sendall(build_data_response(success, 1 if success else 0))
         except Exception as e:
             client.conn.sendall(build_data_response(False, 0, str(e)))
-            self._log("error", f"Insert error: {e}")
+            self._log("error", f"{log_label} error: {e}")
+
+    def _handle_insert(self, client: ConnectedClient, data: Dict):
+        """处理插入/整行 upsert 请求"""
+        row_data = data.get('data', {})
+        self._apply_client_mutation(
+            client,
+            data,
+            log_label="Insert",
+            mutate=lambda t: self.db.upsert(t, row_data),
+            push_op="insert",
+            push_data=row_data,
+        )
 
     def _handle_update(self, client: ConnectedClient, data: Dict):
         """处理更新请求"""
-        try:
-            table_enum = SyncTable(data.get('table', 0))
-            table_name = ENUM_TO_TABLE.get(table_enum)
-            row_data = data.get('data', {})
-            where = data.get('where', '')
-            params = data.get('params', [])
-            
-            if table_name not in self._sync_tables:
-                client.conn.sendall(build_data_response(False, 0, "Table not allowed"))
-                return
-            
-            with self.db.suppress_write_notify():
-                success = self.db.update(table_name, row_data, where, tuple(params))
-            
-            # 广播给其他客户端
-            if success:
-                self._broadcast_push(
-                    SyncTable(table_enum),
-                    'update',
-                    {**row_data, '_where': where, '_params': params},
-                    exclude=client,
-                )
-            
-            client.conn.sendall(build_data_response(success, 1 if success else 0))
-        except Exception as e:
-            client.conn.sendall(build_data_response(False, 0, str(e)))
-            self._log("error", f"Update error: {e}")
+        row_data = data.get('data', {})
+        where = data.get('where', '')
+        params = data.get('params', [])
+        self._apply_client_mutation(
+            client,
+            data,
+            log_label="Update",
+            mutate=lambda t: self.db.update(t, row_data, where, tuple(params)),
+            push_op="update",
+            push_data={**row_data, '_where': where, '_params': params},
+        )
 
     def _handle_delete(self, client: ConnectedClient, data: Dict):
         """处理删除请求"""
-        try:
-            table_enum = SyncTable(data.get('table', 0))
-            table_name = ENUM_TO_TABLE.get(table_enum)
-            where = data.get('where', '')
-            params = data.get('params', [])
-            
-            if table_name not in self._sync_tables:
-                client.conn.sendall(build_data_response(False, 0, "Table not allowed"))
-                return
-            
-            with self.db.suppress_write_notify():
-                success = self.db.delete(table_name, where, tuple(params))
-            
-            # 广播给其他客户端
-            if success:
-                self._broadcast_push(
-                    SyncTable(table_enum),
-                    'delete',
-                    {'_where': where, '_params': params},
-                    exclude=client,
-                )
-            
-            client.conn.sendall(build_data_response(success, 1 if success else 0))
-        except Exception as e:
-            client.conn.sendall(build_data_response(False, 0, str(e)))
-            self._log("error", f"Delete error: {e}")
+        where = data.get('where', '')
+        params = data.get('params', [])
+        self._apply_client_mutation(
+            client,
+            data,
+            log_label="Delete",
+            mutate=lambda t: self.db.delete(t, where, tuple(params)),
+            push_op="delete",
+            push_data={'_where': where, '_params': params},
+        )
+
+    def _run_batch_op(self, op_type: str, table_name: str, op: Dict) -> Dict:
+        runners = {
+            "insert": lambda: self.db.upsert(table_name, op.get("data", {})),
+            "update": lambda: self.db.update(
+                table_name,
+                op.get("data", {}),
+                op.get("where", ""),
+                tuple(op.get("params", [])),
+            ),
+            "delete": lambda: self.db.delete(
+                table_name, op.get("where", ""), tuple(op.get("params", []))
+            ),
+        }
+        runner = runners.get(op_type)
+        if not runner:
+            return {"success": False, "error": "Unknown operation type"}
+        with self.db.suppress_write_notify():
+            return {"success": runner()}
+
+    def _broadcast_batch_op(self, client: ConnectedClient, op: Dict) -> None:
+        table_enum = SyncTable(op.get("table", 0))
+        op_type = op.get("type")
+        if op_type == "insert":
+            self._broadcast_push(table_enum, "insert", op.get("data", {}), exclude=client)
+        elif op_type == "update":
+            self._broadcast_push(table_enum, "update", op.get("data", {}), exclude=client)
+        elif op_type == "delete":
+            self._broadcast_push(
+                table_enum,
+                "delete",
+                {"_where": op.get("where", ""), "_params": op.get("params", [])},
+                exclude=client,
+            )
 
     def _handle_batch_sync(self, client: ConnectedClient, data: Dict):
         """处理批量同步请求"""
         try:
-            operations = data.get('operations', [])
+            operations = data.get("operations", [])
             results = []
-            
             for op in operations:
-                op_type = op.get('type')
-                table_enum = SyncTable(op.get('table', 0))
-                table_name = ENUM_TO_TABLE.get(table_enum)
-                
+                table_name = ENUM_TO_TABLE.get(SyncTable(op.get("table", 0)))
                 if table_name not in self._sync_tables:
-                    results.append({'success': False, 'error': 'Table not allowed'})
+                    results.append({"success": False, "error": "Table not allowed"})
                     continue
-                
-                if op_type == 'insert':
-                    with self.db.suppress_write_notify():
-                        success = self.db.upsert(table_name, op.get('data', {}))
-                    results.append({'success': success})
-                elif op_type == 'update':
-                    with self.db.suppress_write_notify():
-                        success = self.db.update(
-                            table_name,
-                            op.get('data', {}),
-                            op.get('where', ''),
-                            tuple(op.get('params', [])),
-                        )
-                    results.append({'success': success})
-                elif op_type == 'delete':
-                    with self.db.suppress_write_notify():
-                        success = self.db.delete(
-                            table_name, op.get('where', ''), tuple(op.get('params', []))
-                        )
-                    results.append({'success': success})
-                else:
-                    results.append({'success': False, 'error': 'Unknown operation type'})
-            
+                results.append(self._run_batch_op(op.get("type"), table_name, op))
+
             client.conn.sendall(build_batch_sync_response(True, results))
-            
-            # 广播变更
-            for i, (op, result) in enumerate(zip(operations, results)):
-                if result.get('success'):
-                    table_enum = SyncTable(op.get('table', 0))
-                    op_type = op.get('type')
-                    if op_type == 'insert':
-                        self._broadcast_push(table_enum, 'insert', op.get('data', {}), exclude=client)
-                    elif op_type == 'update':
-                        self._broadcast_push(table_enum, 'update', op.get('data', {}), exclude=client)
-                    elif op_type == 'delete':
-                        self._broadcast_push(table_enum, 'delete', {'_where': op.get('where', ''), '_params': op.get('params', [])}, exclude=client)
+            for op, result in zip(operations, results):
+                if result.get("success"):
+                    self._broadcast_batch_op(client, op)
         except Exception as e:
             client.conn.sendall(build_batch_sync_response(False, [], str(e)))
             self._log("error", f"Batch sync error: {e}")
@@ -570,20 +558,14 @@ class SyncServer:
         if table_enum is None:
             return
         try:
-            sql = str(kwargs.get("sql") or "")
-            if kind == "delete" or sql.lstrip().upper().startswith("DELETE"):
-                where = kwargs.get("where") or parse_delete_where(sql)
-                params = list(kwargs.get("params") or ())
-                if where:
+            for action in iter_mirror_write_actions(self.db, kind, table, **kwargs):
+                if action[0] == "delete":
+                    _, where, params = action
                     self._broadcast_push(
                         table_enum, "delete", {"_where": where, "_params": params}
                     )
-                return
-
-            rows = resolve_rows_after_write(self.db, table, **kwargs)
-            for row in rows:
-                if row:
-                    self._broadcast_push(table_enum, "insert", row)
+                else:
+                    self._broadcast_push(table_enum, "insert", action[1])
         except Exception as e:
             self._log("error", f"Mirror local write {table}/{kind} error: {e}")
 

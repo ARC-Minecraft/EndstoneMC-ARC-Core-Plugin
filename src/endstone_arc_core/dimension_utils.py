@@ -28,7 +28,6 @@ _VANILLA_LANG_KEYS = {
     "minecraft:the_end": "DIMENSION_THEEND",
 }
 
-# 旧版 chunk_lands_* 表名；检测到后需重建索引
 _LEGACY_CHUNK_LAND_TABLES = frozenset(
     {
         "chunk_lands_overworld",
@@ -41,22 +40,35 @@ _LEGACY_CHUNK_LAND_TABLES = frozenset(
     }
 )
 
+_DIMENSION_COLUMN_MIGRATE_SQL = {
+    "lands": (
+        "SELECT DISTINCT dimension AS dim FROM lands",
+        "UPDATE lands SET dimension = ? WHERE dimension = ?",
+    ),
+    "public_warps": (
+        "SELECT DISTINCT dimension AS dim FROM public_warps",
+        "UPDATE public_warps SET dimension = ? WHERE dimension = ?",
+    ),
+    "player_homes": (
+        "SELECT DISTINCT dimension AS dim FROM player_homes",
+        "UPDATE player_homes SET dimension = ? WHERE dimension = ?",
+    ),
+}
+
 
 def normalize_dimension_id(dimension: Optional[str]) -> str:
     """将维度字符串升为官方规范 ID；自定义维度原样保留。"""
-    if not dimension:
-        return ""
-    raw = str(dimension).strip()
+    raw = str(dimension or "").strip()
     if not raw:
         return ""
-    if raw in _VANILLA_CANONICAL:
-        return _VANILLA_CANONICAL[raw]
-    lower = raw.lower()
-    if lower in _VANILLA_CANONICAL:
-        return _VANILLA_CANONICAL[lower]
-    compact = "".join(c for c in lower if c.isalnum() or c == ":")
-    if compact in _VANILLA_CANONICAL:
-        return _VANILLA_CANONICAL[compact]
+    for key in (
+        raw,
+        raw.lower(),
+        "".join(c for c in raw.lower() if c.isalnum() or c == ":"),
+    ):
+        hit = _VANILLA_CANONICAL.get(key)
+        if hit:
+            return hit
     return raw
 
 
@@ -64,17 +76,13 @@ def get_dimension_id(dimension: Any) -> str:
     """从 Dimension 取出规范维度 ID（优先 .id，回退 .name，并规范化）。"""
     if dimension is None:
         return ""
-    text = ""
-    dim_id = getattr(dimension, "id", None)
-    if dim_id is not None:
-        text = str(dim_id).strip()
-    if not text:
-        name = getattr(dimension, "name", None)
-        if name is not None:
-            text = str(name).strip()
-    if not text:
-        text = str(dimension).strip()
-    return normalize_dimension_id(text)
+    for attr in ("id", "name"):
+        val = getattr(dimension, attr, None)
+        if val is not None:
+            text = str(val).strip()
+            if text:
+                return normalize_dimension_id(text)
+    return normalize_dimension_id(str(dimension).strip())
 
 
 def format_dimension_for_command(dimension: Optional[str]) -> str:
@@ -90,53 +98,41 @@ def chunk_table_suffix(dimension: Optional[str]) -> str:
 
 def translate_dimension_display(dimension: Optional[str], language_manager=None) -> str:
     """显示名：原版走语言文件；未知/自定义返回完整 ID（不写入语言文件）。"""
-    if not dimension:
+    fallback = str(dimension or "").strip()
+    if not fallback:
         return ""
-    canonical = normalize_dimension_id(dimension)
-    lang_key = _VANILLA_LANG_KEYS.get(canonical)
-    if lang_key and language_manager is not None:
-        try:
-            lang_code = getattr(language_manager, "language_code", None)
-            lang_dict = getattr(type(language_manager), "language_dict", None) or {}
-            bucket = lang_dict.get(lang_code, {}) if lang_code else {}
-            text = bucket.get(lang_key) if isinstance(bucket, dict) else None
-            if text:
-                return text
-            translated = language_manager.GetText(lang_key)
-            if translated:
-                return translated
-        except Exception:
-            pass
-    return str(dimension).strip()
+    lang_key = _VANILLA_LANG_KEYS.get(normalize_dimension_id(dimension))
+    if not lang_key or language_manager is None:
+        return fallback
+    try:
+        lang_code = getattr(language_manager, "language_code", None)
+        lang_dict = getattr(type(language_manager), "language_dict", None) or {}
+        bucket = lang_dict.get(lang_code) if lang_code else None
+        text = bucket.get(lang_key) if isinstance(bucket, dict) else None
+        return text or language_manager.GetText(lang_key) or fallback
+    except (AttributeError, KeyError, TypeError):
+        return fallback
 
 
 def migrate_dimension_column(db, table: str, column: str = "dimension") -> int:
-    """
-    将表中非规范维度值一次性升为官方 ID。
-    普通列：UPDATE SET column = new WHERE column = old
-    返回更新行数（按行累计）。
-    """
-    if not db.table_exists(table):
+    """将表中非规范维度值一次性升为官方 ID。返回更新行数。"""
+    sql_pair = _DIMENSION_COLUMN_MIGRATE_SQL.get(table) if column == "dimension" else None
+    if not sql_pair or not db.table_exists(table):
         return 0
+    select_sql, update_sql = sql_pair
     try:
-        rows = db.query_all(f"SELECT DISTINCT {column} AS dim FROM {table}")
+        rows = db.query_all(select_sql)
     except Exception as e:
         print(f"[ARC Core]migrate_dimension_column read {table}.{column} error: {e}")
         return 0
     total = 0
     for row in rows:
-        old = row.get("dim") if isinstance(row, dict) else None
-        if old is None:
-            continue
-        old_s = str(old)
+        old_s = str((row.get("dim") if isinstance(row, dict) else None) or "")
         new_s = normalize_dimension_id(old_s)
-        if not new_s or new_s == old_s:
+        if not old_s or not new_s or new_s == old_s:
             continue
         try:
-            n = db.execute_and_get_rowcount(
-                f"UPDATE {table} SET {column} = ? WHERE {column} = ?",
-                (new_s, old_s),
-            )
+            n = db.execute_and_get_rowcount(update_sql, (new_s, old_s))
             if n > 0:
                 total += n
                 print(
@@ -152,11 +148,10 @@ def migrate_dimension_column(db, table: str, column: str = "dimension") -> int:
 
 def migrate_spawn_locations_dimensions(db) -> int:
     """spawn_locations 以 dimension 为主键，需单独迁移（避免主键冲突）。"""
-    table = "spawn_locations"
-    if not db.table_exists(table):
+    if not db.table_exists("spawn_locations"):
         return 0
     try:
-        rows = db.query_all(f"SELECT * FROM {table}")
+        rows = db.query_all("SELECT * FROM spawn_locations")
     except Exception as e:
         print(f"[ARC Core]migrate_spawn_locations read error: {e}")
         return 0
@@ -168,25 +163,20 @@ def migrate_spawn_locations_dimensions(db) -> int:
             continue
         try:
             existing = db.query_one(
-                f"SELECT dimension FROM {table} WHERE dimension = ?", (new_s,)
+                "SELECT dimension FROM spawn_locations WHERE dimension = ?",
+                (new_s,),
             )
-            if existing:
-                if db.delete(table, "dimension = ?", (old_s,)):
-                    total += 1
-                    print(
-                        f"[ARC Core]Migrated spawn_locations: dropped duplicate "
-                        f"{old_s!r} (kept {new_s!r})"
-                    )
-            else:
-                ok = db.execute(
-                    f"UPDATE {table} SET dimension = ? WHERE dimension = ?",
+            ok = (
+                db.delete("spawn_locations", "dimension = ?", (old_s,))
+                if existing
+                else db.execute(
+                    "UPDATE spawn_locations SET dimension = ? WHERE dimension = ?",
                     (new_s, old_s),
                 )
-                if ok:
-                    total += 1
-                    print(
-                        f"[ARC Core]Migrated spawn_locations: {old_s!r} -> {new_s!r}"
-                    )
+            )
+            if ok:
+                total += 1
+                print(f"[ARC Core]Migrated spawn_locations: {old_s!r} -> {new_s!r}")
         except Exception as e:
             print(
                 f"[ARC Core]migrate_spawn_locations {old_s!r}->{new_s!r} error: {e}"
@@ -202,8 +192,7 @@ def has_legacy_chunk_land_tables(db) -> bool:
         )
     except Exception:
         return False
-    for row in rows:
-        name = row.get("name") if isinstance(row, dict) else None
-        if name in _LEGACY_CHUNK_LAND_TABLES:
-            return True
-    return False
+    return any(
+        isinstance(row, dict) and row.get("name") in _LEGACY_CHUNK_LAND_TABLES
+        for row in rows
+    )

@@ -18,10 +18,7 @@ SYNC_TABLE_PRIMARY_KEYS: Dict[str, Tuple[str, ...]] = {
     "guild_invites": ("id",),
 }
 
-
-def is_mutating_sql(sql: str) -> bool:
-    s = (sql or "").lstrip().upper()
-    return s.startswith("INSERT") or s.startswith("UPDATE") or s.startswith("DELETE")
+_IDENT_RE = re.compile(r"^[A-Za-z_][A-Za-z0-9_]*$")
 
 
 def parse_delete_where(sql: str) -> Optional[str]:
@@ -38,8 +35,7 @@ def split_update_where(sql: str) -> Tuple[Optional[str], int]:
     )
     if not m:
         return None, 0
-    set_part, where_part = m.group(1), m.group(2)
-    return where_part.strip(), set_part.count("?")
+    return m.group(2).strip(), m.group(1).count("?")
 
 
 def parse_insert_columns_and_values(
@@ -55,10 +51,22 @@ def parse_insert_columns_and_values(
     if not m:
         return None
     cols = [c.strip().strip('`"[]') for c in m.group(1).split(",")]
-    placeholders = m.group(2).count("?")
-    if placeholders != len(cols) or placeholders != len(params):
+    if m.group(2).count("?") != len(cols) or len(cols) != len(params):
         return None
-    return {cols[i]: params[i] for i in range(len(cols))}
+    return dict(zip(cols, params))
+
+
+def _select_rows(db, table: str, where: str, params: Sequence[Any]) -> List[Dict[str, Any]]:
+    """仅允许同步表白名单内的表名；值一律参数化。"""
+    if (
+        table not in SYNC_TABLE_PRIMARY_KEYS
+        or not _IDENT_RE.fullmatch(table)
+        or not where
+        or ";" in where
+    ):
+        return []
+    query = "SELECT * FROM " + table + " WHERE " + where  # nosec B608
+    return db.query_all(query, tuple(params)) or []
 
 
 def resolve_rows_after_write(
@@ -70,44 +78,56 @@ def resolve_rows_after_write(
     params: Optional[Sequence[Any]] = None,
     sql: Optional[str] = None,
 ) -> List[Dict[str, Any]]:
-    """
-    在本地写成功后，尽量定位受影响行并 SELECT * 得到完整行，供中心 upsert。
-    """
+    """本地写成功后定位受影响行并 SELECT *，供中心 upsert。"""
     table = table.lower()
-    params = tuple(params or ())
+    params_t = tuple(params or ())
+    if table not in SYNC_TABLE_PRIMARY_KEYS:
+        return []
 
     if sql:
         upper = sql.lstrip().upper()
         if upper.startswith("DELETE"):
             return []
         if upper.startswith("INSERT"):
-            row = parse_insert_columns_and_values(sql, params)
-            if row:
-                return _refetch_by_pk_or_row(db, table, row)
-            return []
+            row = parse_insert_columns_and_values(sql, params_t)
+            return _refetch_by_pk_or_row(db, table, row) if row else []
         if upper.startswith("UPDATE"):
             where_clause, set_q = split_update_where(sql)
-            if not where_clause:
-                return []
-            where_params = params[set_q:]
-            return db.query_all(f"SELECT * FROM {table} WHERE {where_clause}", where_params) or []
+            return (
+                _select_rows(db, table, where_clause, params_t[set_q:])
+                if where_clause
+                else []
+            )
 
     if where:
-        return db.query_all(f"SELECT * FROM {table} WHERE {where}", params) or []
-
-    if data:
-        return _refetch_by_pk_or_row(db, table, data)
-
-    return []
+        return _select_rows(db, table, where, params_t)
+    return _refetch_by_pk_or_row(db, table, data) if data else []
 
 
 def _refetch_by_pk_or_row(db, table: str, row: Dict[str, Any]) -> List[Dict[str, Any]]:
     pks = SYNC_TABLE_PRIMARY_KEYS.get(table)
-    if pks and all(k in row and row[k] is not None for k in pks):
-        where = " AND ".join(f"{k} = ?" for k in pks)
-        params = tuple(row[k] for k in pks)
-        found = db.query_all(f"SELECT * FROM {table} WHERE {where}", params) or []
+    if pks and all(row.get(k) is not None for k in pks):
+        found = _select_rows(
+            db,
+            table,
+            " AND ".join(k + " = ?" for k in pks),
+            tuple(row[k] for k in pks),
+        )
         if found:
             return found
-    # 回退：用写入字典本身（INSERT OR REPLACE 时通常足够）
     return [dict(row)]
+
+
+def iter_mirror_write_actions(db, kind: str, table: str, **kwargs):
+    """产出镜像动作：("delete", where, params) 或 ("insert", row)。"""
+    sql = str(kwargs.get("sql") or "")
+    if kind == "delete" or sql.lstrip().upper().startswith("DELETE"):
+        where = kwargs.get("where") or parse_delete_where(sql)
+        if where:
+            yield ("delete", where, list(kwargs.get("params") or ()))
+        return
+    yield from (
+        ("insert", row)
+        for row in resolve_rows_after_write(db, table, **kwargs)
+        if row
+    )

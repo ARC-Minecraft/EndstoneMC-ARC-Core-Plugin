@@ -38,12 +38,10 @@ class DatabaseManager:
             self._local.suppress_write_notify = prev
 
     def _emit_write(self, kind: str, table: str, **kwargs) -> None:
-        if not self._write_notifier:
+        table_l = (table or "").lower()
+        if not self._write_notifier or not table_l:
             return
         if getattr(self._local, "suppress_write_notify", False):
-            return
-        table_l = (table or "").lower()
-        if not table_l:
             return
         try:
             self._write_notifier(kind, table_l, **kwargs)
@@ -86,36 +84,43 @@ class DatabaseManager:
         """根据 SQL 语句解析表名，返回对应数据库的连接"""
         table_name = self._extract_table_name(sql)
         if table_name and table_name in self._table_routes:
-            target_path = self._table_routes[table_name]
-            return self._get_connection(target_path)
+            return self._get_connection(self._table_routes[table_name])
         return self._get_connection(self.db_path)
 
-    @staticmethod
-    def _extract_table_name(sql: str) -> Optional[str]:
+    _TABLE_NAME_PATTERNS = (
+        r'\bINSERT\s+(?:OR\s+\w+\s+)?INTO\s+[`"\[]?(\w+)',
+        r'\bUPDATE\s+[`"\[]?(\w+)',
+        r'\bDELETE\s+FROM\s+[`"\[]?(\w+)',
+        r'\bFROM\s+[`"\[]?(\w+)',
+    )
+
+    @classmethod
+    def _extract_table_name(cls, sql: str) -> Optional[str]:
         """从 SQL 语句中提取主表名"""
         s = sql.strip()
-        # INSERT OR REPLACE INTO / INSERT INTO
-        m = re.search(r'\bINSERT\s+(?:OR\s+\w+\s+)?INTO\s+[`"\[]?(\w+)', s, re.IGNORECASE)
-        if m:
-            return m.group(1).lower()
-        # UPDATE
-        m = re.search(r'\bUPDATE\s+[`"\[]?(\w+)', s, re.IGNORECASE)
-        if m:
-            return m.group(1).lower()
-        # DELETE FROM
-        m = re.search(r'\bDELETE\s+FROM\s+[`"\[]?(\w+)', s, re.IGNORECASE)
-        if m:
-            return m.group(1).lower()
-        # SELECT ... FROM / JOIN / FROM
-        m = re.search(r'\bFROM\s+[`"\[]?(\w+)', s, re.IGNORECASE)
-        if m:
-            return m.group(1).lower()
+        for pattern in cls._TABLE_NAME_PATTERNS:
+            m = re.search(pattern, s, re.IGNORECASE)
+            if m:
+                return m.group(1).lower()
         return None
 
     @staticmethod
     def _is_mutating_sql(sql: str) -> bool:
         s = (sql or "").lstrip().upper()
-        return s.startswith("INSERT") or s.startswith("UPDATE") or s.startswith("DELETE")
+        return s.startswith(("INSERT", "UPDATE", "DELETE"))
+
+    def _rollback_quiet(self, sql: str) -> None:
+        try:
+            self._resolve_connection(sql).rollback()
+        except Exception:
+            pass
+
+    def _notify_mutating(self, sql: str, params: tuple) -> None:
+        if not self._is_mutating_sql(sql):
+            return
+        table = self._extract_table_name(sql)
+        if table:
+            self._emit_write("sql", table, sql=sql, params=params)
 
     # ---- 旧的线程本地连接（兼容未路由的调用） ----
 
@@ -151,17 +156,11 @@ class DatabaseManager:
             cursor = conn.cursor()
             cursor.execute(sql, params)
             conn.commit()
-            if self._is_mutating_sql(sql):
-                table = self._extract_table_name(sql)
-                if table:
-                    self._emit_write("sql", table, sql=sql, params=params)
+            self._notify_mutating(sql, params)
             return True
         except Exception as e:
             print(f"Execute SQL error: {str(e)}")
-            try:
-                self._resolve_connection(sql).rollback()
-            except Exception:
-                pass
+            self._rollback_quiet(sql)
             return False
 
     def execute_and_get_rowcount(self, sql: str, params: tuple = ()) -> int:
@@ -174,22 +173,13 @@ class DatabaseManager:
             cursor = conn.cursor()
             cursor.execute(sql, params)
             conn.commit()
-            rowcount = cursor.rowcount
-            if rowcount is None:
-                rowcount = 0
-            else:
-                rowcount = int(rowcount)
-            if rowcount > 0 and self._is_mutating_sql(sql):
-                table = self._extract_table_name(sql)
-                if table:
-                    self._emit_write("sql", table, sql=sql, params=params)
+            rowcount = 0 if cursor.rowcount is None else int(cursor.rowcount)
+            if rowcount > 0:
+                self._notify_mutating(sql, params)
             return rowcount
         except Exception as e:
             print(f"Execute SQL error: {str(e)}")
-            try:
-                self._resolve_connection(sql).rollback()
-            except Exception:
-                pass
+            self._rollback_quiet(sql)
             return -1
 
     def query_one(self, sql: str, params: tuple = ()) -> Optional[Dict[str, Any]]:
@@ -225,6 +215,25 @@ class DatabaseManager:
             print(f"Query all error: {str(e)}")
             return []
 
+    def _execute_write_with_row(
+        self, sql: str, data: Dict[str, Any], kind: str, table: str
+    ) -> bool:
+        """执行带行数据的写库（insert/upsert），成功后发出写通知。"""
+        try:
+            conn = self._resolve_connection(sql)
+            cursor = conn.cursor()
+            cursor.execute(sql, tuple(data.values()))
+            conn.commit()
+            out = dict(data)
+            if cursor.lastrowid and "id" not in out:
+                out["id"] = cursor.lastrowid
+            self._emit_write(kind, table.lower(), data=out)
+            return True
+        except Exception as e:
+            print(f"Execute SQL error: {str(e)}")
+            self._rollback_quiet(sql)
+            return False
+
     def insert(self, table: str, data: Dict[str, Any]) -> bool:
         """
         插入数据
@@ -235,46 +244,14 @@ class DatabaseManager:
         fields = ','.join(data.keys())
         placeholders = ','.join(['?' for _ in data])
         sql = f"INSERT INTO {table} ({fields}) VALUES ({placeholders})"
-        try:
-            conn = self._resolve_connection(sql)
-            cursor = conn.cursor()
-            cursor.execute(sql, tuple(data.values()))
-            conn.commit()
-            out = dict(data)
-            if cursor.lastrowid and "id" not in out:
-                out["id"] = cursor.lastrowid
-            self._emit_write("insert", table.lower(), data=out)
-            return True
-        except Exception as e:
-            print(f"Execute SQL error: {str(e)}")
-            try:
-                self._resolve_connection(sql).rollback()
-            except Exception:
-                pass
-            return False
+        return self._execute_write_with_row(sql, data, "insert", table)
 
     def upsert(self, table: str, data: Dict[str, Any]) -> bool:
         """INSERT OR REPLACE，用于同步镜像整行。"""
         fields = ','.join(data.keys())
         placeholders = ','.join(['?' for _ in data])
         sql = f"INSERT OR REPLACE INTO {table} ({fields}) VALUES ({placeholders})"
-        try:
-            conn = self._resolve_connection(sql)
-            cursor = conn.cursor()
-            cursor.execute(sql, tuple(data.values()))
-            conn.commit()
-            out = dict(data)
-            if cursor.lastrowid and "id" not in out:
-                out["id"] = cursor.lastrowid
-            self._emit_write("upsert", table.lower(), data=out)
-            return True
-        except Exception as e:
-            print(f"Execute SQL error: {str(e)}")
-            try:
-                self._resolve_connection(sql).rollback()
-            except Exception:
-                pass
-            return False
+        return self._execute_write_with_row(sql, data, "upsert", table)
 
     def update(self, table: str, data: Dict[str, Any], where: str, params: tuple = ()) -> bool:
         """
@@ -287,26 +264,7 @@ class DatabaseManager:
         """
         set_clause = ','.join([f"{k}=?" for k in data.keys()])
         sql = f"UPDATE {table} SET {set_clause} WHERE {where}"
-        try:
-            conn = self._resolve_connection(sql)
-            cursor = conn.cursor()
-            cursor.execute(sql, tuple(data.values()) + params)
-            conn.commit()
-            self._emit_write(
-                "update",
-                table.lower(),
-                data=dict(data),
-                where=where,
-                params=params,
-            )
-            return True
-        except Exception as e:
-            print(f"Execute SQL error: {str(e)}")
-            try:
-                self._resolve_connection(sql).rollback()
-            except Exception:
-                pass
-            return False
+        return self.execute(sql, tuple(data.values()) + params)
 
     def delete(self, table: str, where: str, params: tuple = ()) -> bool:
         """
@@ -317,20 +275,7 @@ class DatabaseManager:
         :return: 是否删除成功
         """
         sql = f"DELETE FROM {table} WHERE {where}"
-        try:
-            conn = self._resolve_connection(sql)
-            cursor = conn.cursor()
-            cursor.execute(sql, params)
-            conn.commit()
-            self._emit_write("delete", table.lower(), where=where, params=params)
-            return True
-        except Exception as e:
-            print(f"Execute SQL error: {str(e)}")
-            try:
-                self._resolve_connection(sql).rollback()
-            except Exception:
-                pass
-            return False
+        return self.execute(sql, params)
 
     def create_table(self, table: str, fields: Dict[str, str]) -> bool:
         """

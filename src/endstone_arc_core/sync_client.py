@@ -18,7 +18,7 @@ from endstone_arc_core.sync_protocol import (
     build_heartbeat,
     decode_message,
 )
-from endstone_arc_core.sync_write import parse_delete_where, resolve_rows_after_write
+from endstone_arc_core.sync_write import iter_mirror_write_actions
 
 
 class SyncClient:
@@ -39,22 +39,8 @@ class SyncClient:
             setting_manager.GetSetting("SYNC_CLIENT_SERVER_NAME") or "服务器01"
         ).strip()
         self.auth_key = str(setting_manager.GetSetting("SYNC_CLIENT_AUTH_KEY") or "").strip()
-
-        port_raw = setting_manager.GetSetting("SYNC_CLIENT_PORT")
-        if port_raw is None or not str(port_raw).strip():
-            port_raw = setting_manager.GetSetting("SYNC_SERVER_PORT")
-        try:
-            self.server_port = int(port_raw) if port_raw else 19999
-        except (ValueError, TypeError):
-            self.server_port = 19999
-
-        interval_raw = setting_manager.GetSetting("SYNC_CLIENT_RECONNECT_INTERVAL")
-        try:
-            self.reconnect_interval = int(interval_raw) if interval_raw else 10
-        except (ValueError, TypeError):
-            self.reconnect_interval = 10
-        if self.reconnect_interval < 1:
-            self.reconnect_interval = 1
+        self.server_port = self._setting_int("SYNC_CLIENT_PORT", 19999, fallback_key="SYNC_SERVER_PORT")
+        self.reconnect_interval = max(1, self._setting_int("SYNC_CLIENT_RECONNECT_INTERVAL", 10))
 
         self.enabled_tables: Set[str] = get_client_sync_tables(setting_manager)
         self.qq_relay_host = get_qq_relay_mode(setting_manager) == "host"
@@ -63,6 +49,15 @@ class SyncClient:
         self._active = False  # 希望保持连接（允许断线重连）
         self._worker_thread: Optional[threading.Thread] = None
         self._socket_lock = threading.Lock()
+
+    def _setting_int(self, key: str, default: int, fallback_key: str = "") -> int:
+        raw = self.settings.GetSetting(key)
+        if (raw is None or not str(raw).strip()) and fallback_key:
+            raw = self.settings.GetSetting(fallback_key)
+        try:
+            return int(raw) if raw is not None and str(raw).strip() else default
+        except (ValueError, TypeError):
+            return default
 
     def _log(self, level: str, message: str) -> None:
         if self.logger:
@@ -139,34 +134,26 @@ class SyncClient:
         if table_enum is None:
             return
         try:
-            sql = str(kwargs.get("sql") or "")
-            if kind == "delete" or sql.lstrip().upper().startswith("DELETE"):
-                where = kwargs.get("where") or parse_delete_where(sql)
-                params = list(kwargs.get("params") or ())
-                if not where:
-                    return
-                self._send(
-                    build_data_request(
-                        SyncMessageType.DELETE_REQUEST,
-                        table_enum,
-                        {},
-                        where=where,
-                        params=params,
+            for action in iter_mirror_write_actions(self.db, kind, table, **kwargs):
+                if action[0] == "delete":
+                    _, where, params = action
+                    self._send(
+                        build_data_request(
+                            SyncMessageType.DELETE_REQUEST,
+                            table_enum,
+                            {},
+                            where=where,
+                            params=params,
+                        )
                     )
-                )
-                return
-
-            rows = resolve_rows_after_write(self.db, table, **kwargs)
-            for row in rows:
-                if not row:
-                    continue
-                self._send(
-                    build_data_request(
-                        SyncMessageType.INSERT_REQUEST,
-                        table_enum,
-                        dict(row),
+                else:
+                    self._send(
+                        build_data_request(
+                            SyncMessageType.INSERT_REQUEST,
+                            table_enum,
+                            dict(action[1]),
+                        )
                     )
-                )
         except Exception as e:
             self._log("error", f"Mirror local write {table}/{kind} error: {e}")
 
@@ -329,29 +316,54 @@ class SyncClient:
         with self.db.suppress_write_notify():
             return self.db.execute(sql, tuple(row.values()))
 
+    def _apply_push_update(self, table_name: str, data: Dict[str, Any]) -> None:
+        row_data = {k: v for k, v in data.items() if not k.startswith("_")}
+        where = data.get("_where", "")
+        params = tuple(data.get("_params", []))
+        if where and row_data:
+            self.db.update(table_name, row_data, where, params)
+        elif row_data:
+            self._upsert_row(table_name, row_data)
+
+    def _apply_push_delete(self, table_name: str, data: Dict[str, Any]) -> None:
+        where = data.get("_where", "")
+        if where:
+            self.db.delete(table_name, where, tuple(data.get("_params", [])))
+
     def _apply_push(self, table_enum: SyncTable, operation: str, data: Dict[str, Any]) -> None:
         table_name = ENUM_TO_TABLE.get(table_enum)
         if not table_name or table_name not in self.enabled_tables:
             return
+        apply_fn = {
+            "insert": lambda: self._upsert_row(table_name, data),
+            "update": lambda: self._apply_push_update(table_name, data),
+            "delete": lambda: self._apply_push_delete(table_name, data),
+        }.get(operation)
+        if not apply_fn:
+            return
         try:
             with self.db.suppress_write_notify():
-                if operation == "insert":
-                    self._upsert_row(table_name, data)
-                elif operation == "update":
-                    row_data = {k: v for k, v in data.items() if not k.startswith("_")}
-                    where = data.get("_where", "")
-                    params = tuple(data.get("_params", []))
-                    if where and row_data:
-                        self.db.update(table_name, row_data, where, params)
-                    elif row_data:
-                        self._upsert_row(table_name, row_data)
-                elif operation == "delete":
-                    where = data.get("_where", "")
-                    params = tuple(data.get("_params", []))
-                    if where:
-                        self.db.delete(table_name, where, params)
+                apply_fn()
         except Exception as e:
             self._log("error", f"Apply push {table_name}/{operation} error: {e}")
+
+    def _dispatch_listen_message(self, msg_type, data: Dict[str, Any], heartbeat_ts: float) -> float:
+        """处理监听循环中的单条消息，返回可能更新后的 heartbeat 时间戳。"""
+        if msg_type == SyncMessageType.PUSH_NOTIFY:
+            self._apply_push(
+                SyncTable(data.get("table", 0)),
+                data.get("operation", ""),
+                data.get("data", {}),
+            )
+        elif msg_type == SyncMessageType.QQ_CHAT_DOWNSTREAM:
+            if self.on_qq_chat:
+                try:
+                    self.on_qq_chat(data)
+                except Exception as e:
+                    self._log("error", f"QQ chat downstream handler error: {e}")
+        elif msg_type == SyncMessageType.HEARTBEAT:
+            return time.time()
+        return heartbeat_ts
 
     def _listen_loop(self) -> None:
         buffer = b""
@@ -382,21 +394,9 @@ class SyncClient:
                     raw_msg = buffer[: 5 + msg_len]
                     buffer = buffer[5 + msg_len :]
                     msg_type, data = decode_message(raw_msg)
-
-                    if msg_type == SyncMessageType.PUSH_NOTIFY:
-                        table_enum = SyncTable(data.get("table", 0))
-                        self._apply_push(
-                            table_enum, data.get("operation", ""), data.get("data", {})
-                        )
-                    elif msg_type == SyncMessageType.QQ_CHAT_DOWNSTREAM:
-                        if self.on_qq_chat:
-                            try:
-                                self.on_qq_chat(data)
-                            except Exception as e:
-                                self._log("error", f"QQ chat downstream handler error: {e}")
-                    elif msg_type == SyncMessageType.HEARTBEAT:
-                        last_heartbeat = time.time()
-                    # 其它类型（含写库响应）忽略，避免阻塞监听
+                    last_heartbeat = self._dispatch_listen_message(
+                        msg_type, data, last_heartbeat
+                    )
             except socket.timeout:
                 continue
             except Exception as e:
