@@ -1,6 +1,6 @@
 <div align="center">
 
-# EndStone ARC Core Plugin / EndStone ARC 核心插件
+# EndStone ARC Core Plugin / EndStone弧光核心
 
 [![Codacy Grade](https://app.codacy.com/project/badge/Grade/2f830615baf347258558dcc2a5ab85a1)](https://app.codacy.com/gh/DEVILENMO/EndstoneMC-ARC-Core-Plugin/dashboard)
 [![Version](https://img.shields.io/badge/version-v0.0.8.1-blue)](https://github.com/ARC-Minecraft/EndstoneMC-ARC-Core-Plugin)
