@@ -1,5 +1,12 @@
 # EndStone ARC Core Plugin
 
+[![Codacy Grade](https://app.codacy.com/project/badge/Grade/2f830615baf347258558dcc2a5ab85a1)](https://app.codacy.com/gh/DEVILENMO/EndstoneMC-ARC-Core-Plugin/dashboard)
+[![Version](https://img.shields.io/badge/version-v0.0.8.1-blue)](https://github.com/ARC-Minecraft/EndstoneMC-ARC-Core-Plugin)
+[![Python](https://img.shields.io/badge/python-3.13+-blue?logo=python&logoColor=white)](https://www.python.org/)
+[![EndStone API](https://img.shields.io/badge/EndStone_API-0.7+-black)](https://github.com/EndstoneMC/endstone)
+[![License](https://img.shields.io/github/license/ARC-Minecraft/EndstoneMC-ARC-Core-Plugin)](LICENSE)
+[![GitHub stars](https://img.shields.io/github/stars/ARC-Minecraft/EndstoneMC-ARC-Core-Plugin)](https://github.com/ARC-Minecraft/EndstoneMC-ARC-Core-Plugin/stargazers)
+
 ## 概述
 
 EndStone ARC Core 是一个功能完整的 EndStone (Minecraft 基岩版服务器) 插件，为服务器提供全方位的核心功能模块。该插件包含玩家管理、经济系统、领地管理、传送系统、公告系统、清道夫系统、天眼行为审计等丰富功能，是构建现代化 Minecraft 服务器的理想选择。插件体验服：IP：arcclub.top，端口：19132，你可以在这个服务器试用体验本插件。
