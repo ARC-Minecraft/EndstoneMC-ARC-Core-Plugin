@@ -141,7 +141,7 @@ EndStone ARC Core 是一个功能完整的 EndStone (Minecraft 基岩版服务�
 - **随机传送系统 (v0.1.12新增)** - 随机传送到指定范围内，自动附加缓降（羽落）效果（**30 秒**，v0.4.1 起；此前为 10 秒）
 - **传送付费系统 (v0.1.12新增)** - 每种传送类型可独立配置收费，支持余额检查
 - **跨维度传送支持** - 支持在主世界、下界、末地之间自由传送
-- **智能维度处理** - 自动使用 `execute in <dimension> run tp` 指令格式
+- **智能维度处理** - 自动使用 `execute in <dimension> run tp`；原版三维度用短名（`overworld`/`nether`/`the_end`），自定义维度用完整 `namespace:id`
 - 传送倒计时提示
 
 ### 💴 商店系统
@@ -919,6 +919,7 @@ class MyPlugin(Plugin):
 - ✅ **公共领地拦截生物生成**：`block_actor_spawn`（默认关闭）；开启后经 `ActorSpawnEvent` 取消该公共领地内 `Mob`（不含玩家）生成
 - ✅ **传送点校验修复**：设置领地传送点改为按目标领地三维 AABB（含维度/Y）判定，不再用「脚下生效领地 ID」比较，避免嵌套私人地/高层公共覆盖时误报「不在领地内」
 - ✅ **领地外接 API**：`api_if_position_in_land` 适配三维 Y、维度规范化与多层生效；新增 **`api_resolve_land_at_position`**、**`api_list_lands_at_position`**。维度支持规范 ID（如 `minecraft:overworld`）及自定义维度
+- ✅ **跨维传送指令修复**：`/execute in` 对原版三维度使用短名（`overworld` / `nether` / `the_end`），去掉 `minecraft:`；自定义维度仍使用完整 `namespace:dimension_identifier`
 - ✅ **版本号方案**：历史版本号由 `0.0.x` 调整为 `0.x`（如原 `0.0.8.1` → `0.8.1`）
 
 ### v0.8.1

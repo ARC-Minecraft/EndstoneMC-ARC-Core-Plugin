@@ -28,6 +28,13 @@ _VANILLA_LANG_KEYS = {
     "minecraft:the_end": "DIMENSION_THEEND",
 }
 
+# Bedrock /execute in：原版三维度必须用短名（去掉 minecraft:）
+_VANILLA_COMMAND_IDS = {
+    "minecraft:overworld": "overworld",
+    "minecraft:nether": "nether",
+    "minecraft:the_end": "the_end",
+}
+
 _LEGACY_CHUNK_LAND_TABLES = frozenset(
     {
         "chunk_lands_overworld",
@@ -86,8 +93,9 @@ def get_dimension_id(dimension: Any) -> str:
 
 
 def format_dimension_for_command(dimension: Optional[str]) -> str:
-    """execute in 直接使用已存储的规范维度 ID。"""
-    return normalize_dimension_id(dimension) or "minecraft:overworld"
+    """execute in 维度参数：原版 overworld/nether/the_end；自定义保留 namespace:id。"""
+    canonical = normalize_dimension_id(dimension) or "minecraft:overworld"
+    return _VANILLA_COMMAND_IDS.get(canonical, canonical)
 
 
 def chunk_table_suffix(dimension: Optional[str]) -> str:
