@@ -7,7 +7,7 @@ DEFAULT_LANGUAGE_CODE=ZH-CN
 DATABASE_PATH=ARCCore.db
 
 # =============================================================================
-# 跨服数据同步（v0.0.8）
+# 跨服数据同步（v0.8）
 # 游戏服在以下两种方式中择一（互斥，不可同时启用）：
 #   A. 远程同步 — ENABLE_SYNC_CLIENT=True，作为客户端连接同步中心
 #   B. 文件同步 — ENABLE_SYNC_CLIENT=False，填写下方共享 SQLite 路径

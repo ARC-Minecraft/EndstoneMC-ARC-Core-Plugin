@@ -12,7 +12,8 @@ from typing import Any, Callable, Dict, List, Optional, Set
 from endstone import ColorFormat, Player, GameMode
 from endstone.form import ActionForm, TextInput, ModalForm, Label, Dropdown
 from endstone.command import Command, CommandSender
-from endstone.event import event_handler, PlayerJoinEvent, PlayerQuitEvent, PlayerRespawnEvent, BlockBreakEvent, BlockPlaceEvent, PlayerDeathEvent, PlayerInteractEvent, ActorExplodeEvent, PlayerInteractActorEvent, ActorDamageEvent, ActorDeathEvent, PlayerChatEvent 
+from endstone.actor import Mob
+from endstone.event import event_handler, PlayerJoinEvent, PlayerQuitEvent, PlayerRespawnEvent, BlockBreakEvent, BlockPlaceEvent, PlayerDeathEvent, PlayerInteractEvent, ActorExplodeEvent, PlayerInteractActorEvent, ActorDamageEvent, ActorDeathEvent, ActorSpawnEvent, PlayerChatEvent 
 from endstone.plugin import Plugin
 
 from endstone_arc_core.DatabaseManager import DatabaseManager
@@ -1489,6 +1490,31 @@ class ARCCorePlugin(Plugin):
                 if not self._check_land_permission(attacker, land_info):
                     event.is_cancelled = True
                     attacker.send_message(self.language_manager.GetText('LAND_ACTOR_DAMAGE_DENIED'))
+
+    @event_handler
+    def on_actor_spawn(self, event: ActorSpawnEvent):
+        """公共领地开启 block_actor_spawn 时拦截生物（Mob）生成；不拦截玩家与非 Mob 实体。"""
+        try:
+            actor = event.actor
+            if actor is None or isinstance(actor, Player):
+                return
+            if not isinstance(actor, Mob):
+                return
+            loc = actor.location
+            if loc is None:
+                return
+            dimension = get_dimension_id(loc.dimension)
+            ax = math.floor(loc.x)
+            ay = math.floor(loc.y)
+            az = math.floor(loc.z)
+            land_id = self.get_land_at_pos(dimension, ax, az, ay)
+            if land_id is None or not self.is_public_land(land_id):
+                return
+            land_info = self.get_land_info(land_id)
+            if land_info and land_info.get("block_actor_spawn", False):
+                event.is_cancelled = True
+        except Exception as e:
+            self.logger.error(f"Handle actor spawn event error: {str(e)}")
 
     @event_handler
     def on_actor_death(self, event: ActorDeathEvent):
@@ -8454,11 +8480,12 @@ class ARCCorePlugin(Plugin):
 
     def create_land(self, owner_xuid: str, land_name: str, dimension: str,
                     min_x: int, max_x: int, min_y: int, max_y: int, min_z: int, max_z: int,
-                    tp_x: float, tp_y: float, tp_z: float, owner_paid_money: float = 0.0) -> Optional[int]:
+                    tp_x: float, tp_y: float, tp_z: float, owner_paid_money: float = 0.0,
+                    public_priority: int = LandSystem.PUBLIC_PRIORITY_DEFAULT) -> Optional[int]:
         return self.land_system.create_land(
             owner_xuid, land_name, dimension,
             min_x, max_x, min_y, max_y, min_z, max_z,
-            tp_x, tp_y, tp_z, owner_paid_money
+            tp_x, tp_y, tp_z, owner_paid_money, public_priority=public_priority
         )
 
     def get_land_at_pos(self, dimension: str, x: int, z: int, y: int = None) -> Optional[int]:
@@ -8477,9 +8504,18 @@ class ARCCorePlugin(Plugin):
         min_z: int,
         max_z: int,
         exclude_land_ids: Optional[Set[int]] = None,
+        creating_public_priority: Optional[int] = None,
     ) -> tuple:
         return self.land_system.check_land_availability(
-            dimension, min_x, max_x, min_y, max_y, min_z, max_z, exclude_land_ids
+            dimension,
+            min_x,
+            max_x,
+            min_y,
+            max_y,
+            min_z,
+            max_z,
+            exclude_land_ids,
+            creating_public_priority=creating_public_priority,
         )
 
     def create_sub_land(self, parent_land_id: int, owner_xuid: str, sub_land_name: str,
@@ -8638,8 +8674,12 @@ class ARCCorePlugin(Plugin):
     def get_land_owner(self, land_id: int) -> str:
         return self.land_system.get_land_owner(land_id)
 
-    def set_land_as_public(self, land_id: int) -> bool:
-        return self.land_system.set_land_as_public(land_id)
+    def set_land_as_public(
+        self, land_id: int, public_priority: Optional[int] = None
+    ) -> bool:
+        return self.land_system.set_land_as_public(
+            land_id, public_priority=public_priority
+        )
 
     def rename_land(self, land_id: int, new_name: str) -> tuple:
         success, err = self.land_system.rename_land(land_id, new_name)
@@ -9031,13 +9071,21 @@ class ARCCorePlugin(Plugin):
         player.send_form(rename_panel)
 
     def set_player_pos_as_land_tp_pos(self, player: Player, land_id: int):
-        on_land_id = self.get_land_at_pos(get_dimension_id(player.location.dimension), math.floor(player.location.x), math.floor(player.location.z))
-        if on_land_id is None or on_land_id != land_id:
+        """用玩家当前位置设领地传送点：按目标领地 AABB（含维度/Y）校验，不依赖脚下生效领地。"""
+        dim = get_dimension_id(player.location.dimension)
+        x = math.floor(player.location.x)
+        y = math.floor(player.location.y)
+        z = math.floor(player.location.z)
+        if not self.land_system.position_in_land_bounds(land_id, x, y, z, dim):
             result = self.language_manager.GetText('SET_LAND_TP_POS_FAIL_OUT_LAND')
         else:
-            new_pos = (math.floor(player.location.x), math.floor(player.location.y), math.floor(player.location.z))
-            self.set_land_teleport_point(land_id, new_pos[0], new_pos[1], new_pos[2])
-            result = self.language_manager.GetText('SET_LAND_TP_POS_SUCCESS').format(land_id, new_pos)
+            success, _err = self.set_land_teleport_point(land_id, x, y, z)
+            if success:
+                result = self.language_manager.GetText('SET_LAND_TP_POS_SUCCESS').format(
+                    land_id, (x, y, z)
+                )
+            else:
+                result = self.language_manager.GetText('SET_LAND_TP_POS_FAIL_OUT_LAND')
         result_panel = ActionForm(
             title=self.language_manager.GetText('SET_LAND_TP_POS_RESULT_TITLE'),
             content=result,
@@ -10213,7 +10261,7 @@ class ARCCorePlugin(Plugin):
             )
         purchase_form.add_button(
             self.language_manager.GetText("LAND_BTN_CREATE_PUBLIC_LAND"),
-            on_click=lambda p, dim=dimension, m1=min_x, m2=max_x, m3=min_y, m4=max_y, m5=min_z, m6=max_z: self.player_create_public_land_from_pending(
+            on_click=lambda p, dim=dimension, m1=min_x, m2=max_x, m3=min_y, m4=max_y, m5=min_z, m6=max_z: self.show_create_public_land_priority_modal(
                 p, dim, m1, m2, m3, m4, m5, m6
             ),
         )
@@ -10370,7 +10418,7 @@ class ARCCorePlugin(Plugin):
                 self._format_money_display(money_cost),
                 self._format_money_display(self.get_player_money(player))))
 
-    def player_create_public_land_from_pending(
+    def show_create_public_land_priority_modal(
         self,
         player: Player,
         dimension: str,
@@ -10381,6 +10429,61 @@ class ARCCorePlugin(Plugin):
         min_z: int,
         max_z: int,
     ) -> None:
+        """创建公共领地前选择优先级（1/2/3）。"""
+        if not player.is_op:
+            player.send_message(
+                self.language_manager.GetText("LAND_CREATE_PUBLIC_NEED_OP")
+            )
+            self.show_pending_land_purchase_panel(player)
+            return
+        priority_dropdown = Dropdown(
+            label=self.language_manager.GetText("PUBLIC_LAND_PRIORITY_DROPDOWN_LABEL"),
+            options=[
+                self.language_manager.GetText("PUBLIC_LAND_PRIORITY_OPTION_1"),
+                self.language_manager.GetText("PUBLIC_LAND_PRIORITY_OPTION_2"),
+                self.language_manager.GetText("PUBLIC_LAND_PRIORITY_OPTION_3"),
+            ],
+            default_index=0,
+        )
+
+        def on_submit(p: Player, json_str: str):
+            try:
+                data = json.loads(json_str)
+                if self._modal_choice_is_back(data, 0):
+                    self.show_pending_land_purchase_panel(p)
+                    return
+                try:
+                    idx = int(data[1])
+                except (TypeError, ValueError, IndexError):
+                    idx = 0
+                priority = LandSystem.clamp_public_priority(idx + 1)
+                self.player_create_public_land_from_pending(
+                    p, dimension, min_x, max_x, min_y, max_y, min_z, max_z, priority
+                )
+            except Exception as e:
+                self.logger.error(f"create public land priority modal error: {e}")
+                self.show_pending_land_purchase_panel(p)
+
+        form = ModalForm(
+            title=self.language_manager.GetText("PUBLIC_LAND_PRIORITY_SELECT_TITLE"),
+            controls=[self._modal_nav_dropdown(), priority_dropdown],
+            on_close=None,
+            on_submit=on_submit,
+        )
+        player.send_form(form)
+
+    def player_create_public_land_from_pending(
+        self,
+        player: Player,
+        dimension: str,
+        min_x: int,
+        max_x: int,
+        min_y: int,
+        max_y: int,
+        min_z: int,
+        max_z: int,
+        public_priority: int = LandSystem.PUBLIC_PRIORITY_DEFAULT,
+    ) -> None:
         """圈地确认：创建公共领地（仅 OP，不扣款）。"""
         if not player.is_op:
             player.send_message(
@@ -10388,8 +10491,16 @@ class ARCCorePlugin(Plugin):
             )
             self.show_pending_land_purchase_panel(player)
             return
+        priority = LandSystem.clamp_public_priority(public_priority)
         if_allowed, reason, overlap_ids = self.check_land_availability(
-            dimension, min_x, max_x, min_y, max_y, min_z, max_z
+            dimension,
+            min_x,
+            max_x,
+            min_y,
+            max_y,
+            min_z,
+            max_z,
+            creating_public_priority=priority,
         )
         if not if_allowed:
             if reason == "SYSTEM_ERROR":
@@ -10426,13 +10537,14 @@ class ARCCorePlugin(Plugin):
             player.location.y,
             player.location.z,
             owner_paid_money=0.0,
+            public_priority=priority,
         )
         if land_id is not None:
-            self.set_land_as_public(land_id)
+            self.set_land_as_public(land_id, public_priority=priority)
             self.clear_new_land_creation_info_memory(player)
             player.send_message(
                 self.language_manager.GetText("LAND_CREATE_PUBLIC_SUCCESS").format(
-                    land_id
+                    land_id, priority
                 )
             )
             self.show_land_main_menu(player)
@@ -10722,6 +10834,11 @@ class ARCCorePlugin(Plugin):
             player.send_message(self.language_manager.GetText("LAND_RESIZE_DIM_MISMATCH"))
             return
 
+        creating_public_priority = None
+        if self.is_public_land(land_id):
+            creating_public_priority = LandSystem.clamp_public_priority(
+                land_info.get("public_priority", LandSystem.PUBLIC_PRIORITY_DEFAULT)
+            )
         if_allowed, reason, overlap_ids = self.check_land_availability(
             dimension,
             min_x,
@@ -10731,6 +10848,7 @@ class ARCCorePlugin(Plugin):
             min_z,
             max_z,
             exclude_land_ids={land_id},
+            creating_public_priority=creating_public_priority,
         )
         if not if_allowed:
             if reason == "SYSTEM_ERROR":
@@ -10980,6 +11098,11 @@ class ARCCorePlugin(Plugin):
         if not land_info or land_info.get("for_sale"):
             player.send_message(self.language_manager.GetText("LAND_RESIZE_COMMIT_ABORT"))
             return
+        creating_public_priority = None
+        if self.is_public_land(land_id):
+            creating_public_priority = LandSystem.clamp_public_priority(
+                land_info.get("public_priority", LandSystem.PUBLIC_PRIORITY_DEFAULT)
+            )
         if_allowed, reason, overlap_ids = self.check_land_availability(
             dimension,
             min_x,
@@ -10989,6 +11112,7 @@ class ARCCorePlugin(Plugin):
             min_z,
             max_z,
             exclude_land_ids={land_id},
+            creating_public_priority=creating_public_priority,
         )
         if not if_allowed:
             player.send_message(self.language_manager.GetText("LAND_RESIZE_COMMIT_OVERLAP"))
@@ -13108,6 +13232,13 @@ class ARCCorePlugin(Plugin):
             shared_user_name_str
         )
         content = f"所有者: {owner_name}\n\n" + content
+        if self.is_public_land(land_id):
+            pri = LandSystem.clamp_public_priority(
+                land_info.get("public_priority", LandSystem.PUBLIC_PRIORITY_DEFAULT)
+            )
+            content += "\n" + self.language_manager.GetText(
+                "PUBLIC_LAND_PRIORITY_CURRENT_STATUS"
+            ).format(pri)
         
         detail_panel = ActionForm(
             title=self.language_manager.GetText('OP_LAND_DETAIL_TITLE').format(land_id),
@@ -13385,7 +13516,7 @@ class ARCCorePlugin(Plugin):
         self.show_op_land_auth_manage_panel(player, land_id, from_page)
 
     def show_op_public_land_settings_panel(self, player: Player, land_id: int, from_page: int):
-        """OP 公共领地设置面板：开放互动/开放爆炸/开放生物互动/开放生物伤害"""
+        """OP 公共领地设置面板：开放互动/开放爆炸/开放生物互动/开放生物伤害/拦截生物生成等"""
         land_info = self.get_land_info(land_id)
         if not land_info:
             self.report_arc_error(
@@ -13396,6 +13527,12 @@ class ARCCorePlugin(Plugin):
             self.show_op_all_lands_panel(player, from_page)
             return
         status_lines = []
+        pri = LandSystem.clamp_public_priority(
+            land_info.get("public_priority", LandSystem.PUBLIC_PRIORITY_DEFAULT)
+        )
+        status_lines.append(
+            self.language_manager.GetText("PUBLIC_LAND_PRIORITY_CURRENT_STATUS").format(pri)
+        )
         status_lines.append('开放方块互动: ' + (self.language_manager.GetText('LAND_PUBLIC_INTERACT_STATUS_ENABLED') if land_info.get('allow_public_interact') else self.language_manager.GetText('LAND_PUBLIC_INTERACT_STATUS_DISABLED')))
         status_lines.append(
             '同公会成员可互动: '
@@ -13409,6 +13546,13 @@ class ARCCorePlugin(Plugin):
         status_lines.append('开放生物互动: ' + (self.language_manager.GetText('LAND_ACTOR_INTERACTION_STATUS_ENABLED') if land_info.get('allow_actor_interaction') else self.language_manager.GetText('LAND_ACTOR_INTERACTION_STATUS_DISABLED')))
         status_lines.append('展示框: ' + (self.language_manager.GetText('LAND_FRAME_STATUS_ENABLED') if land_info.get('allow_frame') else self.language_manager.GetText('LAND_FRAME_STATUS_DISABLED')))
         status_lines.append('开放生物伤害: ' + (self.language_manager.GetText('LAND_ACTOR_DAMAGE_STATUS_ENABLED') if land_info.get('allow_actor_damage') else self.language_manager.GetText('LAND_ACTOR_DAMAGE_STATUS_DISABLED')))
+        status_lines.append(
+            self.language_manager.GetText('BLOCK_ACTOR_SPAWN_CURRENT_STATUS').format(
+                self.language_manager.GetText('BLOCK_ACTOR_SPAWN_STATUS_ENABLED')
+                if land_info.get('block_actor_spawn')
+                else self.language_manager.GetText('BLOCK_ACTOR_SPAWN_STATUS_DISABLED')
+            )
+        )
         anpl_enabled = self.language_manager.GetText('ALLOW_NON_PUBLIC_LAND_STATUS_ENABLED') if land_info.get('allow_non_public_land') else self.language_manager.GetText('ALLOW_NON_PUBLIC_LAND_STATUS_DISABLED')
         status_lines.append(self.language_manager.GetText('ALLOW_NON_PUBLIC_LAND_CURRENT_STATUS').format(anpl_enabled))
         content = '\n'.join(status_lines)
@@ -13416,6 +13560,10 @@ class ARCCorePlugin(Plugin):
             title=self.language_manager.GetText('OP_PUBLIC_LAND_SETTINGS_BUTTON'),
             content=content,
             on_close=None,
+        )
+        settings_panel.add_button(
+            self.language_manager.GetText('PUBLIC_LAND_PRIORITY_SETTING_BUTTON_TEXT'),
+            on_click=lambda p=player, l_id=land_id, pg=from_page: self.show_op_public_land_priority_panel(p, l_id, pg)
         )
         settings_panel.add_button(
             self.language_manager.GetText('LAND_PUBLIC_INTERACT_SETTING_BUTTON_TEXT'),
@@ -13442,6 +13590,10 @@ class ARCCorePlugin(Plugin):
             on_click=lambda p=player, l_id=land_id, pg=from_page: self.show_op_public_land_toggle_panel(p, l_id, 'allow_actor_damage', pg)
         )
         settings_panel.add_button(
+            self.language_manager.GetText('BLOCK_ACTOR_SPAWN_SETTING_BUTTON_TEXT'),
+            on_click=lambda p=player, l_id=land_id, pg=from_page: self.show_op_public_land_toggle_panel(p, l_id, 'block_actor_spawn', pg)
+        )
+        settings_panel.add_button(
             self.language_manager.GetText('ALLOW_NON_PUBLIC_LAND_SETTING_BUTTON_TEXT'),
             on_click=lambda p=player, l_id=land_id, pg=from_page: self.show_op_public_land_toggle_panel(p, l_id, 'allow_non_public_land', pg)
         )
@@ -13450,6 +13602,99 @@ class ARCCorePlugin(Plugin):
             on_click=lambda p=player, l_id=land_id, pg=from_page: self.show_op_land_detail_panel(p, l_id, pg)
         )
         player.send_form(settings_panel)
+
+    def show_op_public_land_priority_panel(self, player: Player, land_id: int, from_page: int):
+        """OP 修改公共领地优先级面板"""
+        land_info = self.get_land_info(land_id)
+        if not land_info or not self.is_public_land(land_id):
+            self.show_op_all_lands_panel(player, from_page)
+            return
+        current = LandSystem.clamp_public_priority(
+            land_info.get("public_priority", LandSystem.PUBLIC_PRIORITY_DEFAULT)
+        )
+        panel = ActionForm(
+            title=self.language_manager.GetText("PUBLIC_LAND_PRIORITY_SETTING_TITLE"),
+            content=self.language_manager.GetText(
+                "PUBLIC_LAND_PRIORITY_CURRENT_STATUS"
+            ).format(current),
+            on_close=None,
+        )
+        for level in (1, 2, 3):
+            label_key = f"PUBLIC_LAND_PRIORITY_OPTION_{level}"
+            btn = self.language_manager.GetText(label_key)
+            if level == current:
+                btn = self.language_manager.GetText(
+                    "PUBLIC_LAND_PRIORITY_OPTION_CURRENT"
+                ).format(btn)
+            panel.add_button(
+                btn,
+                on_click=lambda p=player, l_id=land_id, lv=level, pg=from_page: self.op_set_public_land_priority(
+                    p, l_id, lv, pg
+                ),
+            )
+        panel.add_button(
+            self.language_manager.GetText("RETURN_BUTTON_TEXT"),
+            on_click=lambda p=player, l_id=land_id, pg=from_page: self.show_op_public_land_settings_panel(
+                p, l_id, pg
+            ),
+        )
+        player.send_form(panel)
+
+    def op_set_public_land_priority(
+        self, player: Player, land_id: int, priority: int, from_page: int
+    ):
+        """OP 设置公共领地优先级；与同级/更高公共重叠时拒绝。"""
+        land_info = self.get_land_info(land_id)
+        if not land_info or not self.is_public_land(land_id):
+            player.send_message(
+                self.language_manager.GetText("PUBLIC_LAND_PRIORITY_FAILED")
+            )
+            self.show_op_public_land_settings_panel(player, land_id, from_page)
+            return
+        new_priority = LandSystem.clamp_public_priority(priority)
+        old_priority = LandSystem.clamp_public_priority(
+            land_info.get("public_priority", LandSystem.PUBLIC_PRIORITY_DEFAULT)
+        )
+        if new_priority == old_priority:
+            self.show_op_public_land_settings_panel(player, land_id, from_page)
+            return
+        # 仅升高优先级时校验：不可与同级/更高公共或私人/公会冲突；降低则允许（上层公共自然接管）
+        if new_priority > old_priority:
+            if_allowed, reason, overlap_ids = self.check_land_availability(
+                land_info["dimension"],
+                land_info["min_x"],
+                land_info["max_x"],
+                land_info.get("min_y", 0),
+                land_info.get("max_y", 255),
+                land_info["min_z"],
+                land_info["max_z"],
+                exclude_land_ids={land_id},
+                creating_public_priority=new_priority,
+            )
+            if not if_allowed:
+                msg = self.language_manager.GetText("PUBLIC_LAND_PRIORITY_CONFLICT")
+                if overlap_ids:
+                    land_parts = [
+                        f"#{lid} {self.get_land_name(lid) or ''}".strip()
+                        for lid in overlap_ids
+                    ]
+                    msg = msg + "\n" + self.language_manager.GetText(
+                        "LAND_OVERLAP_WITH_LANDS"
+                    ).format(", ".join(land_parts))
+                player.send_message(msg)
+                self.show_op_public_land_priority_panel(player, land_id, from_page)
+                return
+        if self.land_system.set_land_public_priority(land_id, new_priority):
+            player.send_message(
+                self.language_manager.GetText("PUBLIC_LAND_PRIORITY_UPDATED").format(
+                    land_id, new_priority
+                )
+            )
+        else:
+            player.send_message(
+                self.language_manager.GetText("PUBLIC_LAND_PRIORITY_FAILED")
+            )
+        self.show_op_public_land_settings_panel(player, land_id, from_page)
     
     def show_op_public_land_toggle_panel(self, player: Player, land_id: int, setting_key: str, from_page: int):
         """OP 公共领地单项设置切换面板"""
@@ -13481,6 +13726,9 @@ class ARCCorePlugin(Plugin):
         elif setting_key == 'allow_non_public_land':
             status_text = self.language_manager.GetText('ALLOW_NON_PUBLIC_LAND_STATUS_ENABLED') if current else self.language_manager.GetText('ALLOW_NON_PUBLIC_LAND_STATUS_DISABLED')
             title = self.language_manager.GetText('ALLOW_NON_PUBLIC_LAND_SETTING_BUTTON_TEXT')
+        elif setting_key == 'block_actor_spawn':
+            status_text = self.language_manager.GetText('BLOCK_ACTOR_SPAWN_STATUS_ENABLED') if current else self.language_manager.GetText('BLOCK_ACTOR_SPAWN_STATUS_DISABLED')
+            title = self.language_manager.GetText('BLOCK_ACTOR_SPAWN_SETTING_TITLE')
         else:  # allow_actor_damage
             status_text = self.language_manager.GetText('LAND_ACTOR_DAMAGE_STATUS_ENABLED') if current else self.language_manager.GetText('LAND_ACTOR_DAMAGE_STATUS_DISABLED')
             title = self.language_manager.GetText('LAND_ACTOR_DAMAGE_SETTING_TITLE')
@@ -13496,6 +13744,7 @@ class ARCCorePlugin(Plugin):
             'allow_actor_interaction': ('LAND_ACTOR_INTERACTION_TOGGLE_ENABLE_BUTTON', 'LAND_ACTOR_INTERACTION_TOGGLE_DISABLE_BUTTON'),
             'allow_frame': ('LAND_FRAME_TOGGLE_ENABLE_BUTTON', 'LAND_FRAME_TOGGLE_DISABLE_BUTTON'),
             'allow_actor_damage': ('LAND_ACTOR_DAMAGE_TOGGLE_ENABLE_BUTTON', 'LAND_ACTOR_DAMAGE_TOGGLE_DISABLE_BUTTON'),
+            'block_actor_spawn': ('BLOCK_ACTOR_SPAWN_TOGGLE_ENABLE_BUTTON', 'BLOCK_ACTOR_SPAWN_TOGGLE_DISABLE_BUTTON'),
             'allow_non_public_land': ('ALLOW_NON_PUBLIC_LAND_TOGGLE_ENABLE_BUTTON', 'ALLOW_NON_PUBLIC_LAND_TOGGLE_DISABLE_BUTTON'),
         }[setting_key]
         btn_text = self.language_manager.GetText(enable_key[0]) if not current else self.language_manager.GetText(enable_key[1])
@@ -13514,6 +13763,7 @@ class ARCCorePlugin(Plugin):
             'allow_actor_interaction': self.land_system.set_land_allow_actor_interaction,
             'allow_frame': self.land_system.set_land_allow_frame,
             'allow_actor_damage': self.land_system.set_land_allow_actor_damage,
+            'block_actor_spawn': self.land_system.set_land_block_actor_spawn,
             'allow_non_public_land': self.land_system.set_land_allow_non_public_land,
         }
         msg_map = {
@@ -13523,6 +13773,7 @@ class ARCCorePlugin(Plugin):
             'allow_actor_interaction': ('LAND_ACTOR_INTERACTION_SETTING_UPDATED_ENABLE', 'LAND_ACTOR_INTERACTION_SETTING_UPDATED_DISABLE', 'LAND_ACTOR_INTERACTION_SETTING_FAILED'),
             'allow_frame': ('LAND_FRAME_SETTING_UPDATED_ENABLE', 'LAND_FRAME_SETTING_UPDATED_DISABLE', 'LAND_FRAME_SETTING_FAILED'),
             'allow_actor_damage': ('LAND_ACTOR_DAMAGE_SETTING_UPDATED_ENABLE', 'LAND_ACTOR_DAMAGE_SETTING_UPDATED_DISABLE', 'LAND_ACTOR_DAMAGE_SETTING_FAILED'),
+            'block_actor_spawn': ('BLOCK_ACTOR_SPAWN_UPDATED_ENABLE', 'BLOCK_ACTOR_SPAWN_UPDATED_DISABLE', 'BLOCK_ACTOR_SPAWN_FAILED'),
             'allow_non_public_land': ('ALLOW_NON_PUBLIC_LAND_UPDATED_ENABLE', 'ALLOW_NON_PUBLIC_LAND_UPDATED_DISABLE', 'ALLOW_NON_PUBLIC_LAND_FAILED'),
         }
         msg_enable, msg_disable, msg_fail = msg_map[setting_key]
@@ -13603,20 +13854,119 @@ class ARCCorePlugin(Plugin):
             return False
         return self.change_player_money_by_name(player_name, money_to_change, notify=True)
     
-    def api_if_position_in_land(self, dimension: str, position: tuple) -> int:
+    def api_if_position_in_land(self, dimension: str, position: tuple) -> Optional[int]:
         """
-        判断位置是否在玩家领地内，不在的话返回None，存在的话返回领地id
+        判断位置是否在领地内（多层生效领地）。
+
+        维度字符串会经 normalize_dimension_id 规范化（如 Overworld → minecraft:overworld；
+        自定义维度原样保留）。坐标按三维 AABB 判定（含 Y）。
+
+        多层规则：私人/公会 > 公共(public_priority 3>2>1)；同点返回生效领地 ID。
+        不在任何领地内返回 None。
         """
-        return self.get_land_at_pos(dimension, math.floor(position[0]), math.floor(position[2]))
-    
+        try:
+            from endstone_arc_core.dimension_utils import normalize_dimension_id
+
+            if not position or len(position) < 3:
+                return None
+            dim = normalize_dimension_id(dimension)
+            x = math.floor(float(position[0]))
+            y = math.floor(float(position[1]))
+            z = math.floor(float(position[2]))
+            return self.get_land_at_pos(dim, x, z, y)
+        except Exception:
+            return None
+
+    def api_list_lands_at_position(self, dimension: str, position: tuple) -> list:
+        """
+        列出覆盖该点的全部主领地（含被更高层覆盖的下层），按生效优先级降序。
+
+        每项为 get_land_info 风格字典，并额外含 land_id。
+        维度会规范化；坐标含 Y。无效输入返回 []。
+        """
+        try:
+            from endstone_arc_core.dimension_utils import normalize_dimension_id
+
+            if not position or len(position) < 3:
+                return []
+            dim = normalize_dimension_id(dimension)
+            x = math.floor(float(position[0]))
+            y = math.floor(float(position[1]))
+            z = math.floor(float(position[2]))
+            return self.land_system.list_lands_at_pos(dim, x, z, y)
+        except Exception:
+            return []
+
+    def api_resolve_land_at_position(self, dimension: str, position: tuple) -> dict:
+        """
+        解析坐标处的生效领地与子领地（多层 + 规范化维度）。
+
+        返回 dict（不在任何领地时 land_id 为 None）::
+            {
+              'dimension': str,              # 规范化后的维度 ID
+              'land_id': int | None,         # 生效主领地
+              'sub_land_id': int | None,     # 生效主领地内的子领地（若有）
+              'is_public': bool,
+              'public_priority': int | None, # 仅公共领地有值
+              'owner_xuid': str,
+              'covering_land_ids': list[int] # 覆盖该点的全部主领地 ID（优先级降序）
+            }
+        """
+        empty = {
+            "dimension": "",
+            "land_id": None,
+            "sub_land_id": None,
+            "is_public": False,
+            "public_priority": None,
+            "owner_xuid": "",
+            "covering_land_ids": [],
+        }
+        try:
+            from endstone_arc_core.dimension_utils import normalize_dimension_id
+
+            if not position or len(position) < 3:
+                return empty
+            dim = normalize_dimension_id(dimension)
+            x = math.floor(float(position[0]))
+            y = math.floor(float(position[1]))
+            z = math.floor(float(position[2]))
+            covering = self.land_system.list_lands_at_pos(dim, x, z, y)
+            covering_ids = [int(r["land_id"]) for r in covering if r.get("land_id") is not None]
+            land_id = covering_ids[0] if covering_ids else self.get_land_at_pos(dim, x, z, y)
+            if land_id is None:
+                empty["dimension"] = dim
+                return empty
+            info = self.get_land_info(land_id) or {}
+            is_public = self.is_public_land(land_id)
+            sub_id = None
+            if not is_public:
+                sub_id = self.get_sub_land_at_pos(land_id, x, y, z)
+            return {
+                "dimension": dim,
+                "land_id": int(land_id),
+                "sub_land_id": int(sub_id) if sub_id is not None else None,
+                "is_public": bool(is_public),
+                "public_priority": (
+                    LandSystem.clamp_public_priority(info.get("public_priority", 1))
+                    if is_public
+                    else None
+                ),
+                "owner_xuid": str(info.get("owner_xuid") or ""),
+                "covering_land_ids": covering_ids,
+            }
+        except Exception:
+            return empty
+
     def api_get_land_info(self, land_id: int) -> dict:
         """
         获取领地信息
         :return: 领地信息字典 {
             'land_name': 领地名称,
-            'dimension': 维度,
+            'dimension': 维度（规范 ID，如 minecraft:overworld）,
             'min_x': 最小X坐标,
             'max_x': 最大X坐标,
+            'min_y': 最小Y坐标,
+            'max_y': 最大Y坐标,
             'min_z': 最小Z坐标,
             'max_z': 最大Z坐标,
             'tp_x': 传送点X坐标,
@@ -13624,9 +13974,12 @@ class ARCCorePlugin(Plugin):
             'tp_z': 传送点Z坐标,
             'shared_users': 共享玩家XUID列表,
             'owner_xuid': 拥有者键：Player_<xuid>、GUILD_<公会id> 或 PUBLIC（公共）,
-            'allow_guild_member_interact': 与 Player_ 主人同公会成员是否允许方块交互（bool）
+            'allow_guild_member_interact': 与 Player_ 主人同公会成员是否允许方块交互（bool）,
             'for_sale': 是否上架出售（bool，私人领地）,
-            'sale_price': 上架价格（float，未上架为 0）
+            'sale_price': 上架价格（float，未上架为 0）,
+            'public_priority': 公共领地优先级 1/2/3（3 最高；非公共亦可能有默认值）,
+            'block_actor_spawn': 是否拦截生物生成（公共领地设置）,
+            ... 其它 allow_* 开关
         } 不存在则返回空字典
         """
         return self.get_land_info(land_id)
@@ -13648,7 +14001,7 @@ class ARCCorePlugin(Plugin):
               'personal_contribution': int,
               'motto': str,
               'owner_xuid': str,
-              'join_requires_approval': bool  # 新成员入会是否需要管理员审批（v0.0.7.3+）
+              'join_requires_approval': bool  # 新成员入会是否需要管理员审批（v0.7.3+）
             }
             玩家不存在或未加入公会时返回空字典 {}。
         """

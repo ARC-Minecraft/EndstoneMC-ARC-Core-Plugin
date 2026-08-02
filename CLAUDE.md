@@ -96,7 +96,7 @@ Other EndStone plugins can call methods on the `ARCCorePlugin` instance via `ser
 
 - **Economy**: `api_get_player_money`, `api_change_player_money`, `api_get_all_money_data`, `api_get_richest_player_money_data`
 - **Titles**: `api_unlock_title(player, title_name)`
-- **Lands**: `api_if_position_in_land(dimension, (x,y,z))`, `api_get_land_info(land_id)`
+- **Lands**: `api_if_position_in_land(dimension, (x,y,z))`（规范化维度 + 三维 Y + 多层生效领地）、`api_resolve_land_at_position`、`api_list_lands_at_position`、`api_get_land_info(land_id)`
 - **Guilds**: `api_get_player_guild_info(player_name)`, `api_add_guild_contribution(player_name, points)`, `api_get_player_guild_contribution`, `api_get_guild_total_contribution_by_player`, `api_set_guild_size_tier`
 - **Newbie**: `api_get_newbie_guide_text()`
 

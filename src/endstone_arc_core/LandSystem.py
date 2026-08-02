@@ -1,7 +1,7 @@
 # -*- coding: utf-8 -*-
 """领地系统：建表、区块索引、CRUD、子领地、权限设置的全部数据/逻辑层"""
 import json
-from typing import Any, Callable, Dict, Optional, Set
+from typing import Any, Callable, Dict, List, Optional, Set
 
 
 class LandSystem:
@@ -16,6 +16,11 @@ class LandSystem:
     LAND_OWNER_GUILD_PREFIX = "GUILD_"
     # 兼容旧插件里对「公共领地主键」的引用（新值为 PUBLIC，不再使用 "0"）
     PUBLIC_LAND_OWNER_XUID = LAND_OWNER_PUBLIC
+
+    # 公共领地优先级：1 最低（城市），3 最高（特殊）；私人/公会永远高于任意公共
+    PUBLIC_PRIORITY_MIN = 1
+    PUBLIC_PRIORITY_MAX = 3
+    PUBLIC_PRIORITY_DEFAULT = 1
 
     # 未开放展示框（allow_frame）时禁止交互/破坏的方块；配置项留空则使用此集合
     _DEFAULT_PUBLIC_LAND_INTERACT_BLOCK_BLACKLIST = frozenset({
@@ -41,6 +46,19 @@ class LandSystem:
         if s == LandSystem.LAND_OWNER_PUBLIC:
             return True
         return s == "0"
+
+    @staticmethod
+    def clamp_public_priority(value: Any) -> int:
+        """公共领地优先级：1/2/3，3 最高；非法值按默认 1。"""
+        try:
+            p = int(value)
+        except (TypeError, ValueError):
+            return LandSystem.PUBLIC_PRIORITY_DEFAULT
+        if p < LandSystem.PUBLIC_PRIORITY_MIN:
+            return LandSystem.PUBLIC_PRIORITY_MIN
+        if p > LandSystem.PUBLIC_PRIORITY_MAX:
+            return LandSystem.PUBLIC_PRIORITY_MAX
+        return p
 
     @staticmethod
     def land_owner_key_player(xuid: Any) -> str:
@@ -297,6 +315,8 @@ class LandSystem:
                 "owner_paid_money": "REAL DEFAULT 0",
                 "allow_non_public_land": "INTEGER DEFAULT 0",
                 "allow_guild_member_interact": "INTEGER DEFAULT 0",
+                "block_actor_spawn": "INTEGER DEFAULT 0",
+                "public_priority": "INTEGER DEFAULT 1",
                 "for_sale": "INTEGER DEFAULT 0",
                 "sale_price": "REAL DEFAULT 0",
             }
@@ -359,8 +379,16 @@ class LandSystem:
                 else:
                     print("[ARC Core]Failed to add owner_paid_money column")
 
+            def _add_col(col: str, col_type: str) -> None:
+                if not self._column_exists("lands", col):
+                    ok = self.db.execute(f"ALTER TABLE lands ADD COLUMN {col} {col_type}")
+                    msg = f"added {col}" if ok else f"failed to add {col}"
+                    print(f"[ARC Core]Upgraded land table: {msg}")
+
             _add_col("allow_non_public_land", "INTEGER DEFAULT 0")
             _add_col("allow_guild_member_interact", "INTEGER DEFAULT 0")
+            _add_col("block_actor_spawn", "INTEGER DEFAULT 0")
+            _add_col("public_priority", "INTEGER DEFAULT 1")
             _add_col("for_sale", "INTEGER DEFAULT 0")
             _add_col("sale_price", "REAL DEFAULT 0")
             _add_col("min_y", "INTEGER NOT NULL DEFAULT 0")
@@ -446,6 +474,7 @@ class LandSystem:
         tp_y: float,
         tp_z: float,
         owner_paid_money: float = 0.0,
+        public_priority: int = PUBLIC_PRIORITY_DEFAULT,
     ) -> Optional[int]:
         try:
             from endstone_arc_core.dimension_utils import normalize_dimension_id
@@ -456,18 +485,20 @@ class LandSystem:
             dimension = normalize_dimension_id(dimension)
             if not self._ensure_dimension_table(dimension):
                 return None
+            priority = self.clamp_public_priority(public_priority)
             self.db.execute(
                 "INSERT INTO lands "
                 "(owner_xuid, land_name, dimension, min_x, max_x, min_y, max_y, min_z, max_z, "
                 "tp_x, tp_y, tp_z, shared_users, allow_explosion, allow_public_interact, "
-                "allow_guild_member_interact, owner_paid_money, for_sale, sale_price) "
-                "VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)",
+                "allow_guild_member_interact, owner_paid_money, for_sale, sale_price, "
+                "public_priority) "
+                "VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)",
                 (
                     owner_xuid, land_name, dimension,
                     min_x, max_x, min_y, max_y, min_z, max_z,
                     tp_x, tp_y, tp_z,
                     "[]", 0, 0, 0, float(owner_paid_money),
-                    0, 0.0,
+                    0, 0.0, priority,
                 ),
             )
             result = self.db.query_one("SELECT last_insert_rowid() as land_id")
@@ -482,7 +513,13 @@ class LandSystem:
     def get_land_at_pos(
         self, dimension: str, x: int, z: int, y: int = None
     ) -> Optional[int]:
+        """位置生效领地：私人/公会优先于公共；公共取 public_priority 最高者。"""
         try:
+            from endstone_arc_core.dimension_utils import normalize_dimension_id
+
+            dimension = normalize_dimension_id(dimension)
+            if not dimension:
+                return None
             x, z = int(x), int(z)
             if not self._ensure_dimension_table(dimension):
                 return None
@@ -494,12 +531,15 @@ class LandSystem:
             if not chunk_data:
                 return None
             land_ids = json.loads(chunk_data["land_ids"])
-            public_land_id = None
+            best_public_id = None
+            best_public_priority = -1
             for land_id in land_ids:
                 land = self.db.query_one(
                     "SELECT * FROM lands WHERE land_id = ?", (land_id,)
                 )
                 if not land:
+                    continue
+                if str(land.get("dimension") or "") != dimension:
                     continue
                 if not (land["min_x"] <= x <= land["max_x"] and land["min_z"] <= z <= land["max_z"]):
                     continue
@@ -508,11 +548,71 @@ class LandSystem:
                         continue
                 if not self.is_public_land_owner(land["owner_xuid"]):
                     return land_id
-                public_land_id = land_id
-            return public_land_id
+                priority = self.clamp_public_priority(land.get("public_priority", 1))
+                if (
+                    priority > best_public_priority
+                    or (priority == best_public_priority and (best_public_id is None or land_id > best_public_id))
+                ):
+                    best_public_priority = priority
+                    best_public_id = land_id
+            return best_public_id
         except Exception as e:
             self._log("error", f"Get land at pos error: {str(e)}")
             return None
+
+    def list_lands_at_pos(
+        self, dimension: str, x: int, z: int, y: int = None
+    ) -> List[dict]:
+        """列出覆盖该点的全部主领地（已解析行），按生效优先级降序：私人/公会在前，公共按等级从高到低。"""
+        try:
+            from endstone_arc_core.dimension_utils import normalize_dimension_id
+
+            dimension = normalize_dimension_id(dimension)
+            if not dimension:
+                return []
+            x, z = int(x), int(z)
+            if not self._ensure_dimension_table(dimension):
+                return []
+            table = self._get_dimension_table(dimension)
+            chunk_key = self._get_chunk_key(x, z)
+            chunk_data = self.db.query_one(
+                f"SELECT land_ids FROM {table} WHERE chunk_key = ?", (chunk_key,)
+            )
+            if not chunk_data:
+                return []
+            private_rows: List[dict] = []
+            public_rows: List[dict] = []
+            for land_id in json.loads(chunk_data["land_ids"]):
+                land = self.db.query_one(
+                    "SELECT * FROM lands WHERE land_id = ?", (land_id,)
+                )
+                if not land:
+                    continue
+                if str(land.get("dimension") or "") != dimension:
+                    continue
+                if not (land["min_x"] <= x <= land["max_x"] and land["min_z"] <= z <= land["max_z"]):
+                    continue
+                if y is not None:
+                    if not (land.get("min_y", 0) <= int(y) <= land.get("max_y", 255)):
+                        continue
+                parsed = self._parse_land_row(land)
+                parsed["land_id"] = int(land_id)
+                if self.is_public_land_owner(land["owner_xuid"]):
+                    public_rows.append(parsed)
+                else:
+                    private_rows.append(parsed)
+            public_rows.sort(
+                key=lambda r: (
+                    self.clamp_public_priority(r.get("public_priority", 1)),
+                    r.get("land_id", 0),
+                ),
+                reverse=True,
+            )
+            private_rows.sort(key=lambda r: r.get("land_id", 0), reverse=True)
+            return private_rows + public_rows
+        except Exception as e:
+            self._log("error", f"List lands at pos error: {str(e)}")
+            return []
 
     def _unregister_land_from_chunk_mapping(
         self,
@@ -636,10 +736,12 @@ class LandSystem:
         min_z: int,
         max_z: int,
         exclude_land_ids: Optional[Set[int]] = None,
+        creating_public_priority: Optional[int] = None,
     ) -> tuple:
         """检查领地范围是否可用。返回 (available, reason_key_or_None, overlapping_ids_or_None)
 
         exclude_land_ids：重设范围时排除当前领地自身与其它已排除 ID，避免与自身旧范围判重叠。
+        creating_public_priority：创建/重设公共领地时传入其等级；None 表示私人/公会。
         """
         try:
             min_x, max_x = min(min_x, max_x), max(min_x, max_x)
@@ -664,6 +766,11 @@ class LandSystem:
                 )
                 if row:
                     nearby_ids.update(json.loads(row["land_ids"]))
+            creating_priority = (
+                self.clamp_public_priority(creating_public_priority)
+                if creating_public_priority is not None
+                else None
+            )
             overlapping = []
             for land_id in nearby_ids:
                 if exclude_land_ids and land_id in exclude_land_ids:
@@ -674,11 +781,20 @@ class LandSystem:
                 )
                 if not land:
                     continue
-                if (
-                    self.is_public_land_owner(land.get("owner_xuid"))
-                    and land.get("allow_non_public_land", 0)
-                ):
-                    continue
+                is_existing_public = self.is_public_land_owner(land.get("owner_xuid"))
+                if creating_priority is not None:
+                    # 公共盖公共：仅可覆盖更低优先级；不可盖私人/公会与同级/更高公共
+                    if is_existing_public:
+                        exist_priority = self.clamp_public_priority(
+                            land.get("public_priority", 1)
+                        )
+                        if exist_priority < creating_priority:
+                            continue
+                    # 私人/公会或同级及以上公共：进入重叠判定
+                else:
+                    # 私人/公会：可在允许圈私人的公共领地内创建
+                    if is_existing_public and land.get("allow_non_public_land", 0):
+                        continue
                 exist_min_y = land.get("min_y", 0)
                 exist_max_y = land.get("max_y", 255)
                 y_overlap = min_y <= exist_max_y and max_y >= exist_min_y
@@ -727,6 +843,10 @@ class LandSystem:
             "allow_guild_member_interact": bool(
                 row.get("allow_guild_member_interact", 0)
             ),
+            "block_actor_spawn": bool(row.get("block_actor_spawn", 0)),
+            "public_priority": LandSystem.clamp_public_priority(
+                row.get("public_priority", 1)
+            ),
             "for_sale": bool(row.get("for_sale", 0)),
             "sale_price": float(row.get("sale_price") or 0),
             "owner_paid_money": row.get("owner_paid_money", 0),
@@ -774,13 +894,43 @@ class LandSystem:
             self._log("error", f"Get land teleport point error: {str(e)}")
             return None
 
-    def set_land_teleport_point(self, land_id: int, x: int, y: int, z: int) -> tuple:
+    def position_in_land_bounds(
+        self,
+        land_id: int,
+        x: int,
+        y: int,
+        z: int,
+        dimension: Optional[str] = None,
+    ) -> bool:
+        """坐标是否落在目标领地 AABB 内（可选校验维度）。不依赖 get_land_at_pos 优先级。"""
+        info = self.get_land_info(land_id)
+        if not info:
+            return False
+        if dimension is not None:
+            from endstone_arc_core.dimension_utils import normalize_dimension_id
+
+            if normalize_dimension_id(dimension) != info["dimension"]:
+                return False
+        return (
+            info["min_x"] <= int(x) <= info["max_x"]
+            and info.get("min_y", 0) <= int(y) <= info.get("max_y", 255)
+            and info["min_z"] <= int(z) <= info["max_z"]
+        )
+
+    def set_land_teleport_point(
+        self,
+        land_id: int,
+        x: int,
+        y: int,
+        z: int,
+        dimension: Optional[str] = None,
+    ) -> tuple:
         """返回 (success, error_reason_key_or_None)"""
         try:
             info = self.get_land_info(land_id)
             if not info:
                 return False, "LAND_NOT_FOUND"
-            if not (info["min_x"] <= x <= info["max_x"] and info["min_z"] <= z <= info["max_z"]):
+            if not self.position_in_land_bounds(land_id, x, y, z, dimension):
                 return False, "TP_POINT_OUT_OF_LAND"
             self.db.execute(
                 "UPDATE lands SET tp_x = ?, tp_y = ?, tp_z = ? WHERE land_id = ?",
@@ -807,19 +957,43 @@ class LandSystem:
     def is_public_land(self, land_id: int) -> bool:
         return self.is_public_land_owner(self.get_land_owner(land_id))
 
-    def set_land_as_public(self, land_id: int) -> bool:
+    def set_land_as_public(
+        self, land_id: int, public_priority: Optional[int] = None
+    ) -> bool:
         try:
             if not self.get_land_info(land_id):
                 return False
+            priority = self.clamp_public_priority(
+                self.PUBLIC_PRIORITY_DEFAULT
+                if public_priority is None
+                else public_priority
+            )
             return self.db.execute(
                 "UPDATE lands SET owner_xuid = ?, owner_paid_money = 0, "
                 "for_sale = 0, sale_price = 0, "
+                "public_priority = ?, "
                 "allow_public_interact = 1, allow_actor_interaction = 1, allow_actor_damage = 1 "
                 "WHERE land_id = ?",
-                (self.LAND_OWNER_PUBLIC, land_id),
+                (self.LAND_OWNER_PUBLIC, priority, land_id),
             )
         except Exception as e:
             self._log("error", f"Set land as public error: {str(e)}")
+            return False
+
+    def set_land_public_priority(self, land_id: int, priority: int) -> bool:
+        """设置公共领地优先级（1–3）。非公共领地也可写入，但运行时仅对公共生效。"""
+        try:
+            if not self.get_land_info(land_id):
+                return False
+            p = self.clamp_public_priority(priority)
+            return bool(
+                self.db.execute(
+                    "UPDATE lands SET public_priority = ? WHERE land_id = ?",
+                    (p, land_id),
+                )
+            )
+        except Exception as e:
+            self._log("error", f"Set land public priority error: {str(e)}")
             return False
 
     def transfer_land(self, land_id: int, new_owner_xuid: str) -> bool:
@@ -968,6 +1142,9 @@ class LandSystem:
             "allow_actor_interaction",
             "allow_actor_damage",
             "allow_frame",
+            "allow_guild_member_interact",
+            "allow_non_public_land",
+            "block_actor_spawn",
         }
     )
 
@@ -980,6 +1157,9 @@ class LandSystem:
             "allow_actor_interaction": "UPDATE lands SET allow_actor_interaction = ? WHERE land_id = ?",
             "allow_actor_damage": "UPDATE lands SET allow_actor_damage = ? WHERE land_id = ?",
             "allow_frame": "UPDATE lands SET allow_frame = ? WHERE land_id = ?",
+            "allow_guild_member_interact": "UPDATE lands SET allow_guild_member_interact = ? WHERE land_id = ?",
+            "allow_non_public_land": "UPDATE lands SET allow_non_public_land = ? WHERE land_id = ?",
+            "block_actor_spawn": "UPDATE lands SET block_actor_spawn = ? WHERE land_id = ?",
         }[col]
         try:
             return bool(self.db.execute(sql, (1 if value else 0, land_id)))
@@ -1008,6 +1188,10 @@ class LandSystem:
 
     def set_land_allow_non_public_land(self, land_id: int, allow: bool) -> bool:
         return self._set_land_flag(land_id, "allow_non_public_land", allow)
+
+    def set_land_block_actor_spawn(self, land_id: int, block: bool) -> bool:
+        """开启后，公共领地内取消生物（Mob，不含玩家）生成。"""
+        return self._set_land_flag(land_id, "block_actor_spawn", block)
 
     # ─── 领地授权 ─────────────────────────────────────────────────────────────
 
