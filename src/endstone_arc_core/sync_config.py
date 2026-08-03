@@ -71,9 +71,3 @@ def get_client_sync_tables(setting_manager) -> Set[str]:
         if setting_bool(setting_manager, setting_key, True):
             tables.update(SYNC_CATEGORY_TABLES[category])
     return tables
-
-
-    mode = str(raw).strip().lower()
-    if mode in ("host", "relay", "center", "sync"):
-        return "host"
-    return "local"

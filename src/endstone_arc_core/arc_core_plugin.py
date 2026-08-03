@@ -2316,30 +2316,11 @@ class ARCCorePlugin(Plugin):
             self.init_player_local_table()
             self._upgrade_player_basic_table()
 
-            player_db_path = self.setting_manager.GetSetting('PLAYER_DATABASE_PATH')
-            if player_db_path and str(player_db_path).strip():
-                self.database_manager.add_route(
-                    'player_local_info_seed', str(player_db_path).strip()
-                )
-            self.database_manager.create_table(
-                'player_local_info_seed',
-                {
-                    'xuid': 'TEXT PRIMARY KEY',
-                    'is_op': 'INTEGER DEFAULT 0',
-                    'remaining_free_land_blocks': f'INTEGER DEFAULT {default_free}',
-                    'last_checkin_date': 'TEXT',
-                    'total_checkin_count': 'INTEGER DEFAULT 0',
-                    'last_checkin_at': 'TEXT',
-                    'continuous_checkin_days': 'INTEGER DEFAULT 0',
-                },
-            )
-            for col, decl in (
-                ('last_checkin_date', 'TEXT'),
-                ('total_checkin_count', 'INTEGER DEFAULT 0'),
-                ('last_checkin_at', 'TEXT'),
-                ('continuous_checkin_days', 'INTEGER DEFAULT 0'),
-            ):
-                self._add_column_if_not_exists('player_local_info_seed', col, decl)
+            # Drop obsolete shared-file seed table if present.
+            try:
+                self.database_manager.execute("DROP TABLE IF EXISTS player_local_info_seed")
+            except Exception:
+                pass
 
             basic_cols = self._player_basic_info_columns()
             local_cols = self._player_local_info_columns()
@@ -2461,54 +2442,6 @@ class ARCCorePlugin(Plugin):
                     params=(xuid,),
                 )
 
-                # Seed local-only profile for shared-file late starters.
-                seed_payload = {
-                    "xuid": xuid,
-                    "is_op": _i(local_by_xuid.get(xuid), "is_op", _i(brow, "is_op")),
-                    "remaining_free_land_blocks": _i(
-                        local_by_xuid.get(xuid),
-                        "remaining_free_land_blocks",
-                        _i(brow, "remaining_free_land_blocks", default_free),
-                    ),
-                    "last_checkin_date": (local_by_xuid.get(xuid) or {}).get(
-                        "last_checkin_date"
-                    )
-                    or brow.get("last_checkin_date"),
-                    "total_checkin_count": max(
-                        _i(local_by_xuid.get(xuid), "total_checkin_count"),
-                        _i(brow, "total_checkin_count"),
-                    ),
-                    "last_checkin_at": (local_by_xuid.get(xuid) or {}).get(
-                        "last_checkin_at"
-                    )
-                    or brow.get("last_checkin_at"),
-                    "continuous_checkin_days": max(
-                        _i(local_by_xuid.get(xuid), "continuous_checkin_days"),
-                        _i(brow, "continuous_checkin_days"),
-                    ),
-                }
-                seed_row = self.database_manager.query_one(
-                    "SELECT xuid FROM player_local_info_seed WHERE xuid = ?", (xuid,)
-                )
-                if seed_row:
-                    self.database_manager.update(
-                        table="player_local_info_seed",
-                        data={k: v for k, v in seed_payload.items() if k != "xuid"},
-                        where="xuid = ?",
-                        params=(xuid,),
-                    )
-                else:
-                    self.database_manager.insert("player_local_info_seed", seed_payload)
-
-            # Also migrate local-only rows that have no basic yet (playtime into basic if possible).
-            for xuid, lrow in list(local_by_xuid.items()):
-                if self.database_manager.query_one(
-                    "SELECT xuid FROM player_basic_info WHERE xuid = ?", (xuid,)
-                ):
-                    continue
-                # No basic row: keep local as-is (check-in/OP). Playtime waits for account row.
-                pass
-
             # Rebuild basic without check-in / OP / free-land columns.
             basic_cols = self._player_basic_info_columns()
             drop_from_basic = {
@@ -2627,43 +2560,6 @@ class ARCCorePlugin(Plugin):
                         "[ARC Core]Rebuilt player_local_info "
                         "(OP / free land / check-in; playtime is synced)"
                     )
-
-            # Import seed -> local for missing xuids.
-            seed_rows = self.database_manager.query_all(
-                "SELECT * FROM player_local_info_seed", ()
-            ) or []
-            imported = 0
-            for row in seed_rows:
-                xuid = str(row.get("xuid") or "").strip()
-                if not xuid:
-                    continue
-                if self.database_manager.query_one(
-                    "SELECT xuid FROM player_local_info WHERE xuid = ?", (xuid,)
-                ):
-                    continue
-                self.database_manager.insert(
-                    "player_local_info",
-                    {
-                        "xuid": xuid,
-                        "is_op": int(row.get("is_op") or 0),
-                        "remaining_free_land_blocks": int(
-                            row.get("remaining_free_land_blocks")
-                            if row.get("remaining_free_land_blocks") is not None
-                            else default_free
-                        ),
-                        "last_checkin_date": row.get("last_checkin_date"),
-                        "total_checkin_count": int(row.get("total_checkin_count") or 0),
-                        "last_checkin_at": row.get("last_checkin_at"),
-                        "continuous_checkin_days": int(
-                            row.get("continuous_checkin_days") or 0
-                        ),
-                    },
-                )
-                imported += 1
-            if imported:
-                print(
-                    f"[ARC Core]Imported {imported} local profiles from player_local_info_seed"
-                )
         except Exception as e:
             print(f"[ARC Core]Migrate player_basic_info split error: {e}")
 

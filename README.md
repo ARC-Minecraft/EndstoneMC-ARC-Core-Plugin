@@ -246,7 +246,7 @@ EndStone ARC Core 是一个功能完整的 EndStone (Minecraft 基岩版服务�
 - **可同步数据表**：跨服玩家账号信息（`player_basic_info`）、经济（`player_economy`）、头衔（`title_definitions` / `player_title_unlock_time` / `player_title_equipped`）、公会（`guilds` / `guild_members` / `guild_invites`）
 - **本服本地表（不同步）**：**`player_local_info`** — `is_op`、剩余免费领地格、**签到**（每服独立）。始终写在本服 **`DATABASE_PATH`**，即使配置了 `PLAYER_DATABASE_PATH` 也不会进共享库
 - **QQ 群消息**：跨服 QQ 互通由 **AstrBot 弧光消息中心** + **endstone-arc-qq-sync-astrbot** 负责；ARCCore **不再**经 SyncServer 做 QQ 事件中继。死亡 / 成就等仍可调用本机 QQ Sync 的 `api_send_event` / `api_send_raw`
-- **启动迁移**：签到迁入本服表；时长 / 进服次数保留在跨服 `player_basic_info`；共享库场景通过 **`player_local_info_seed`** 导入本服 OP / 免费格 / 签到
+- **启动迁移**：签到迁入本服表；时长 / 进服次数保留在跨服 `player_basic_info`
 
 ### ⏱️ 游戏时长统计（跨服）
 - 表：**`player_basic_info`**（`total_playtime` 秒、`session_count`、`last_join_time` / `last_quit_time`）
@@ -931,7 +931,7 @@ class MyPlugin(Plugin):
 
 ### v0.8.2（当前版本）
 
-- ✅ **玩家表拆分**：跨服 **`player_basic_info`**（密码、邀请、**游戏时长 / 进服次数**）；本服 **`player_local_info`**（`is_op`、剩余免费领地格、**签到**）。启动自动迁移；共享库场景通过 **`player_local_info_seed`** 供各服导入本服字段
+- ✅ **玩家表拆分**：跨服 **`player_basic_info`**（密码、邀请、**游戏时长 / 进服次数**）；本服 **`player_local_info`**（`is_op`、剩余免费领地格、**签到**）。启动自动迁移
 - ✅ **QQ 中继移除**：不再经 SyncServer 转发 QQ 事件 / 群聊下行（原 `QQ_RELAY_MODE` / `EVENT_FORWARD` 已移除）。群服互通由 AstrBot 弧光消息中心 + QQ Sync 插件负责；死亡 / 成就仍可调用本机 `arc-qq-sync-astrbot` API
 - ✅ **公共领地三级优先级**：`lands.public_priority`（1/2/3，**3 最高**，默认 1）。高优先级公共可覆盖低优先级；同级不可重叠。位置生效顺序：**私人/公会 > 公共(3>2>1)**；私人子领地仍先于父领地。创建公共领地时 OP 选择等级；OP 公共领地设置可改级（升高时校验冲突）
 - ✅ **公共领地拦截生物生成**：`block_actor_spawn`（默认关闭）；开启后经 `ActorSpawnEvent` 取消该公共领地内 `Mob`（不含玩家）生成
