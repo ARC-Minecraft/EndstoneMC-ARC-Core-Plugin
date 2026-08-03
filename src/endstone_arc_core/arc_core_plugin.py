@@ -166,6 +166,7 @@ class ARCCorePlugin(Plugin):
 
         # 跨服数据同步服务（在 on_enable 中启动，确保 logger 可用）
         self.sync_server: Optional[SyncServer] = None
+        self._play_session_start: dict = {}
         self.sync_client: Optional[SyncClient] = None
 
         # 首富头衔：缓存当前首富 xuid，避免每次都重复发放
@@ -484,7 +485,6 @@ class ARCCorePlugin(Plugin):
                 auth_key=sync_auth_key,
                 bind_port=sync_port,
                 logger=self.logger,
-                on_event_forward=self._on_sync_event_forward,
             )
             if self.sync_server.start():
                 self.logger.info(f"[ARC Core] Sync server started on port {sync_port}")
@@ -496,7 +496,6 @@ class ARCCorePlugin(Plugin):
                 database_manager=self.database_manager,
                 setting_manager=self.setting_manager,
                 logger=self.logger,
-                on_qq_chat=self._on_qq_chat_downstream,
             )
             if self.sync_client.start():
                 self.logger.info(
@@ -510,6 +509,11 @@ class ARCCorePlugin(Plugin):
         self.database_manager.set_write_notifier(self._on_db_write_for_sync)
 
     def on_disable(self) -> None:
+        try:
+            self._settle_all_online_playtime()
+        except Exception as e:
+            if self.logger:
+                self.logger.error(f"[ARC Core] Settle playtime on disable error: {e}")
         # 停止位置检测线程
         self.stop_position_thread()
         # 停止跨服同步服务
@@ -853,15 +857,7 @@ class ARCCorePlugin(Plugin):
         self._auto_equip_highest_title_if_needed(event.player)
         self._update_player_name_tag(event.player)
 
-        # 通知 qqsync 发送加入消息到 QQ 群
-        try:
-            equipped = self.title_system.get_equipped_title(event.player)
-            display_name = self.format_player_display_label_with_guild(
-                event.player.name, equipped, str(event.player.xuid)
-            )
-            self._notify_qqsync("join", display_name, event.player.name)
-        except Exception as e:
-            self.logger.error(f"[ARC Core]Notify qqsync join error: {e}")
+        self._record_player_join_playtime(event.player)
 
         self.server.scheduler.run_task(
             self,
@@ -914,14 +910,6 @@ class ARCCorePlugin(Plugin):
             event.is_cancelled = True
             self.server.broadcast_message(formatted)
 
-            # 通知 qqsync 发送聊天消息到 QQ 群
-            try:
-                display_name = self.format_player_display_label_with_guild(
-                    name, equipped, str(event.player.xuid)
-                )
-                self._notify_qqsync("chat", display_name, name, raw_message)
-            except Exception as e:
-                self.logger.error(f"[ARC Core]Notify qqsync chat error: {e}")
         except Exception as e:
             if self.logger:
                 self.logger.error(f"[ARC Core]Chat title format error: {e}")
@@ -942,19 +930,11 @@ class ARCCorePlugin(Plugin):
                 )
         except Exception:
             pass
+        self._record_player_quit_playtime(event.player)
         self.server.broadcast_message(self.language_manager.GetText('PLAYER_QUIT_MESSAGE').format(event.player.name))
         self.player_sensitive_password_verified.pop(event.player.name, None)
         self._pending_sensitive_action_by_player.pop(event.player.name, None)
 
-        # 通知 qqsync 发送离开消息到 QQ 群
-        try:
-            equipped = self.title_system.get_equipped_title(event.player)
-            display_name = self.format_player_display_label_with_guild(
-                event.player.name, equipped, str(event.player.xuid)
-            )
-            self._notify_qqsync("quit", display_name, event.player.name)
-        except Exception as e:
-            self.logger.error(f"[ARC Core]Notify qqsync quit error: {e}")
         
         # 线程安全地清理玩家领地位置记录
         with self.position_thread_lock:
@@ -2158,7 +2138,7 @@ class ARCCorePlugin(Plugin):
                 row = self.database_manager.query_one(
                     "SELECT e.xuid, e.money "
                     "FROM player_economy e "
-                    "LEFT JOIN player_basic_info b ON e.xuid = b.xuid "
+                    "LEFT JOIN player_local_info b ON e.xuid = b.xuid "
                     "WHERE (b.is_op IS NULL OR b.is_op = 0) "
                     "ORDER BY e.money DESC LIMIT 1"
                 )
@@ -2260,79 +2240,240 @@ class ARCCorePlugin(Plugin):
             print(f"[ARC Core]Add column error: {str(e)}")
             return False
 
+    def _player_basic_info_columns(self) -> set:
+        """Return column names of player_basic_info (empty if missing)."""
+        try:
+            rows = self.database_manager.query_all(
+                "PRAGMA table_info(player_basic_info)", ()
+            ) or []
+            return {str(r.get("name") or "") for r in rows if r.get("name")}
+        except Exception:
+            return set()
+
     def _upgrade_player_basic_table(self) -> bool:
-        """
-        升级玩家基本信息表结构
-        """
+        """Upgrade cross-server player_basic_info columns (synced account fields only)."""
         try:
             success = True
-            # 检查并添加 is_op 列
-            if not self._add_column_if_not_exists('player_basic_info', 'is_op', 'INTEGER DEFAULT 0'):
-                success = False
-            
-            # 检查并添加 remaining_free_land_blocks 列
-            default_free_blocks = self.setting_manager.GetSetting('DEFAULT_FREE_LAND_BLOCKS') or '100'
-            if not self._add_column_if_not_exists('player_basic_info', 'remaining_free_land_blocks', f'INTEGER DEFAULT {default_free_blocks}'):
-                success = False
-
-            # 检查并添加 inviter_xuid 列（邀请人 XUID，允许为空）
             if not self._add_column_if_not_exists('player_basic_info', 'inviter_xuid', 'TEXT'):
                 success = False
-
-            # 检查并添加 pending_invite_reward_times 列（待领取邀请奖励次数，默认为 0）
-            if not self._add_column_if_not_exists('player_basic_info', 'pending_invite_reward_times', 'INTEGER DEFAULT 0'):
+            if not self._add_column_if_not_exists(
+                'player_basic_info', 'pending_invite_reward_times', 'INTEGER DEFAULT 0'
+            ):
                 success = False
-
-            # 每日签到：上次签到日期（YYYY-MM-DD，空表示从未签到）
             if not self._add_column_if_not_exists('player_basic_info', 'last_checkin_date', 'TEXT'):
                 success = False
-
-            # 是否已完成进服自动佩戴最高稀有度头衔（0 否 1 是）
-            if not self._add_column_if_not_exists('player_basic_info', 'default_title_auto_equipped', 'INTEGER DEFAULT 0'):
+            if not self._add_column_if_not_exists(
+                'player_basic_info', 'default_title_auto_equipped', 'INTEGER DEFAULT 0'
+            ):
                 success = False
-
-            # 签到：累计次数、最近一次签到时刻（ISO，用于当日先后排序）
-            if not self._add_column_if_not_exists('player_basic_info', 'total_checkin_count', 'INTEGER DEFAULT 0'):
+            if not self._add_column_if_not_exists(
+                'player_basic_info', 'total_checkin_count', 'INTEGER DEFAULT 0'
+            ):
                 success = False
             if not self._add_column_if_not_exists('player_basic_info', 'last_checkin_at', 'TEXT'):
                 success = False
-            # 签到：连续签到天数（按自然日连续）
-            if not self._add_column_if_not_exists('player_basic_info', 'continuous_checkin_days', 'INTEGER DEFAULT 0'):
+            if not self._add_column_if_not_exists(
+                'player_basic_info', 'continuous_checkin_days', 'INTEGER DEFAULT 0'
+            ):
                 success = False
-            
             return success
         except Exception as e:
-            # 在__init__期间不能使用self.logger，使用print代替
             print(f"[ARC Core]Upgrade player basic table error: {str(e)}")
             return False
 
-    def init_player_basic_table(self) -> bool:
-        """初始化玩家基本信息表"""
-        # 从配置文件获取默认免费领地格子数
+    def init_player_local_table(self) -> bool:
+        """Initialize per-server local player profile (NOT cross-server synced)."""
         default_free_blocks = self.setting_manager.GetSetting('DEFAULT_FREE_LAND_BLOCKS') or '100'
-        
         fields = {
-            'uuid': 'TEXT PRIMARY KEY',  # 玩家UUID作为主键
-            'xuid': 'TEXT NOT NULL',  # 玩家XUID
-            'name': 'TEXT NOT NULL',  # 玩家名称
-            'password': 'TEXT',  # 玩家密码(加密后的)，允许为NULL
-            'is_op': 'INTEGER DEFAULT 0',  # 玩家是否为OP，默认为0(false)
-            'remaining_free_land_blocks': f'INTEGER DEFAULT {default_free_blocks}',  # 剩余免费领地格子数
-            'inviter_xuid': 'TEXT',  # 邀请人 XUID，允许为空
-            'pending_invite_reward_times': 'INTEGER DEFAULT 0',  # 待领取邀请奖励次数
-            'last_checkin_date': 'TEXT',  # 上次签到日期 YYYY-MM-DD
-            'default_title_auto_equipped': 'INTEGER DEFAULT 0',  # 是否已做过进服自动佩戴头衔
-            'total_checkin_count': 'INTEGER DEFAULT 0',  # 累计签到次数
-            'last_checkin_at': 'TEXT',  # 最近一次签到时间 ISO8601
-            'continuous_checkin_days': 'INTEGER DEFAULT 0'  # 连续签到天数
+            'xuid': 'TEXT PRIMARY KEY',
+            'is_op': 'INTEGER DEFAULT 0',
+            'remaining_free_land_blocks': f'INTEGER DEFAULT {default_free_blocks}',
+            'total_playtime': 'INTEGER DEFAULT 0',
+            'session_count': 'INTEGER DEFAULT 0',
+            'last_join_time': 'TEXT',
+            'last_quit_time': 'TEXT',
+        }
+        # Always on default DATABASE_PATH (never routed to shared PLAYER_DATABASE_PATH).
+        return self.database_manager.create_table('player_local_info', fields)
+
+    def _migrate_player_basic_info_split(self) -> None:
+        """Move per-server columns out of player_basic_info into player_local_info.
+
+        When player_basic_info is on a shared PLAYER_DATABASE_PATH, first write a
+        seed snapshot on that same DB so every server can import into its own
+        local table before/after the shared table is rebuilt.
+        """
+        local_cols = {
+            "is_op",
+            "remaining_free_land_blocks",
+            "total_playtime",
+            "session_count",
+            "last_join_time",
+            "last_quit_time",
+        }
+        default_free = int(self.setting_manager.GetSetting('DEFAULT_FREE_LAND_BLOCKS') or '100')
+        try:
+            self.init_player_local_table()
+
+            # Seed table lives beside player_basic_info (shared file mode supported).
+            player_db_path = self.setting_manager.GetSetting('PLAYER_DATABASE_PATH')
+            if player_db_path and str(player_db_path).strip():
+                self.database_manager.add_route(
+                    'player_local_info_seed', str(player_db_path).strip()
+                )
+            self.database_manager.create_table(
+                'player_local_info_seed',
+                {
+                    'xuid': 'TEXT PRIMARY KEY',
+                    'is_op': 'INTEGER DEFAULT 0',
+                    'remaining_free_land_blocks': f'INTEGER DEFAULT {default_free}',
+                    'total_playtime': 'INTEGER DEFAULT 0',
+                    'session_count': 'INTEGER DEFAULT 0',
+                    'last_join_time': 'TEXT',
+                    'last_quit_time': 'TEXT',
+                },
+            )
+
+            cols = self._player_basic_info_columns()
+            if cols & local_cols:
+                rows = self.database_manager.query_all("SELECT * FROM player_basic_info", ()) or []
+                for row in rows:
+                    xuid = str(row.get("xuid") or "").strip()
+                    if not xuid:
+                        continue
+                    payload = {
+                        "xuid": xuid,
+                        "is_op": int(row.get("is_op") or 0),
+                        "remaining_free_land_blocks": int(
+                            row.get("remaining_free_land_blocks")
+                            if row.get("remaining_free_land_blocks") is not None
+                            else default_free
+                        ),
+                        "total_playtime": int(row.get("total_playtime") or 0),
+                        "session_count": int(row.get("session_count") or 0),
+                        "last_join_time": row.get("last_join_time"),
+                        "last_quit_time": row.get("last_quit_time"),
+                    }
+                    # Shared seed for other servers + this server's local profile.
+                    seed_row = self.database_manager.query_one(
+                        "SELECT xuid FROM player_local_info_seed WHERE xuid = ?", (xuid,)
+                    )
+                    if seed_row:
+                        self.database_manager.update(
+                            table="player_local_info_seed",
+                            data={k: v for k, v in payload.items() if k != "xuid"},
+                            where="xuid = ?",
+                            params=(xuid,),
+                        )
+                    else:
+                        self.database_manager.insert("player_local_info_seed", payload)
+
+                # Rebuild synced table without local columns.
+                sync_cols = [
+                    "uuid",
+                    "xuid",
+                    "name",
+                    "password",
+                    "inviter_xuid",
+                    "pending_invite_reward_times",
+                    "last_checkin_date",
+                    "default_title_auto_equipped",
+                    "total_checkin_count",
+                    "last_checkin_at",
+                    "continuous_checkin_days",
+                ]
+                present = [c for c in sync_cols if c in cols]
+                if "uuid" in present and "xuid" in present and "name" in present:
+                    col_sql = ", ".join(present)
+                    self.database_manager.execute(
+                        "DROP TABLE IF EXISTS player_basic_info__sync_new"
+                    )
+                    self.database_manager.execute(
+                        "CREATE TABLE player_basic_info__sync_new ("
+                        "uuid TEXT PRIMARY KEY, "
+                        "xuid TEXT NOT NULL, "
+                        "name TEXT NOT NULL, "
+                        "password TEXT, "
+                        "inviter_xuid TEXT, "
+                        "pending_invite_reward_times INTEGER DEFAULT 0, "
+                        "last_checkin_date TEXT, "
+                        "default_title_auto_equipped INTEGER DEFAULT 0, "
+                        "total_checkin_count INTEGER DEFAULT 0, "
+                        "last_checkin_at TEXT, "
+                        "continuous_checkin_days INTEGER DEFAULT 0"
+                        ")"
+                    )
+                    self.database_manager.execute(
+                        f"INSERT INTO player_basic_info__sync_new ({col_sql}) "
+                        f"SELECT {col_sql} FROM player_basic_info"
+                    )
+                    self.database_manager.execute("DROP TABLE player_basic_info")
+                    self.database_manager.execute(
+                        "ALTER TABLE player_basic_info__sync_new RENAME TO player_basic_info"
+                    )
+                    print(
+                        f"[ARC Core]Rebuilt player_basic_info without local columns "
+                        f"(seeded {len(rows)} rows)"
+                    )
+
+            # Import seed -> this server's local table (missing xuids only).
+            seed_rows = self.database_manager.query_all(
+                "SELECT * FROM player_local_info_seed", ()
+            ) or []
+            imported = 0
+            for row in seed_rows:
+                xuid = str(row.get("xuid") or "").strip()
+                if not xuid:
+                    continue
+                if self.database_manager.query_one(
+                    "SELECT xuid FROM player_local_info WHERE xuid = ?", (xuid,)
+                ):
+                    continue
+                self.database_manager.insert(
+                    "player_local_info",
+                    {
+                        "xuid": xuid,
+                        "is_op": int(row.get("is_op") or 0),
+                        "remaining_free_land_blocks": int(
+                            row.get("remaining_free_land_blocks")
+                            if row.get("remaining_free_land_blocks") is not None
+                            else default_free
+                        ),
+                        "total_playtime": int(row.get("total_playtime") or 0),
+                        "session_count": int(row.get("session_count") or 0),
+                        "last_join_time": row.get("last_join_time"),
+                        "last_quit_time": row.get("last_quit_time"),
+                    },
+                )
+                imported += 1
+            if imported:
+                print(
+                    f"[ARC Core]Imported {imported} local profiles from player_local_info_seed"
+                )
+        except Exception as e:
+            print(f"[ARC Core]Migrate player_basic_info split error: {e}")
+
+    def init_player_basic_table(self) -> bool:
+        """Initialize cross-server player_basic_info + per-server player_local_info."""
+        fields = {
+            'uuid': 'TEXT PRIMARY KEY',
+            'xuid': 'TEXT NOT NULL',
+            'name': 'TEXT NOT NULL',
+            'password': 'TEXT',
+            'inviter_xuid': 'TEXT',
+            'pending_invite_reward_times': 'INTEGER DEFAULT 0',
+            'last_checkin_date': 'TEXT',
+            'default_title_auto_equipped': 'INTEGER DEFAULT 0',
+            'total_checkin_count': 'INTEGER DEFAULT 0',
+            'last_checkin_at': 'TEXT',
+            'continuous_checkin_days': 'INTEGER DEFAULT 0',
         }
         result = self.database_manager.create_table('player_basic_info', fields)
-        
-        # 对于已存在的表，执行升级操作
         if result:
             self._upgrade_player_basic_table()
-        
-        return result
+        local_ok = self.init_player_local_table()
+        self._migrate_player_basic_info_split()
+        return bool(result and local_ok)
 
     def _hash_password(self, password: str) -> str:
         """
@@ -2343,30 +2484,58 @@ class ARCCorePlugin(Plugin):
         # 使用SHA-256进行加密
         return hashlib.sha256(password.encode()).hexdigest()
 
+    def init_player_local_info(self, player: Player) -> bool:
+        """Initialize per-server local profile row for player."""
+        try:
+            default_free_blocks = int(
+                self.setting_manager.GetSetting('DEFAULT_FREE_LAND_BLOCKS') or '100'
+            )
+            xuid = str(player.xuid)
+            existing = self.database_manager.query_one(
+                "SELECT xuid FROM player_local_info WHERE xuid = ?", (xuid,)
+            )
+            if existing:
+                return True
+            return self.database_manager.insert(
+                "player_local_info",
+                {
+                    "xuid": xuid,
+                    "is_op": 1 if player.is_op else 0,
+                    "remaining_free_land_blocks": default_free_blocks,
+                    "total_playtime": 0,
+                    "session_count": 0,
+                    "last_join_time": None,
+                    "last_quit_time": None,
+                },
+            )
+        except Exception as e:
+            self._safe_log(
+                "error",
+                f"{ColorFormat.RED}[ARC Core]Init player local info error: {str(e)}",
+            )
+            return False
+
     def init_player_basic_info(self, player: Player) -> bool:
         """
-        初始化玩家基本信息
+        初始化玩家跨服基本信息 + 本服本地信息
         :param player: 玩家对象
         :return: 是否初始化成功
         """
         try:
-            # 获取默认免费领地格子数
-            default_free_blocks = int(self.setting_manager.GetSetting('DEFAULT_FREE_LAND_BLOCKS') or '100')
-            
             player_data = {
                 'uuid': str(player.unique_id),
                 'xuid': str(player.xuid),
                 'name': player.name,
-                'password': None,  # 初始密码为空
-                'is_op': 1 if player.is_op else 0,  # 根据玩家当前OP状态设置
-                'remaining_free_land_blocks': default_free_blocks,  # 设置默认免费格子数
-                'inviter_xuid': None,  # 初始无邀请人
-                'pending_invite_reward_times': 0,  # 初始无待领取邀请奖励
+                'password': None,
+                'inviter_xuid': None,
+                'pending_invite_reward_times': 0,
                 'default_title_auto_equipped': 0,
                 'total_checkin_count': 0,
                 'continuous_checkin_days': 0,
             }
-            return self.database_manager.insert('player_basic_info', player_data)
+            ok = self.database_manager.insert('player_basic_info', player_data)
+            local_ok = self.init_player_local_info(player)
+            return bool(ok and local_ok)
         except Exception as e:
             self._safe_log('error', f"{ColorFormat.RED}[ARC Core]Init player basic info error: {str(e)}")
             return False
@@ -2399,6 +2568,9 @@ class ARCCorePlugin(Plugin):
                 else:
                     self._safe_log('info', f"{ColorFormat.GREEN}[ARC Core]Initialized basic info for new player {player.name}")
 
+            # Ensure per-server local profile exists
+            self.init_player_local_info(player)
+
             # 更新玩家名称（如果发生变化）
             self.update_player_name(player)
 
@@ -2424,7 +2596,7 @@ class ARCCorePlugin(Plugin):
 
     def get_player_basic_info(self, player: Player) -> Optional[Dict[str, Any]]:
         """
-        获取玩家基本信息
+        获取玩家基本信息（跨服字段 + 本服本地字段合并，供 UI 兼容）
         :param player: 玩家对象
         :return: 玩家信息字典或None(如果发生错误)
         """
@@ -2434,17 +2606,24 @@ class ARCCorePlugin(Plugin):
                 (str(player.xuid),)
             )
             if result is None:
-                # 玩家第一次进入服务器，初始化信息
                 if self.init_player_basic_info(player):
-                    return {
+                    result = {
                         'uuid': str(player.unique_id),
                         'xuid': str(player.xuid),
                         'name': player.name,
                         'password': None,
                         'default_title_auto_equipped': 0
                     }
-                return None
-            return result
+                else:
+                    return None
+            self.init_player_local_info(player)
+            local = self.database_manager.query_one(
+                "SELECT * FROM player_local_info WHERE xuid = ?",
+                (str(player.xuid),),
+            ) or {}
+            merged = dict(result)
+            merged.update(local)
+            return merged
         except Exception as e:
             self.logger.error(f"{ColorFormat.RED}[ARC Core]Get player basic info error: {str(e)}")
             return None
@@ -2529,8 +2708,9 @@ class ARCCorePlugin(Plugin):
             current_op_status = 1 if player.is_op else 0
             
             # 检查当前数据库中的OP状态
+            self.init_player_local_info(player)
             current_info = self.database_manager.query_one(
-                "SELECT is_op FROM player_basic_info WHERE xuid = ?",
+                "SELECT is_op FROM player_local_info WHERE xuid = ?",
                 (str(player.xuid),)
             )
             
@@ -2539,7 +2719,7 @@ class ARCCorePlugin(Plugin):
                 if stored_op_status != current_op_status:
                     # OP状态发生变化，更新数据库
                     success = self.database_manager.update(
-                        table='player_basic_info',
+                        table='player_local_info',
                         data={'is_op': current_op_status},
                         where='xuid = ?',
                         params=(str(player.xuid),)
@@ -2576,7 +2756,7 @@ class ARCCorePlugin(Plugin):
         """
         try:
             result = self.database_manager.query_one(
-                "SELECT is_op FROM player_basic_info WHERE xuid = ?",
+                "SELECT is_op FROM player_local_info WHERE xuid = ?",
                 (player_xuid,)
             )
             if result is not None:
@@ -2594,7 +2774,9 @@ class ARCCorePlugin(Plugin):
         """
         try:
             result = self.database_manager.query_one(
-                "SELECT is_op FROM player_basic_info WHERE uuid = ?",
+                "SELECT l.is_op AS is_op FROM player_local_info l "
+                "JOIN player_basic_info b ON b.xuid = l.xuid "
+                "WHERE b.uuid = ?",
                 (player_uuid,)
             )
             if result is not None:
@@ -4759,7 +4941,7 @@ class ARCCorePlugin(Plugin):
         try:
             player_xuid = str(player.xuid)
             result = self.database_manager.query_one(
-                "SELECT remaining_free_land_blocks FROM player_basic_info WHERE xuid = ?",
+                "SELECT remaining_free_land_blocks FROM player_local_info WHERE xuid = ?",
                 (player_xuid,)
             )
             if result is None:
@@ -4776,9 +4958,10 @@ class ARCCorePlugin(Plugin):
         try:
             player_xuid = str(player.xuid)
             return self.database_manager.update(
-                'player_basic_info',
-                {'remaining_free_land_blocks': amount},
-                f"xuid = '{player_xuid}'"
+                table='player_local_info',
+                data={'remaining_free_land_blocks': amount},
+                where='xuid = ?',
+                params=(player_xuid,),
             )
         except Exception as e:
             self.logger.error(f"{ColorFormat.RED}[ARC Core]Set player free land blocks error: {str(e)}")
@@ -14536,58 +14719,27 @@ class ARCCorePlugin(Plugin):
         """将维度标识转为显示名：原版走语言文件，自定义/未知返回完整 ID。"""
         return translate_dimension_display(dimension_name, self.language_manager)
 
+    def _get_qq_sync_plugin(self):
+        """Resolve ARC QQ Sync plugin (new id first, legacy id fallback)."""
+        pm = self.server.plugin_manager
+        for name in ("arc-qq-sync-astrbot", "qqsync_plugin"):
+            plug = pm.get_plugin(name)
+            if plug is not None:
+                return plug
+        return None
+
     def _send_to_qq_group(self, message: str):
-        """
-        发送消息到QQ群（旧接口，保持兼容）
-        :param message: 要发送的消息
-        """
+        """Send a raw text message to QQ via local ARC QQ Sync plugin."""
         try:
-            from endstone_arc_core.sync_config import get_qq_relay_mode
-            if get_qq_relay_mode(self.setting_manager) == "host":
-                if self.sync_client and self.sync_client.is_running():
-                    if self.sync_client.send_event_forward(
-                        "custom", "", "", message
-                    ):
-                        return
-                self.logger.warning(
-                    "[ARC Core] QQ_RELAY_MODE=host 但同步客户端未连接，无法转发群消息"
-                )
-                return
-            qqsync = self.server.plugin_manager.get_plugin('qqsync_plugin')
+            qqsync = self._get_qq_sync_plugin()
             if qqsync is None:
-                self.logger.warning("[ARC Core] QQSync 插件未找到，无法发送群消息")
+                self.logger.warning("[ARC Core] QQ Sync plugin not found, cannot send group message")
                 return
             success = qqsync.api_send_message(message)
             if not success:
-                self.logger.warning(f"[ARC Core] QQ群消息发送失败: {message}")
+                self.logger.warning(f"[ARC Core] QQ group message send failed: {message}")
         except Exception as e:
-            self.logger.error(f"[ARC Core] QQ群消息发送异常: {str(e)}")
-
-    def _on_sync_event_forward(self, data: dict):
-        """主机：处理子服经 SyncServer 转发来的 QQ/群事件。"""
-        try:
-            qqsync = self.server.plugin_manager.get_plugin('qqsync_plugin')
-            if qqsync is None:
-                self.logger.warning(
-                    "[ARC Core] 收到子服 QQ 转发但主机未安装 qqsync_plugin"
-                )
-                return
-            event_type = data.get('event_type', 'custom') or 'custom'
-            display_name = data.get('display_name', '') or ''
-            raw_player_name = data.get('raw_player_name', '') or ''
-            message = data.get('message', '') or ''
-            source_server_id = data.get('server_id', '') or ''
-            source_server_name = data.get('server_name', '') or ''
-            qqsync.api_send_event(
-                event_type,
-                display_name,
-                raw_player_name,
-                message,
-                source_server_name=source_server_name or None,
-                source_server_id=source_server_id or None,
-            )
-        except Exception as e:
-            self.logger.error(f"[ARC Core] Handle sync event forward error: {e}")
+            self.logger.error(f"[ARC Core] QQ group message send error: {str(e)}")
 
     def _on_db_write_for_sync(self, kind: str, table: str, **kwargs):
         """本地写库成功后：子服上行到中心 / 主机广播给子服。"""
@@ -14606,78 +14758,155 @@ class ARCCorePlugin(Plugin):
             except Exception:
                 pass
 
-    def api_broadcast_qq_chat(
-        self, display_name: str, message: str, group_name: str = ""
-    ) -> bool:
-        """
-        供主机 qqsync 调用：把 QQ 群聊经 SyncServer 下发到各子服。
-        主机本机玩家仍由 qqsync 自己广播；此 API 只负责同步客户端。
-        """
-        try:
-            if not self.sync_server or not self.sync_server.is_running():
-                return False
-            self.sync_server.broadcast_qq_chat(display_name, message, group_name or "")
-            return True
-        except Exception as e:
-            self.logger.error(f"[ARC Core] api_broadcast_qq_chat error: {e}")
-            return False
-
-    def _on_qq_chat_downstream(self, data: dict):
-        """子服：收到主机下发的 QQ 群聊，广播给本机在线玩家。"""
-        try:
-            display_name = str(data.get("display_name") or "")
-            message = str(data.get("message") or "")
-            group_name = str(data.get("group_name") or "")
-            if not display_name or not message:
-                return
-            from_server = "地球Online服务器"
-            if group_name.strip():
-                from_server = f"{from_server}·{group_name.strip()}"
-            game_message = (
-                f"{ColorFormat.GRAY}[跨服|{from_server}] {ColorFormat.AQUA}{display_name}"
-                f"{ColorFormat.GRAY}: {ColorFormat.WHITE}{message}"
-            )
-
-            def send():
-                try:
-                    for player in self.server.online_players:
-                        player.send_message(game_message)
-                except Exception as e:
-                    self.logger.error(f"[ARC Core] Deliver QQ chat error: {e}")
-
-            self.server.scheduler.run_task(self, send, delay=1)
-        except Exception as e:
-            self.logger.error(f"[ARC Core] QQ chat downstream error: {e}")
-
     def _notify_qqsync(self, event_type: str, display_name: str,
                         raw_player_name: str, message: str = ""):
-        """
-        通知 qqsync 发送事件消息到 QQ 群。
-        QQ_RELAY_MODE=local：本机 qqsync_plugin
-        QQ_RELAY_MODE=host：经同步中心转发，由主机 qqsync 发送（带上子服名）
-        :param event_type: "join" | "quit" | "chat" | "death" | "custom"
-        :param display_name: 带头衔的显示名 (含 § 颜色码)
-        :param raw_player_name: 原始玩家名
-        :param message: 额外消息内容
+        """Notify local ARC QQ Sync to send death/custom events to QQ.
+
+        Join/chat/quit are owned by the QQ Sync plugin itself.
+        Cross-server fan-out is handled by AstrBot hub, not ARCCore.
         """
         try:
-            from endstone_arc_core.sync_config import get_qq_relay_mode
-            if get_qq_relay_mode(self.setting_manager) == "host":
-                if self.sync_client and self.sync_client.is_running():
-                    if self.sync_client.send_event_forward(
-                        event_type, display_name, raw_player_name, message
-                    ):
-                        return
-                self.logger.warning(
-                    "[ARC Core] QQ_RELAY_MODE=host 但同步客户端未连接，跳过 QQ 转发"
-                )
-                return
-            qqsync = self.server.plugin_manager.get_plugin('qqsync_plugin')
+            qqsync = self._get_qq_sync_plugin()
             if qqsync is None:
                 return
             qqsync.api_send_event(event_type, display_name, raw_player_name, message)
         except Exception as e:
             self.logger.error(f"[ARC Core]Notify qqsync error: {e}")
+
+    def _record_player_join_playtime(self, player) -> None:
+        """Increment session_count and start this session timer."""
+        try:
+            import time as _time
+            from datetime import datetime as _dt
+            name = getattr(player, "name", "") or ""
+            xuid = str(getattr(player, "xuid", "") or "")
+            if not name or not xuid:
+                return
+            now_iso = _dt.now().isoformat(timespec="seconds")
+            self._play_session_start[xuid] = int(_time.time())
+            row = self.database_manager.query_one(
+                "SELECT session_count FROM player_local_info WHERE xuid = ?",
+                (xuid,),
+            )
+            if not row:
+                return
+            session_count = int(row.get("session_count") or 0) + 1
+            self.database_manager.update(
+                table="player_local_info",
+                data={"session_count": session_count, "last_join_time": now_iso},
+                where="xuid = ?",
+                params=(xuid,),
+            )
+        except Exception as e:
+            if self.logger:
+                self.logger.error(f"[ARC Core] record join playtime error: {e}")
+
+    def _record_player_quit_playtime(self, player) -> None:
+        """Accumulate session seconds into total_playtime and clear timer."""
+        try:
+            import time as _time
+            from datetime import datetime as _dt
+            name = getattr(player, "name", "") or ""
+            xuid = str(getattr(player, "xuid", "") or "")
+            if not xuid:
+                return
+            started = self._play_session_start.pop(xuid, None)
+            if started is None and name:
+                started = self._play_session_start.pop(name, None)
+            now_iso = _dt.now().isoformat(timespec="seconds")
+            delta = max(0, int(_time.time()) - int(started)) if started is not None else 0
+            row = self.database_manager.query_one(
+                "SELECT total_playtime FROM player_local_info WHERE xuid = ?",
+                (xuid,),
+            )
+            if not row:
+                return
+            total = int(row.get("total_playtime") or 0) + delta
+            self.database_manager.update(
+                table="player_local_info",
+                data={"total_playtime": total, "last_quit_time": now_iso},
+                where="xuid = ?",
+                params=(xuid,),
+            )
+        except Exception as e:
+            if self.logger:
+                self.logger.error(f"[ARC Core] record quit playtime error: {e}")
+
+    def _settle_all_online_playtime(self) -> None:
+        """Settle timers for all online players (plugin disable / shutdown)."""
+        for player in list(getattr(self.server, "online_players", []) or []):
+            try:
+                self._record_player_quit_playtime(player)
+            except Exception:
+                pass
+
+    def api_get_player_playtime(self, raw_player_name: str = "", xuid: str = "") -> dict:
+        """Public API: playtime / session stats for QQ Sync and other plugins.
+
+        Args:
+            raw_player_name: Player name.
+            xuid: Optional XUID.
+
+        Returns:
+            Dict with session_count, total_playtime (seconds, includes current session),
+            is_online, last_join_time, last_quit_time.
+        """
+        empty = {
+            "session_count": 0,
+            "total_playtime": 0,
+            "is_online": False,
+            "last_join_time": None,
+            "last_quit_time": None,
+        }
+        try:
+            import time as _time
+            name = (raw_player_name or "").strip()
+            xuid_s = str(xuid or "").strip()
+            if not name and not xuid_s:
+                return empty
+            if xuid_s:
+                row = self.database_manager.query_one(
+                    "SELECT * FROM player_local_info WHERE xuid = ?",
+                    (xuid_s,),
+                )
+            else:
+                basic = self.database_manager.query_one(
+                    "SELECT xuid FROM player_basic_info WHERE name = ?",
+                    (name,),
+                )
+                if not basic:
+                    return empty
+                row = self.database_manager.query_one(
+                    "SELECT * FROM player_local_info WHERE xuid = ?",
+                    (str(basic.get("xuid") or ""),),
+                )
+            if not row:
+                return empty
+            total = int(row.get("total_playtime") or 0)
+            key = str(row.get("xuid") or "")
+            started = self._play_session_start.get(key) if key else None
+            is_online = started is not None
+            if is_online:
+                total += max(0, int(_time.time()) - int(started))
+            if not is_online and name:
+                try:
+                    is_online = any(
+                        getattr(pl, "name", "") == name
+                        for pl in (getattr(self.server, "online_players", []) or [])
+                    )
+                except Exception:
+                    pass
+            return {
+                "session_count": int(row.get("session_count") or 0),
+                "total_playtime": total,
+                "is_online": bool(is_online),
+                "last_join_time": row.get("last_join_time"),
+                "last_quit_time": row.get("last_quit_time"),
+            }
+        except Exception as e:
+            if self.logger:
+                self.logger.error(f"[ARC Core] api_get_player_playtime error: {e}")
+            return empty
 
     # 清道夫系统
     def _init_cleaner_system(self):

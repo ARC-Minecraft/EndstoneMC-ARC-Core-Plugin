@@ -23,7 +23,6 @@ from endstone_arc_core.sync_protocol import (
     build_full_sync_response,
     build_heartbeat,
     build_push_notify,
-    build_qq_chat_downstream,
     build_error_response,
 )
 from endstone_arc_core.sync_write import iter_mirror_write_actions, query_sync_table, select_all_sync_table
@@ -59,7 +58,6 @@ class SyncServer:
         bind_host: str = "0.0.0.0",  # nosec B104 — 跨服同步中心需监听所有网卡
         bind_port: int = 19999,
         logger=None,
-        on_event_forward: Optional[Callable[[Dict[str, Any]], None]] = None,
     ):
         """
         初始化同步服务器
@@ -69,14 +67,12 @@ class SyncServer:
         :param bind_host: 绑定地址
         :param bind_port: 绑定端口
         :param logger: 日志记录器
-        :param on_event_forward: 子服 EVENT_FORWARD 回调（主机侧转 qqsync）
         """
         self.db = database_manager
         self.auth_key = auth_key
         self.bind_host = bind_host
         self.bind_port = bind_port
         self.logger = logger
-        self.on_event_forward = on_event_forward
         
         self._socket: Optional[socket.socket] = None
         self._running = False
@@ -260,7 +256,6 @@ class SyncServer:
         SyncMessageType.BATCH_SYNC_REQUEST: lambda self, c, d: self._handle_batch_sync(c, d),
         SyncMessageType.FULL_SYNC_REQUEST: lambda self, c, d: self._handle_full_sync(c, d),
         SyncMessageType.PULL_REQUEST: lambda self, c, d: self._handle_pull(c, d),
-        SyncMessageType.EVENT_FORWARD: lambda self, c, d: self._handle_event_forward(c, d),
     }
 
     def _handle_auth(self, client: ConnectedClient, data: Dict):
@@ -301,28 +296,6 @@ class SyncServer:
         except Exception:
             pass
 
-    def _handle_event_forward(self, client: ConnectedClient, data: Dict):
-        """处理子服 QQ/群事件转发（不要求响应，避免与数据同步阻塞）"""
-        if not self.on_event_forward:
-            self._log(
-                "warning",
-                f"EVENT_FORWARD from {client.server_name or data.get('server_name') or '?'} "
-                "ignored (no handler)",
-            )
-            return
-        try:
-            self.on_event_forward(
-                {
-                    "event_type": str(data.get("event_type") or "custom"),
-                    "display_name": str(data.get("display_name") or ""),
-                    "raw_player_name": str(data.get("raw_player_name") or ""),
-                    "message": str(data.get("message") or ""),
-                    "server_id": client.server_id or str(data.get("server_id") or ""),
-                    "server_name": client.server_name or str(data.get("server_name") or ""),
-                }
-            )
-        except Exception as e:
-            self._log("error", f"EVENT_FORWARD handler error: {e}")
 
     def _handle_query(self, client: ConnectedClient, data: Dict):
         """处理查询请求"""
@@ -560,24 +533,6 @@ class SyncServer:
         except Exception as e:
             self._log("error", f"Mirror local write {table}/{kind} error: {e}")
 
-    def broadcast_qq_chat(
-        self, display_name: str, message: str, group_name: str = ""
-    ) -> None:
-        """将 QQ 群聊下发给所有已认证子服。"""
-        if not display_name or not message:
-            return
-        msg = build_qq_chat_downstream(display_name, message, group_name)
-        disconnected = []
-        with self._clients_lock:
-            for client in self._clients:
-                if not client.authenticated:
-                    continue
-                try:
-                    client.conn.sendall(msg)
-                except Exception:
-                    disconnected.append(client)
-            for client in disconnected:
-                self._clients.discard(client)
 
     def get_connected_count(self) -> int:
         """获取已连接的客户端数量"""

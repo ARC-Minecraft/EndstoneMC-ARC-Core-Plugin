@@ -49,9 +49,10 @@ EndStone ARC Core 是一个功能完整的 EndStone (Minecraft 基岩版服务�
 - **会话内验证状态**：已设密的玩家使用 **SHA-256** 存储的密码校验；验证通过后本会话内标记为已验证（修改密码会清除该标记，需重新验证）。语言提示见 **`dist/ARCCore/ZH-CN.txt`** 中 **`SENSITIVE_*`** 等键。
 - **注册确认密码**（v0.3.0）：首次设密 / 注册时需输入两次密码，一致方可完成。
 - **修改密码（我的信息）**：主菜单 **我的信息** →「修改密码」。已设置账户密码时需填写 **当前密码**、**新密码** 与 **确认新密码**（新密码不可与当前密码相同）；尚未设置密码时打开与首次注册相同的 **设密 + 确认** 表单（标题为单独提示文案），成功或关闭表单后均回到 **我的信息**。修改成功后，本会话内「敏感操作已验证」状态会清除，之后转账、领地等需用 **新密码** 再验证一次。相关语言键见 `dist/ARCCore/ZH-CN.txt` 中 `CHANGE_PASSWORD_*`
-- 玩家数据持久化存储
+- 玩家数据持久化存储（跨服账号：`player_basic_info`；本服档案：`player_local_info`）
 - 在线状态实时管理
 - 玩家加入/离开消息提示
+- **免费领地格子**、**OP 标记**、**游戏时长** 均为本服数据，不随 `PLAYER_DATABASE_PATH` / 同步中心跨服覆盖
 
 ### 👁️ 天眼系统（Sky Eye，v0.7.6）
 - **用途**：可选开启的玩家行为审计日志，按自然日写入文本，便于排查与合规留痕
@@ -181,11 +182,10 @@ EndStone ARC Core 是一个功能完整的 EndStone (Minecraft 基岩版服务�
 - **错误处理机制** - 文件读取失败不影响插件正常运行
 
 ### 🔐 OP状态追踪系统 (v0.1.4新增)
-- **OP状态持久化** - 在数据库中记录玩家的OP状态
-- **离线状态查询** - 即使玩家离线也能查询其OP状态
-- **自动状态同步** - 玩家加入时自动检查并更新OP状态
-- **数据库自动升级** - 自动为旧数据库添加OP状态字段
-- **金钱排行榜隐藏** - 可配置在金钱排行榜中隐藏OP玩家
+- **OP状态持久化** - 记录在本服表 **`player_local_info.is_op`**（**不跨服同步**，每服独立）
+- **离线状态查询** - 即使玩家离线也能查询其本服 OP 状态
+- **自动状态同步** - 玩家加入时自动检查并更新本服 OP 状态
+- **金钱排行榜隐藏** - 可配置在金钱排行榜中隐藏 OP 玩家
 
 ### 🛡️ 出生点保护
 - 可配置的出生点保护范围
@@ -235,18 +235,27 @@ EndStone ARC Core 是一个功能完整的 EndStone (Minecraft 基岩版服务�
 - **数据库平滑升级**：插件加载时若旧库 `guilds` / `guild_members` 缺少 `size_tier` / `total_contribution` / `contribution` 列，会自动 `ALTER TABLE` 补齐（默认值：`size_tier='small'`、其余为 `0`），无需手动迁移
 
 ### 🔄 跨服数据同步（v0.8）
-- **用途**：在多服架构下，让玩家经济、头衔、公会等数据在多个 ARC Core 实例之间保持一致
+- **用途**：在多服架构下，让玩家账号级数据、经济、头衔、公会等在多个 ARC Core 实例之间保持一致
 - **游戏服二选一（互斥）**：
   - **方式 A · 远程客户端**：**`ENABLE_SYNC_CLIENT=True`**，连接同步中心（**`SYNC_SERVER_IP`** + **`SYNC_CLIENT_PORT`**），首次连接全量拉取、之后接收 **`PUSH_NOTIFY`** 推送
   - **方式 B · 共享文件**：**`ENABLE_SYNC_CLIENT=False`**，通过 **`PLAYER_DATABASE_PATH`**、**`PLAYER_ECONOMY_DATABASE_PATH`**、**`PLAYER_TITLE_DATABASE_PATH`**、**`GUILD_DATABASE_PATH`** 指向同一 SQLite 文件
-- **同步中心（可选）**：某一实例可设 **`ENABLE_SYNC_SERVER=True`** 监听 **`SYNC_SERVER_PORT`**，供其他游戏服以客户端连接；与上述 A/B 消费方式独立
+- **同步中心（可选）**：某一实例可设 **`ENABLE_SYNC_SERVER=True`** 监听 **`SYNC_SERVER_PORT`**（部署上常与 FRP **19135** 对应），供其他游戏服以客户端连接；与上述 A/B 消费方式独立
 - **分项同步开关（仅远程客户端）**：**`SYNC_CLIENT_SYNC_PLAYER`**、**`SYNC_CLIENT_SYNC_ECONOMY`**、**`SYNC_CLIENT_SYNC_TITLE`**、**`SYNC_CLIENT_SYNC_GUILD`** 可单独开关；关闭的类别不会拉取全量数据，也不会接收推送。若 A 与 B 同时配置，插件 **以远程客户端为准** 并忽略文件路径
 - **模块**：`sync_protocol.py`、`sync_server.py`、`sync_client.py`、`sync_config.py`
-- **可同步数据表**：玩家基本信息（`player_basic_info`）、经济（`player_economy`）、头衔（`title_definitions` / `player_title_unlock_time` / `player_title_equipped`）、公会（`guilds` / `guild_members` / `guild_invites`）
+- **可同步数据表**：跨服玩家账号信息（`player_basic_info`）、经济（`player_economy`）、头衔（`title_definitions` / `player_title_unlock_time` / `player_title_equipped`）、公会（`guilds` / `guild_members` / `guild_invites`）
+- **本服本地表（不同步）**：**`player_local_info`** — `is_op`、剩余免费领地格、游戏时长 / 进服次数 / 进出服时间。始终写在本服 **`DATABASE_PATH`**，即使配置了 `PLAYER_DATABASE_PATH` 也不会进共享库
+- **QQ 群消息**：跨服 QQ 互通由 **AstrBot 弧光消息中心** + **endstone-arc-qq-sync-astrbot** 负责；ARCCore **不再**经 SyncServer 做 QQ 事件中继。死亡 / 成就等仍可调用本机 QQ Sync 的 `api_send_event` / `api_send_raw`
+- **启动迁移**：旧版把 OP / 免费格 / 时长写在 `player_basic_info` 时，启动会自动拆到 `player_local_info`，并在共享库侧写入种子表 `player_local_info_seed` 供各服导入
+
+### ⏱️ 游戏时长统计（本服）
+- 表：**`player_local_info`**（`total_playtime` 秒、`session_count`、`last_join_time` / `last_quit_time`）
+- 进服 / 离服自动记账；关服时结算在线会话
+- 对外 API：**`api_get_player_playtime(raw_player_name="", xuid="")`**，供 QQ Sync `/who` 与进离服播报查询
 
 ### 🔌 插件 API 系统
 - **经济系统 API** - 完整的金钱管理接口
 - **头衔系统 API**（v0.3.0）- `plugin.api_unlock_title(player, title)` 为玩家解锁头衔
+- **游戏时长 API** - `plugin.api_get_player_playtime(...)` 查询本服累计时长与进服次数
 - **新手引导 API** - `plugin.api_get_newbie_guide_text()` 返回 `newbie_welcome.txt` 全文（供大模型聊天等插件使用）
 - **线程安全设计** - 支持多插件并发调用
 - **错误处理机制** - 自动处理异常情况
@@ -921,6 +930,8 @@ class MyPlugin(Plugin):
 
 ### v0.8.2（当前版本）
 
+- ✅ **玩家表拆分**：跨服账号信息保留在 **`player_basic_info`**（密码、签到、邀请等）；本服字段迁入 **`player_local_info`**（`is_op`、剩余免费领地格、游戏时长 / 进服次数）。启动自动迁移；共享库场景通过 **`player_local_info_seed`** 供各服导入
+- ✅ **QQ 中继移除**：不再经 SyncServer 转发 QQ 事件 / 群聊下行（原 `QQ_RELAY_MODE` / `EVENT_FORWARD` 已移除）。群服互通由 AstrBot 弧光消息中心 + QQ Sync 插件负责；死亡 / 成就仍可调用本机 `arc-qq-sync-astrbot` API
 - ✅ **公共领地三级优先级**：`lands.public_priority`（1/2/3，**3 最高**，默认 1）。高优先级公共可覆盖低优先级；同级不可重叠。位置生效顺序：**私人/公会 > 公共(3>2>1)**；私人子领地仍先于父领地。创建公共领地时 OP 选择等级；OP 公共领地设置可改级（升高时校验冲突）
 - ✅ **公共领地拦截生物生成**：`block_actor_spawn`（默认关闭）；开启后经 `ActorSpawnEvent` 取消该公共领地内 `Mob`（不含玩家）生成
 - ✅ **传送点校验修复**：设置领地传送点改为按目标领地三维 AABB（含维度/Y）判定，不再用「脚下生效领地 ID」比较，避免嵌套私人地/高层公共覆盖时误报「不在领地内」

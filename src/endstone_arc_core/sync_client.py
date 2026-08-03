@@ -6,7 +6,7 @@ import time
 from contextlib import suppress
 from typing import Any, Dict, Optional, Set
 
-from endstone_arc_core.sync_config import get_client_sync_tables, get_qq_relay_mode
+from endstone_arc_core.sync_config import get_client_sync_tables
 from endstone_arc_core.sync_protocol import (
     SyncMessageType,
     SyncTable,
@@ -14,7 +14,6 @@ from endstone_arc_core.sync_protocol import (
     ENUM_TO_TABLE,
     build_auth_request,
     build_data_request,
-    build_event_forward,
     build_full_sync_request,
     build_heartbeat,
     decode_message,
@@ -28,11 +27,10 @@ class SyncClient:
     断线或主机不可达时，按 SYNC_CLIENT_RECONNECT_INTERVAL 秒定时重连。
     """
 
-    def __init__(self, database_manager, setting_manager, logger=None, on_qq_chat=None):
+    def __init__(self, database_manager, setting_manager, logger=None):
         self.db = database_manager
         self.settings = setting_manager
         self.logger = logger
-        self.on_qq_chat = on_qq_chat
 
         self.server_ip = str(setting_manager.GetSetting("SYNC_SERVER_IP") or "127.0.0.1").strip()
         self.server_id = str(setting_manager.GetSetting("SYNC_CLIENT_SERVER_ID") or "server_001").strip()
@@ -44,7 +42,6 @@ class SyncClient:
         self.reconnect_interval = max(1, self._setting_int("SYNC_CLIENT_RECONNECT_INTERVAL", 10))
 
         self.enabled_tables: Set[str] = get_client_sync_tables(setting_manager)
-        self.qq_relay_host = get_qq_relay_mode(setting_manager) == "host"
 
         self._socket: Optional[socket.socket] = None
         self._active = False  # 希望保持连接（允许断线重连）
@@ -70,11 +67,11 @@ class SyncClient:
         """启动客户端后台线程（断线后自动重连）。"""
         if self._active:
             return True
-        if not self.enabled_tables and not self.qq_relay_host:
+        if not self.enabled_tables:
             self._log(
                 "warning",
-                "No sync categories enabled (SYNC_CLIENT_SYNC_* all False) "
-                "and QQ_RELAY_MODE is not host; client not started",
+                "No sync categories enabled (SYNC_CLIENT_SYNC_* all False); "
+                "client not started",
             )
             return False
 
@@ -100,32 +97,6 @@ class SyncClient:
         """当前是否已与同步中心建立连接。"""
         with self._socket_lock:
             return self._active and self._socket is not None
-
-    def send_event_forward(
-        self,
-        event_type: str,
-        display_name: str,
-        raw_player_name: str,
-        message: str = "",
-    ) -> bool:
-        """将 QQ/群相关游戏事件转发到同步中心（由主机 qqsync 发送）。"""
-        if not self.is_running():
-            return False
-        try:
-            self._send(
-                build_event_forward(
-                    event_type=event_type,
-                    display_name=display_name,
-                    raw_player_name=raw_player_name,
-                    message=message,
-                    server_id=self.server_id,
-                    server_name=self.server_name,
-                )
-            )
-            return True
-        except Exception as e:
-            self._log("error", f"Send event forward error: {e}")
-            return False
 
     def mirror_local_write(self, kind: str, table: str, **kwargs) -> None:
         """本地业务写库后上行到同步中心（fire-and-forget，响应由监听线程丢弃）。"""
@@ -218,8 +189,6 @@ class SyncClient:
             extras = []
             if self.enabled_tables:
                 extras.append(f"syncing {len(self.enabled_tables)} table(s)")
-            if self.qq_relay_host:
-                extras.append("QQ relay via host")
             self._log(
                 "info",
                 f"Connected to {self.server_ip}:{self.server_port}"
@@ -351,12 +320,7 @@ class SyncClient:
                 data.get("operation", ""),
                 data.get("data", {}),
             )
-        elif msg_type == SyncMessageType.QQ_CHAT_DOWNSTREAM:
-            if self.on_qq_chat:
-                try:
-                    self.on_qq_chat(data)
-                except Exception as e:
-                    self._log("error", f"QQ chat downstream handler error: {e}")
+
         elif msg_type == SyncMessageType.HEARTBEAT:
             return time.time()
         return heartbeat_ts
