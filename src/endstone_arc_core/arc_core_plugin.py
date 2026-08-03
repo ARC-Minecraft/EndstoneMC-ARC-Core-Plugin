@@ -2251,71 +2251,71 @@ class ARCCorePlugin(Plugin):
             return set()
 
     def _upgrade_player_basic_table(self) -> bool:
-        """Upgrade cross-server player_basic_info columns (synced account fields only)."""
+        """Upgrade cross-server player_basic_info columns (account + playtime)."""
         try:
             success = True
-            if not self._add_column_if_not_exists('player_basic_info', 'inviter_xuid', 'TEXT'):
-                success = False
-            if not self._add_column_if_not_exists(
-                'player_basic_info', 'pending_invite_reward_times', 'INTEGER DEFAULT 0'
-            ):
-                success = False
-            if not self._add_column_if_not_exists('player_basic_info', 'last_checkin_date', 'TEXT'):
-                success = False
-            if not self._add_column_if_not_exists(
-                'player_basic_info', 'default_title_auto_equipped', 'INTEGER DEFAULT 0'
-            ):
-                success = False
-            if not self._add_column_if_not_exists(
-                'player_basic_info', 'total_checkin_count', 'INTEGER DEFAULT 0'
-            ):
-                success = False
-            if not self._add_column_if_not_exists('player_basic_info', 'last_checkin_at', 'TEXT'):
-                success = False
-            if not self._add_column_if_not_exists(
-                'player_basic_info', 'continuous_checkin_days', 'INTEGER DEFAULT 0'
-            ):
-                success = False
+            upgrades = [
+                ('inviter_xuid', 'TEXT'),
+                ('pending_invite_reward_times', 'INTEGER DEFAULT 0'),
+                ('default_title_auto_equipped', 'INTEGER DEFAULT 0'),
+                ('total_playtime', 'INTEGER DEFAULT 0'),
+                ('session_count', 'INTEGER DEFAULT 0'),
+                ('last_join_time', 'TEXT'),
+                ('last_quit_time', 'TEXT'),
+            ]
+            for col, decl in upgrades:
+                if not self._add_column_if_not_exists('player_basic_info', col, decl):
+                    success = False
             return success
         except Exception as e:
             print(f"[ARC Core]Upgrade player basic table error: {str(e)}")
             return False
 
+    def _player_local_info_columns(self) -> set:
+        """Return column names of player_local_info (empty if missing)."""
+        try:
+            rows = self.database_manager.query_all(
+                "PRAGMA table_info(player_local_info)", ()
+            ) or []
+            return {str(r.get("name") or "") for r in rows if r.get("name")}
+        except Exception:
+            return set()
+
     def init_player_local_table(self) -> bool:
-        """Initialize per-server local player profile (NOT cross-server synced)."""
+        """Initialize per-server local profile (OP / free land / check-in)."""
         default_free_blocks = self.setting_manager.GetSetting('DEFAULT_FREE_LAND_BLOCKS') or '100'
         fields = {
             'xuid': 'TEXT PRIMARY KEY',
             'is_op': 'INTEGER DEFAULT 0',
             'remaining_free_land_blocks': f'INTEGER DEFAULT {default_free_blocks}',
-            'total_playtime': 'INTEGER DEFAULT 0',
-            'session_count': 'INTEGER DEFAULT 0',
-            'last_join_time': 'TEXT',
-            'last_quit_time': 'TEXT',
+            'last_checkin_date': 'TEXT',
+            'total_checkin_count': 'INTEGER DEFAULT 0',
+            'last_checkin_at': 'TEXT',
+            'continuous_checkin_days': 'INTEGER DEFAULT 0',
         }
         # Always on default DATABASE_PATH (never routed to shared PLAYER_DATABASE_PATH).
-        return self.database_manager.create_table('player_local_info', fields)
+        ok = self.database_manager.create_table('player_local_info', fields)
+        # Legacy local tables may only have OP/free/playtime; add check-in cols.
+        for col, decl in (
+            ('last_checkin_date', 'TEXT'),
+            ('total_checkin_count', 'INTEGER DEFAULT 0'),
+            ('last_checkin_at', 'TEXT'),
+            ('continuous_checkin_days', 'INTEGER DEFAULT 0'),
+        ):
+            self._add_column_if_not_exists('player_local_info', col, decl)
+        return ok
 
     def _migrate_player_basic_info_split(self) -> None:
-        """Move per-server columns out of player_basic_info into player_local_info.
+        """Normalize tables: check-in is local; playtime/session is cross-server.
 
-        When player_basic_info is on a shared PLAYER_DATABASE_PATH, first write a
-        seed snapshot on that same DB so every server can import into its own
-        local table before/after the shared table is rebuilt.
+        - player_basic_info (synced): account + total_playtime / session_count / join-quit
+        - player_local_info (local): is_op / free land / check-in stats
         """
-        local_cols = {
-            "is_op",
-            "remaining_free_land_blocks",
-            "total_playtime",
-            "session_count",
-            "last_join_time",
-            "last_quit_time",
-        }
         default_free = int(self.setting_manager.GetSetting('DEFAULT_FREE_LAND_BLOCKS') or '100')
         try:
             self.init_player_local_table()
+            self._upgrade_player_basic_table()
 
-            # Seed table lives beside player_basic_info (shared file mode supported).
             player_db_path = self.setting_manager.GetSetting('PLAYER_DATABASE_PATH')
             if player_db_path and str(player_db_path).strip():
                 self.database_manager.add_route(
@@ -2327,48 +2327,199 @@ class ARCCorePlugin(Plugin):
                     'xuid': 'TEXT PRIMARY KEY',
                     'is_op': 'INTEGER DEFAULT 0',
                     'remaining_free_land_blocks': f'INTEGER DEFAULT {default_free}',
-                    'total_playtime': 'INTEGER DEFAULT 0',
-                    'session_count': 'INTEGER DEFAULT 0',
-                    'last_join_time': 'TEXT',
-                    'last_quit_time': 'TEXT',
+                    'last_checkin_date': 'TEXT',
+                    'total_checkin_count': 'INTEGER DEFAULT 0',
+                    'last_checkin_at': 'TEXT',
+                    'continuous_checkin_days': 'INTEGER DEFAULT 0',
                 },
             )
+            for col, decl in (
+                ('last_checkin_date', 'TEXT'),
+                ('total_checkin_count', 'INTEGER DEFAULT 0'),
+                ('last_checkin_at', 'TEXT'),
+                ('continuous_checkin_days', 'INTEGER DEFAULT 0'),
+            ):
+                self._add_column_if_not_exists('player_local_info_seed', col, decl)
 
-            cols = self._player_basic_info_columns()
-            if cols & local_cols:
-                rows = self.database_manager.query_all("SELECT * FROM player_basic_info", ()) or []
-                for row in rows:
-                    xuid = str(row.get("xuid") or "").strip()
-                    if not xuid:
-                        continue
-                    payload = {
-                        "xuid": xuid,
-                        "is_op": int(row.get("is_op") or 0),
-                        "remaining_free_land_blocks": int(
-                            row.get("remaining_free_land_blocks")
-                            if row.get("remaining_free_land_blocks") is not None
-                            else default_free
-                        ),
-                        "total_playtime": int(row.get("total_playtime") or 0),
-                        "session_count": int(row.get("session_count") or 0),
-                        "last_join_time": row.get("last_join_time"),
-                        "last_quit_time": row.get("last_quit_time"),
-                    }
-                    # Shared seed for other servers + this server's local profile.
-                    seed_row = self.database_manager.query_one(
-                        "SELECT xuid FROM player_local_info_seed WHERE xuid = ?", (xuid,)
+            basic_cols = self._player_basic_info_columns()
+            local_cols = self._player_local_info_columns()
+            basic_rows = self.database_manager.query_all(
+                "SELECT * FROM player_basic_info", ()
+            ) or []
+            local_by_xuid = {}
+            for row in self.database_manager.query_all(
+                "SELECT * FROM player_local_info", ()
+            ) or []:
+                xuid = str(row.get("xuid") or "").strip()
+                if xuid:
+                    local_by_xuid[xuid] = row
+
+            def _i(row, key, default=0):
+                if not row:
+                    return default
+                try:
+                    v = row.get(key)
+                    return default if v is None else int(v)
+                except (TypeError, ValueError):
+                    return default
+
+            for brow in basic_rows:
+                xuid = str(brow.get("xuid") or "").strip()
+                if not xuid:
+                    continue
+                lrow = local_by_xuid.get(xuid)
+
+                # Ensure local row exists.
+                if not lrow:
+                    self.database_manager.insert(
+                        "player_local_info",
+                        {
+                            "xuid": xuid,
+                            "is_op": _i(brow, "is_op", 0),
+                            "remaining_free_land_blocks": _i(
+                                brow, "remaining_free_land_blocks", default_free
+                            ),
+                            "last_checkin_date": brow.get("last_checkin_date"),
+                            "total_checkin_count": _i(brow, "total_checkin_count", 0),
+                            "last_checkin_at": brow.get("last_checkin_at"),
+                            "continuous_checkin_days": _i(
+                                brow, "continuous_checkin_days", 0
+                            ),
+                        },
                     )
-                    if seed_row:
-                        self.database_manager.update(
-                            table="player_local_info_seed",
-                            data={k: v for k, v in payload.items() if k != "xuid"},
-                            where="xuid = ?",
-                            params=(xuid,),
-                        )
-                    else:
-                        self.database_manager.insert("player_local_info_seed", payload)
+                    lrow = self.database_manager.query_one(
+                        "SELECT * FROM player_local_info WHERE xuid = ?", (xuid,)
+                    ) or {}
+                    local_by_xuid[xuid] = lrow
 
-                # Rebuild synced table without local columns.
+                # Local: OP / free land / check-in (from basic if local empty).
+                local_update = {}
+                if "is_op" in basic_cols:
+                    local_update["is_op"] = max(_i(lrow, "is_op"), _i(brow, "is_op"))
+                if "remaining_free_land_blocks" in basic_cols:
+                    # Prefer whichever is already on local; else take basic.
+                    if lrow.get("remaining_free_land_blocks") is None:
+                        local_update["remaining_free_land_blocks"] = _i(
+                            brow, "remaining_free_land_blocks", default_free
+                        )
+                if "last_checkin_date" in basic_cols:
+                    if not (lrow.get("last_checkin_date") or "").strip() and (
+                        brow.get("last_checkin_date") or ""
+                    ).strip():
+                        local_update["last_checkin_date"] = brow.get("last_checkin_date")
+                        local_update["last_checkin_at"] = brow.get("last_checkin_at")
+                        local_update["total_checkin_count"] = max(
+                            _i(lrow, "total_checkin_count"),
+                            _i(brow, "total_checkin_count"),
+                        )
+                        local_update["continuous_checkin_days"] = max(
+                            _i(lrow, "continuous_checkin_days"),
+                            _i(brow, "continuous_checkin_days"),
+                        )
+                    elif _i(brow, "total_checkin_count") > _i(lrow, "total_checkin_count"):
+                        # One-time promote synced historical check-in totals into local.
+                        local_update["total_checkin_count"] = _i(brow, "total_checkin_count")
+                        if (brow.get("last_checkin_date") or "").strip():
+                            local_update["last_checkin_date"] = brow.get("last_checkin_date")
+                            local_update["last_checkin_at"] = brow.get("last_checkin_at")
+                        local_update["continuous_checkin_days"] = max(
+                            _i(lrow, "continuous_checkin_days"),
+                            _i(brow, "continuous_checkin_days"),
+                        )
+                if local_update:
+                    self.database_manager.update(
+                        table="player_local_info",
+                        data=local_update,
+                        where="xuid = ?",
+                        params=(xuid,),
+                    )
+
+                # Synced: playtime / session (max of basic + local legacy).
+                pt = max(
+                    _i(brow, "total_playtime"),
+                    _i(lrow, "total_playtime") if "total_playtime" in local_cols else 0,
+                )
+                sc = max(
+                    _i(brow, "session_count"),
+                    _i(lrow, "session_count") if "session_count" in local_cols else 0,
+                )
+                join_t = brow.get("last_join_time") or (
+                    lrow.get("last_join_time") if "last_join_time" in local_cols else None
+                )
+                quit_t = brow.get("last_quit_time") or (
+                    lrow.get("last_quit_time") if "last_quit_time" in local_cols else None
+                )
+                self.database_manager.update(
+                    table="player_basic_info",
+                    data={
+                        "total_playtime": pt,
+                        "session_count": sc,
+                        "last_join_time": join_t,
+                        "last_quit_time": quit_t,
+                    },
+                    where="xuid = ?",
+                    params=(xuid,),
+                )
+
+                # Seed local-only profile for shared-file late starters.
+                seed_payload = {
+                    "xuid": xuid,
+                    "is_op": _i(local_by_xuid.get(xuid), "is_op", _i(brow, "is_op")),
+                    "remaining_free_land_blocks": _i(
+                        local_by_xuid.get(xuid),
+                        "remaining_free_land_blocks",
+                        _i(brow, "remaining_free_land_blocks", default_free),
+                    ),
+                    "last_checkin_date": (local_by_xuid.get(xuid) or {}).get(
+                        "last_checkin_date"
+                    )
+                    or brow.get("last_checkin_date"),
+                    "total_checkin_count": max(
+                        _i(local_by_xuid.get(xuid), "total_checkin_count"),
+                        _i(brow, "total_checkin_count"),
+                    ),
+                    "last_checkin_at": (local_by_xuid.get(xuid) or {}).get(
+                        "last_checkin_at"
+                    )
+                    or brow.get("last_checkin_at"),
+                    "continuous_checkin_days": max(
+                        _i(local_by_xuid.get(xuid), "continuous_checkin_days"),
+                        _i(brow, "continuous_checkin_days"),
+                    ),
+                }
+                seed_row = self.database_manager.query_one(
+                    "SELECT xuid FROM player_local_info_seed WHERE xuid = ?", (xuid,)
+                )
+                if seed_row:
+                    self.database_manager.update(
+                        table="player_local_info_seed",
+                        data={k: v for k, v in seed_payload.items() if k != "xuid"},
+                        where="xuid = ?",
+                        params=(xuid,),
+                    )
+                else:
+                    self.database_manager.insert("player_local_info_seed", seed_payload)
+
+            # Also migrate local-only rows that have no basic yet (playtime into basic if possible).
+            for xuid, lrow in list(local_by_xuid.items()):
+                if self.database_manager.query_one(
+                    "SELECT xuid FROM player_basic_info WHERE xuid = ?", (xuid,)
+                ):
+                    continue
+                # No basic row: keep local as-is (check-in/OP). Playtime waits for account row.
+                pass
+
+            # Rebuild basic without check-in / OP / free-land columns.
+            basic_cols = self._player_basic_info_columns()
+            drop_from_basic = {
+                "is_op",
+                "remaining_free_land_blocks",
+                "last_checkin_date",
+                "total_checkin_count",
+                "last_checkin_at",
+                "continuous_checkin_days",
+            }
+            if basic_cols & drop_from_basic:
                 sync_cols = [
                     "uuid",
                     "xuid",
@@ -2376,13 +2527,19 @@ class ARCCorePlugin(Plugin):
                     "password",
                     "inviter_xuid",
                     "pending_invite_reward_times",
-                    "last_checkin_date",
                     "default_title_auto_equipped",
-                    "total_checkin_count",
-                    "last_checkin_at",
-                    "continuous_checkin_days",
+                    "total_playtime",
+                    "session_count",
+                    "last_join_time",
+                    "last_quit_time",
                 ]
-                present = [c for c in sync_cols if c in cols]
+                present = [c for c in sync_cols if c in basic_cols or c in (
+                    "total_playtime", "session_count", "last_join_time", "last_quit_time"
+                )]
+                # Ensure playtime cols exist before rebuild select.
+                self._upgrade_player_basic_table()
+                basic_cols = self._player_basic_info_columns()
+                present = [c for c in sync_cols if c in basic_cols]
                 if "uuid" in present and "xuid" in present and "name" in present:
                     col_sql = ", ".join(present)
                     self.database_manager.execute(
@@ -2396,11 +2553,11 @@ class ARCCorePlugin(Plugin):
                         "password TEXT, "
                         "inviter_xuid TEXT, "
                         "pending_invite_reward_times INTEGER DEFAULT 0, "
-                        "last_checkin_date TEXT, "
                         "default_title_auto_equipped INTEGER DEFAULT 0, "
-                        "total_checkin_count INTEGER DEFAULT 0, "
-                        "last_checkin_at TEXT, "
-                        "continuous_checkin_days INTEGER DEFAULT 0"
+                        "total_playtime INTEGER DEFAULT 0, "
+                        "session_count INTEGER DEFAULT 0, "
+                        "last_join_time TEXT, "
+                        "last_quit_time TEXT"
                         ")"
                     )
                     self.database_manager.execute(
@@ -2412,11 +2569,66 @@ class ARCCorePlugin(Plugin):
                         "ALTER TABLE player_basic_info__sync_new RENAME TO player_basic_info"
                     )
                     print(
-                        f"[ARC Core]Rebuilt player_basic_info without local columns "
-                        f"(seeded {len(rows)} rows)"
+                        "[ARC Core]Rebuilt player_basic_info "
+                        "(synced account + playtime; check-in is local)"
                     )
 
-            # Import seed -> this server's local table (missing xuids only).
+            # Rebuild local without playtime columns if present.
+            local_cols = self._player_local_info_columns()
+            if local_cols & {
+                "total_playtime",
+                "session_count",
+                "last_join_time",
+                "last_quit_time",
+            }:
+                keep = [
+                    "xuid",
+                    "is_op",
+                    "remaining_free_land_blocks",
+                    "last_checkin_date",
+                    "total_checkin_count",
+                    "last_checkin_at",
+                    "continuous_checkin_days",
+                ]
+                for col, decl in (
+                    ('last_checkin_date', 'TEXT'),
+                    ('total_checkin_count', 'INTEGER DEFAULT 0'),
+                    ('last_checkin_at', 'TEXT'),
+                    ('continuous_checkin_days', 'INTEGER DEFAULT 0'),
+                ):
+                    self._add_column_if_not_exists('player_local_info', col, decl)
+                local_cols = self._player_local_info_columns()
+                present = [c for c in keep if c in local_cols]
+                if "xuid" in present:
+                    col_sql = ", ".join(present)
+                    self.database_manager.execute(
+                        "DROP TABLE IF EXISTS player_local_info__new"
+                    )
+                    self.database_manager.execute(
+                        "CREATE TABLE player_local_info__new ("
+                        "xuid TEXT PRIMARY KEY, "
+                        "is_op INTEGER DEFAULT 0, "
+                        f"remaining_free_land_blocks INTEGER DEFAULT {default_free}, "
+                        "last_checkin_date TEXT, "
+                        "total_checkin_count INTEGER DEFAULT 0, "
+                        "last_checkin_at TEXT, "
+                        "continuous_checkin_days INTEGER DEFAULT 0"
+                        ")"
+                    )
+                    self.database_manager.execute(
+                        f"INSERT INTO player_local_info__new ({col_sql}) "
+                        f"SELECT {col_sql} FROM player_local_info"
+                    )
+                    self.database_manager.execute("DROP TABLE player_local_info")
+                    self.database_manager.execute(
+                        "ALTER TABLE player_local_info__new RENAME TO player_local_info"
+                    )
+                    print(
+                        "[ARC Core]Rebuilt player_local_info "
+                        "(OP / free land / check-in; playtime is synced)"
+                    )
+
+            # Import seed -> local for missing xuids.
             seed_rows = self.database_manager.query_all(
                 "SELECT * FROM player_local_info_seed", ()
             ) or []
@@ -2439,10 +2651,12 @@ class ARCCorePlugin(Plugin):
                             if row.get("remaining_free_land_blocks") is not None
                             else default_free
                         ),
-                        "total_playtime": int(row.get("total_playtime") or 0),
-                        "session_count": int(row.get("session_count") or 0),
-                        "last_join_time": row.get("last_join_time"),
-                        "last_quit_time": row.get("last_quit_time"),
+                        "last_checkin_date": row.get("last_checkin_date"),
+                        "total_checkin_count": int(row.get("total_checkin_count") or 0),
+                        "last_checkin_at": row.get("last_checkin_at"),
+                        "continuous_checkin_days": int(
+                            row.get("continuous_checkin_days") or 0
+                        ),
                     },
                 )
                 imported += 1
@@ -2462,11 +2676,11 @@ class ARCCorePlugin(Plugin):
             'password': 'TEXT',
             'inviter_xuid': 'TEXT',
             'pending_invite_reward_times': 'INTEGER DEFAULT 0',
-            'last_checkin_date': 'TEXT',
             'default_title_auto_equipped': 'INTEGER DEFAULT 0',
-            'total_checkin_count': 'INTEGER DEFAULT 0',
-            'last_checkin_at': 'TEXT',
-            'continuous_checkin_days': 'INTEGER DEFAULT 0',
+            'total_playtime': 'INTEGER DEFAULT 0',
+            'session_count': 'INTEGER DEFAULT 0',
+            'last_join_time': 'TEXT',
+            'last_quit_time': 'TEXT',
         }
         result = self.database_manager.create_table('player_basic_info', fields)
         if result:
@@ -2502,10 +2716,10 @@ class ARCCorePlugin(Plugin):
                     "xuid": xuid,
                     "is_op": 1 if player.is_op else 0,
                     "remaining_free_land_blocks": default_free_blocks,
-                    "total_playtime": 0,
-                    "session_count": 0,
-                    "last_join_time": None,
-                    "last_quit_time": None,
+                    "last_checkin_date": None,
+                    "total_checkin_count": 0,
+                    "last_checkin_at": None,
+                    "continuous_checkin_days": 0,
                 },
             )
         except Exception as e:
@@ -2530,8 +2744,8 @@ class ARCCorePlugin(Plugin):
                 'inviter_xuid': None,
                 'pending_invite_reward_times': 0,
                 'default_title_auto_equipped': 0,
-                'total_checkin_count': 0,
-                'continuous_checkin_days': 0,
+                'total_playtime': 0,
+                'session_count': 0,
             }
             ok = self.database_manager.insert('player_basic_info', player_data)
             local_ok = self.init_player_local_info(player)
@@ -2998,8 +3212,9 @@ class ARCCorePlugin(Plugin):
 
     def _player_has_checked_in_today(self, player: Player) -> bool:
         today = self._today_checkin_date_str()
+        self.init_player_local_info(player)
         row = self.database_manager.query_one(
-            "SELECT last_checkin_date FROM player_basic_info WHERE xuid = ?",
+            "SELECT last_checkin_date FROM player_local_info WHERE xuid = ?",
             (str(player.xuid),),
         )
         last_date = (row.get("last_checkin_date") if row else None) or ""
@@ -4266,9 +4481,12 @@ class ARCCorePlugin(Plugin):
             sep = self.language_manager.GetText("CHECKIN_CHAT_RANK_SEPARATOR")
             slot_key = "CHECKIN_CHAT_TODAY_RANK_SLOT"
 
-            # 今日最早签到前 10 名
+            # 今日最早签到前 10 名（本服）
             today_rows = self.database_manager.query_all(
-                "SELECT xuid, name FROM player_basic_info WHERE last_checkin_date = ? "
+                "SELECT l.xuid AS xuid, b.name AS name, l.last_checkin_at AS last_checkin_at "
+                "FROM player_local_info l "
+                "LEFT JOIN player_basic_info b ON b.xuid = l.xuid "
+                "WHERE l.last_checkin_date = ? "
                 "ORDER BY " + order_by_time + "ASC LIMIT ?",
                 (today, rank_limit),
             )
@@ -4291,11 +4509,14 @@ class ARCCorePlugin(Plugin):
                 )
 
         try:
-            # 累计签到前 10 名
+            # 累计签到前 10 名（本服）
             total_rows = self.database_manager.query_all(
-                "SELECT xuid, name, total_checkin_count FROM player_basic_info "
-                "WHERE COALESCE(total_checkin_count, 0) > 0 "
-                "ORDER BY total_checkin_count DESC, xuid ASC LIMIT ?",
+                "SELECT l.xuid AS xuid, b.name AS name, "
+                "l.total_checkin_count AS total_checkin_count "
+                "FROM player_local_info l "
+                "LEFT JOIN player_basic_info b ON b.xuid = l.xuid "
+                "WHERE COALESCE(l.total_checkin_count, 0) > 0 "
+                "ORDER BY l.total_checkin_count DESC, l.xuid ASC LIMIT ?",
                 (rank_limit,),
             )
             if total_rows:
@@ -4354,8 +4575,9 @@ class ARCCorePlugin(Plugin):
         """每日签到：同一天仅一次，发放配置中的金钱与加权随机物品。"""
         player_xuid = str(player.xuid)
         today = self._today_checkin_date_str()
+        self.init_player_local_info(player)
         row = self.database_manager.query_one(
-            "SELECT last_checkin_date, continuous_checkin_days FROM player_basic_info WHERE xuid = ?",
+            "SELECT last_checkin_date, continuous_checkin_days FROM player_local_info WHERE xuid = ?",
             (player_xuid,),
         )
         last_date = (row.get("last_checkin_date") if row else None) or ""
@@ -4401,7 +4623,7 @@ class ARCCorePlugin(Plugin):
         today_rank = 1
         try:
             signed_count_row = self.database_manager.query_one(
-                "SELECT COUNT(1) AS cnt FROM player_basic_info WHERE last_checkin_date = ?",
+                "SELECT COUNT(1) AS cnt FROM player_local_info WHERE last_checkin_date = ?",
                 (today,),
             )
             today_signed_count = int((signed_count_row or {}).get("cnt") or 0)
@@ -4472,12 +4694,23 @@ class ARCCorePlugin(Plugin):
             bonus_item_lines.append(f"{item_id} x{cnt}")
 
         now_iso = datetime.now().replace(microsecond=0).isoformat()
+        self.init_player_local_info(player)
         ok = self.database_manager.execute(
-            "UPDATE player_basic_info SET last_checkin_date = ?, last_checkin_at = ?, "
-            "total_checkin_count = COALESCE(total_checkin_count, 0) + 1, continuous_checkin_days = ?, "
-            "name = ? WHERE xuid = ?",
-            (today, now_iso, next_continuous_days, player.name, player_xuid),
+            "UPDATE player_local_info SET last_checkin_date = ?, last_checkin_at = ?, "
+            "total_checkin_count = COALESCE(total_checkin_count, 0) + 1, continuous_checkin_days = ? "
+            "WHERE xuid = ?",
+            (today, now_iso, next_continuous_days, player_xuid),
         )
+        # Keep display name fresh on synced account row.
+        try:
+            self.database_manager.update(
+                table="player_basic_info",
+                data={"name": player.name},
+                where="xuid = ?",
+                params=(player_xuid,),
+            )
+        except Exception:
+            pass
         guild_contrib_extra_line = ""
         if not ok:
             self.report_arc_error(
@@ -14774,7 +15007,7 @@ class ARCCorePlugin(Plugin):
             self.logger.error(f"[ARC Core]Notify qqsync error: {e}")
 
     def _record_player_join_playtime(self, player) -> None:
-        """Increment session_count and start this session timer."""
+        """Increment cross-server session_count and start this session timer."""
         try:
             import time as _time
             from datetime import datetime as _dt
@@ -14785,14 +15018,14 @@ class ARCCorePlugin(Plugin):
             now_iso = _dt.now().isoformat(timespec="seconds")
             self._play_session_start[xuid] = int(_time.time())
             row = self.database_manager.query_one(
-                "SELECT session_count FROM player_local_info WHERE xuid = ?",
+                "SELECT session_count FROM player_basic_info WHERE xuid = ?",
                 (xuid,),
             )
             if not row:
                 return
             session_count = int(row.get("session_count") or 0) + 1
             self.database_manager.update(
-                table="player_local_info",
+                table="player_basic_info",
                 data={"session_count": session_count, "last_join_time": now_iso},
                 where="xuid = ?",
                 params=(xuid,),
@@ -14802,7 +15035,7 @@ class ARCCorePlugin(Plugin):
                 self.logger.error(f"[ARC Core] record join playtime error: {e}")
 
     def _record_player_quit_playtime(self, player) -> None:
-        """Accumulate session seconds into total_playtime and clear timer."""
+        """Accumulate session seconds into cross-server total_playtime."""
         try:
             import time as _time
             from datetime import datetime as _dt
@@ -14816,14 +15049,14 @@ class ARCCorePlugin(Plugin):
             now_iso = _dt.now().isoformat(timespec="seconds")
             delta = max(0, int(_time.time()) - int(started)) if started is not None else 0
             row = self.database_manager.query_one(
-                "SELECT total_playtime FROM player_local_info WHERE xuid = ?",
+                "SELECT total_playtime FROM player_basic_info WHERE xuid = ?",
                 (xuid,),
             )
             if not row:
                 return
             total = int(row.get("total_playtime") or 0) + delta
             self.database_manager.update(
-                table="player_local_info",
+                table="player_basic_info",
                 data={"total_playtime": total, "last_quit_time": now_iso},
                 where="xuid = ?",
                 params=(xuid,),
@@ -14866,19 +15099,13 @@ class ARCCorePlugin(Plugin):
                 return empty
             if xuid_s:
                 row = self.database_manager.query_one(
-                    "SELECT * FROM player_local_info WHERE xuid = ?",
+                    "SELECT * FROM player_basic_info WHERE xuid = ?",
                     (xuid_s,),
                 )
             else:
-                basic = self.database_manager.query_one(
-                    "SELECT xuid FROM player_basic_info WHERE name = ?",
-                    (name,),
-                )
-                if not basic:
-                    return empty
                 row = self.database_manager.query_one(
-                    "SELECT * FROM player_local_info WHERE xuid = ?",
-                    (str(basic.get("xuid") or ""),),
+                    "SELECT * FROM player_basic_info WHERE name = ?",
+                    (name,),
                 )
             if not row:
                 return empty

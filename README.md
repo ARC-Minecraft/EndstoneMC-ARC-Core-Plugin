@@ -52,7 +52,8 @@ EndStone ARC Core 是一个功能完整的 EndStone (Minecraft 基岩版服务�
 - 玩家数据持久化存储（跨服账号：`player_basic_info`；本服档案：`player_local_info`）
 - 在线状态实时管理
 - 玩家加入/离开消息提示
-- **免费领地格子**、**OP 标记**、**游戏时长** 均为本服数据，不随 `PLAYER_DATABASE_PATH` / 同步中心跨服覆盖
+- **免费领地格子**、**OP 标记**、**签到** 均为本服数据，不随 `PLAYER_DATABASE_PATH` / 同步中心跨服覆盖
+- **游戏时长 / 进服次数** 写在跨服表 `player_basic_info`，随同步中心或共享库跨服累计
 
 ### 👁️ 天眼系统（Sky Eye，v0.7.6）
 - **用途**：可选开启的玩家行为审计日志，按自然日写入文本，便于排查与合规留痕
@@ -112,7 +113,7 @@ EndStone ARC Core 是一个功能完整的 EndStone (Minecraft 基岩版服务�
 - **说明**：**`DEFAULT_TITLE`** 仅表示「进服即送解锁」的默认头衔，**不应**列入需成就解锁的头衔；一键应用默认击杀成就后 **不会** 再把这些头衔写入 `DEFAULT_TITLE`（避免进服误送全套解锁）
 
 ### 📅 每日签到（v0.4.0 起，v0.4.2 / v0.6.0 增强）
-- **可签到条件**：`player_basic_info.last_checkin_date` 与服务器本地日期（YYYY-MM-DD）不同即可在主菜单 **每日签到**
+- **可签到条件**：本服 `player_local_info.last_checkin_date` 与服务器本地日期（YYYY-MM-DD）不同即可在主菜单 **每日签到**（**每服独立**，不跨服共享）
 - **连续签到奖励（v0.6.0）**：支持按连续签到天数发放递增金钱奖励（可配置步长）
 - **前几名签到奖励（v0.6.0）**：支持配置每日前 X 名签到玩家的额外金钱与额外物品奖励
 - **奖励**：配置存款 + 按权重 **不放回** 随机物品；每日抽取条数在 **`CHECKIN_REWARD_PICK_MIN`～`CHECKIN_REWARD_PICK_MAX`** 之间随机（未配置区间时沿用 `CHECKIN_REWARD_PICK_COUNT`）
@@ -243,19 +244,19 @@ EndStone ARC Core 是一个功能完整的 EndStone (Minecraft 基岩版服务�
 - **分项同步开关（仅远程客户端）**：**`SYNC_CLIENT_SYNC_PLAYER`**、**`SYNC_CLIENT_SYNC_ECONOMY`**、**`SYNC_CLIENT_SYNC_TITLE`**、**`SYNC_CLIENT_SYNC_GUILD`** 可单独开关；关闭的类别不会拉取全量数据，也不会接收推送。若 A 与 B 同时配置，插件 **以远程客户端为准** 并忽略文件路径
 - **模块**：`sync_protocol.py`、`sync_server.py`、`sync_client.py`、`sync_config.py`
 - **可同步数据表**：跨服玩家账号信息（`player_basic_info`）、经济（`player_economy`）、头衔（`title_definitions` / `player_title_unlock_time` / `player_title_equipped`）、公会（`guilds` / `guild_members` / `guild_invites`）
-- **本服本地表（不同步）**：**`player_local_info`** — `is_op`、剩余免费领地格、游戏时长 / 进服次数 / 进出服时间。始终写在本服 **`DATABASE_PATH`**，即使配置了 `PLAYER_DATABASE_PATH` 也不会进共享库
+- **本服本地表（不同步）**：**`player_local_info`** — `is_op`、剩余免费领地格、**签到**（每服独立）。始终写在本服 **`DATABASE_PATH`**，即使配置了 `PLAYER_DATABASE_PATH` 也不会进共享库
 - **QQ 群消息**：跨服 QQ 互通由 **AstrBot 弧光消息中心** + **endstone-arc-qq-sync-astrbot** 负责；ARCCore **不再**经 SyncServer 做 QQ 事件中继。死亡 / 成就等仍可调用本机 QQ Sync 的 `api_send_event` / `api_send_raw`
-- **启动迁移**：旧版把 OP / 免费格 / 时长写在 `player_basic_info` 时，启动会自动拆到 `player_local_info`，并在共享库侧写入种子表 `player_local_info_seed` 供各服导入
+- **启动迁移**：签到迁入本服表；时长 / 进服次数保留在跨服 `player_basic_info`；共享库场景通过 **`player_local_info_seed`** 导入本服 OP / 免费格 / 签到
 
-### ⏱️ 游戏时长统计（本服）
-- 表：**`player_local_info`**（`total_playtime` 秒、`session_count`、`last_join_time` / `last_quit_time`）
-- 进服 / 离服自动记账；关服时结算在线会话
+### ⏱️ 游戏时长统计（跨服）
+- 表：**`player_basic_info`**（`total_playtime` 秒、`session_count`、`last_join_time` / `last_quit_time`）
+- 进服 / 离服自动记账；关服时结算在线会话；随 SyncServer / 共享库跨服累计
 - 对外 API：**`api_get_player_playtime(raw_player_name="", xuid="")`**，供 QQ Sync `/who` 与进离服播报查询
 
 ### 🔌 插件 API 系统
 - **经济系统 API** - 完整的金钱管理接口
 - **头衔系统 API**（v0.3.0）- `plugin.api_unlock_title(player, title)` 为玩家解锁头衔
-- **游戏时长 API** - `plugin.api_get_player_playtime(...)` 查询本服累计时长与进服次数
+- **游戏时长 API** - `plugin.api_get_player_playtime(...)` 查询跨服累计时长与进服次数
 - **新手引导 API** - `plugin.api_get_newbie_guide_text()` 返回 `newbie_welcome.txt` 全文（供大模型聊天等插件使用）
 - **线程安全设计** - 支持多插件并发调用
 - **错误处理机制** - 自动处理异常情况
@@ -930,7 +931,7 @@ class MyPlugin(Plugin):
 
 ### v0.8.2（当前版本）
 
-- ✅ **玩家表拆分**：跨服账号信息保留在 **`player_basic_info`**（密码、签到、邀请等）；本服字段迁入 **`player_local_info`**（`is_op`、剩余免费领地格、游戏时长 / 进服次数）。启动自动迁移；共享库场景通过 **`player_local_info_seed`** 供各服导入
+- ✅ **玩家表拆分**：跨服 **`player_basic_info`**（密码、邀请、**游戏时长 / 进服次数**）；本服 **`player_local_info`**（`is_op`、剩余免费领地格、**签到**）。启动自动迁移；共享库场景通过 **`player_local_info_seed`** 供各服导入本服字段
 - ✅ **QQ 中继移除**：不再经 SyncServer 转发 QQ 事件 / 群聊下行（原 `QQ_RELAY_MODE` / `EVENT_FORWARD` 已移除）。群服互通由 AstrBot 弧光消息中心 + QQ Sync 插件负责；死亡 / 成就仍可调用本机 `arc-qq-sync-astrbot` API
 - ✅ **公共领地三级优先级**：`lands.public_priority`（1/2/3，**3 最高**，默认 1）。高优先级公共可覆盖低优先级；同级不可重叠。位置生效顺序：**私人/公会 > 公共(3>2>1)**；私人子领地仍先于父领地。创建公共领地时 OP 选择等级；OP 公共领地设置可改级（升高时校验冲突）
 - ✅ **公共领地拦截生物生成**：`block_actor_spawn`（默认关闭）；开启后经 `ActorSpawnEvent` 取消该公共领地内 `Mob`（不含玩家）生成
