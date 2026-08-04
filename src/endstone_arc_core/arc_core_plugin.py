@@ -14687,7 +14687,7 @@ class ARCCorePlugin(Plugin):
                     str(event.player.xuid),
                 )
                 self._notify_qqsync(
-                    "custom",
+                    "death",
                     display_name,
                     getattr(event.player, "name", "") or "",
                     qq_message,
