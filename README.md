@@ -100,17 +100,12 @@ EndStone ARC Core 是一个功能完整的 EndStone (Minecraft 基岩版服务�
 - 可配置的领地价格和最小距离
 - 智能传送命令生成（自动处理包含空格的玩家名）
 
-### 🎯 成就系统（v0.5.0，数据模型 v0.7.1）
-- **模块**：`AchievementSystem.py`、`achievement_conditions.py`，与 **OP 面板 → 成就管理** 联动；达成条件后调用头衔解锁并发放在头衔定义中配置的奖励（金钱/物品）
-- **可配置的击杀成就**：支持 **单类生物**（`kill_entity`，`target_id` 为 `*` 表示任意生物总击杀）、**多类生物击杀数相加**（`kill_entity_sum`）；击杀统计随事件实时写入 **`player_achievement_stats`**
-- **数据（v0.7.1）**：同一张表 **`player_achievement_stats`** 中：
-  - **进度**：`stat_key` 为 `kill_total`、`kill:minecraft:zombie` 等，`count` 为累计击杀
-  - **完成标记**：`stat_key` 为 **`ach_unlock:<unlock_title>`**，`count ≥ 1` 表示该成就已在逻辑上记为完成（与头衔表配合，见下条）；**不再使用**表 **`player_achievement_unlocked`**
-  - **判定**：玩家是否算「已完成某成就」= 已有对应 **`ach_unlock:`** 记录 **或** 已在 **`player_title_unlock_time`** 中解锁同名头衔（例如 OP 直发头衔）
-  - **升级补全**：插件加载时会对「在统计表或头衔表中出现过的玩家」做一次 **幂等补全**：若无 `ach_unlock:` 但已拥有头衔或当前进度已满足条件，则静默写入完成标记，**避免升级后重复走解锁、重复发奖**
-- **定义文件**：**`plugins/ARCCore/achievements.json`**；旧版 SQLite 表 **`achievement_definitions`** 仍可在启动时迁移进 JSON；**`achievement_meta`** 等与 JSON 重复的中间表已移除
-- **默认击杀成就包**：OP 可一键写入内置击杀类头衔与条件（与文档/内置表一致）
-- **说明**：**`DEFAULT_TITLE`** 仅表示「进服即送解锁」的默认头衔，**不应**列入需成就解锁的头衔；一键应用默认击杀成就后 **不会** 再把这些头衔写入 `DEFAULT_TITLE`（避免进服误送全套解锁）
+### 🎯 成就系统（已拆至独立插件）
+- **独立插件**：`endstone_arc_achievement` / plugin id **`arc_achievement`**，仓库目录 `EndstoneMC-ARC-Achievement-Plugin`，数据目录 `plugins/ARCAchievement/`
+- **核心职责**：菜单入口转发（检测到插件时显示「我的成就」「成就管理」，执行 `/ach`、`/achop`）；头衔解锁与发奖仍走本核心 API
+- **进度库**：`player_achievement_stats` 仍使用 arc_core 的 SQLite（与拆分前同一库）
+- **定义文件**：`plugins/ARCAchievement/achievements.json`（首次启用时若仅有旧版 `plugins/ARCCore/achievements.json` 会自动复制）
+- **说明**：未安装 `arc_achievement` 时，核心不显示成就入口、不统计击杀成就
 
 ### 📅 每日签到（v0.4.0 起，v0.4.2 / v0.6.0 增强）
 - **可签到条件**：本服 `player_local_info.last_checkin_date` 与服务器本地日期（YYYY-MM-DD）不同即可在主菜单 **每日签到**（**每服独立**，不跨服共享）
@@ -194,7 +189,7 @@ EndStone ARC Core 是一个功能完整的 EndStone (Minecraft 基岩版服务�
 - 多维度出生点支持
 
 ### ⚙️ OP 管理面板（v0.4.0 整理）
-- **主菜单顺序**（自上而下）：重载配置 → **工具** → **经济管理** → 领地管理 → 传送管理 → 成就管理 → 签到配置 → 邀请奖励配置 → 头衔管理 → 返回
+- **主菜单顺序**（自上而下）：重载配置 → **工具** → **经济管理** → 领地管理 → 传送管理 → 成就管理（需安装 `arc_achievement`）→ 签到配置 → 邀请奖励配置 → 头衔管理 → 返回
 - **工具**：切换游戏模式、清除掉落物、记录坐标 1/2、调试模式、执行命令（`@p1`/`@p2`、留空重复上次命令）
 - **经济管理**（原「金钱管理」）：**增减在线玩家存款**；**经济参数配置** 写入 `PLAYER_INIT_MONEY_NUM`、`HIDE_OP_IN_MONEY_RANKING`、`RICHEST_TITLE_NAME`（与 `core_setting.yml` 玩家经济段一致）
 - **领地管理**：管理所有领地、管理脚下领地、重建领地区块映射；**公共领地** 详情内可 **重设公共领地范围**（与玩家重设流程一致，不扣款）（返回统一回到领地管理子菜单）
@@ -211,7 +206,7 @@ EndStone ARC Core 是一个功能完整的 EndStone (Minecraft 基岩版服务�
 - **OP 专属头衔** - 配置 `OP_TITLE`（单个），仅 OP 拥有；非 OP 进服时若正佩戴该头衔则自动解除
 - **头衔管理（玩家）** - 主菜单「我的信息」→「头衔管理」：选择佩戴/不佩戴（同入口下另有「修改密码」，见上文 **玩家管理系统**）
 - **OP 头衔管理** - OP 面板→「头衔管理」：**头衔属性管理**（编辑各头衔的稀有度、介绍、解锁奖励）、**创建新头衔**（名称 + 稀有度 + 介绍 + 奖励）、**给所有玩家添加头衔**（选择已有头衔，为当前数据库内所有玩家解锁，新人不会自动获得）、**给玩家单独添加头衔**（先输入玩家名，再选择要添加的头衔）；解锁时若玩家在线则发放该头衔的解锁奖励（金钱与物品）
-- **API** - `api_unlock_title(player, title: str)` 为玩家解锁头衔并发放解锁奖励（若配置了奖励）
+- **API** - 见下文「头衔系统 API」：`api_unlock_title`、`api_unlock_title_by_xuid`、`api_set_title_definition`、`api_ensure_title_definition`、`api_get_title_definition`、`api_has_unlocked_title`、`api_give_player_items`、`api_get_player_xuid_by_name` 等（供未来 `arc_achievement` 等插件调用）
 - **解锁头衔自动佩戴（v0.4.0）** - 通过 `api_unlock_title` 等途径解锁头衔时，若当前未佩戴任何头衔，则自动佩戴新解锁的头衔
 
 ### 🏰 公会系统（v0.7.0；v0.7.2 拓展规模与贡献点；v0.7.3 浏览与入会审批）
@@ -255,13 +250,14 @@ EndStone ARC Core 是一个功能完整的 EndStone (Minecraft 基岩版服务�
 
 ### 🔌 插件 API 系统
 - **经济系统 API** - 完整的金钱管理接口
-- **头衔系统 API**（v0.3.0）- `plugin.api_unlock_title(player, title)` 为玩家解锁头衔
+- **头衔系统 API** - 解锁/查询/写入头衔定义、按 xuid 解锁、发放物品等（供成就等弧光系列插件调用）
+- **玩家解析 API** - `api_get_player_xuid_by_name`
 - **游戏时长 API** - `plugin.api_get_player_playtime(...)` 查询跨服累计时长与进服次数
 - **新手引导 API** - `plugin.api_get_newbie_guide_text()` 返回 `newbie_welcome.txt` 全文（供大模型聊天等插件使用）
 - **线程安全设计** - 支持多插件并发调用
 - **错误处理机制** - 自动处理异常情况
 - **详细文档支持** - 提供完整的使用示例
-- **未来扩展计划** - 领地、传送等系统API
+- **调用入口**：`server.get_plugin("arc_core")`（与 pyproject entry-point 一致）
 
 ## 命令列表
 
@@ -292,8 +288,9 @@ EndStone ARC Core 是一个功能完整的 EndStone (Minecraft 基岩版服务�
 - `{语言代码}.txt` - 语言文件 (如 ZH-CN.txt)
 - `entity_display_name.txt` - 生物显示名翻译（v0.3.1+，死亡播报等）
 - `kill_reward.txt` - 击杀生物金钱奖励（v0.4.0，每行 `类型ID=金额`）
-- `achievements.json` - 成就定义（v0.5.0+，击杀条件等与 OP 面板「成就管理」同步）
 - SQLite 数据库文件
+
+成就定义与成就语言文件见独立插件 `plugins/ARCAchievement/`（`endstone_arc_achievement`）。
 
 ## ⚙️ 配置文件
 
@@ -499,7 +496,7 @@ give {player} krep:acp45 42
 - **经济数据**: 玩家余额、交易记录
 - **领地信息**: 领地坐标、拥有者、传送点、共享用户、爆炸保护设置、方块互动开放设置、生物保护设置、展示框权限设置
 - **传送点**: 私人传送点、公共传送点坐标信息
-- **成就（v0.7.1）**: **`player_achievement_stats`** — 击杀进度（`kill_total`、`kill:...`）与完成标记（**`ach_unlock:<unlock_title>`**）；**`achievement_conditions`** 仅用于极旧数据向 JSON 迁移；定义以 **`plugins/ARCCore/achievements.json`** 为准
+- **成就进度表（可选，由 arc_achievement 写入）**: **`player_achievement_stats`** — 击杀进度与完成标记；定义 JSON 在 **`plugins/ARCAchievement/achievements.json`**
 - **服务器配置**: 出生点坐标、系统设置
 - **天眼审计（v0.7.6）**：非数据库；开启后写入 **`plugins/ARCCore/sky_eye/*.txt`**（按日），见「天眼系统」
 
@@ -519,8 +516,8 @@ EndStone-ARC-CORE/
 │   ├── __init__.py              # 插件初始化
 │   ├── arc_core_plugin.py       # 主插件类
 │   ├── sky_eye_log.py           # 天眼系统按日日志与滚动清理（v0.7.6+）
-│   ├── AchievementSystem.py   # 成就系统（v0.5.0+）
-│   ├── achievement_conditions.py # 成就条件类型（kill_entity / kill_entity_sum 等）
+│   ├── TitleSystem.py           # 头衔系统
+│   ├── LandSystem.py            # 领地系统
 │   ├── KillRewardConfig.py      # 击杀奖励配置（v0.4.0+）
 │   ├── EntityDisplayNameManager.py
 │   ├── TitleSystem.py
@@ -577,7 +574,17 @@ EndStone-ARC-CORE/
 
 ## 🔌 API 接口
 
-ARC Core 插件提供了丰富的 API 接口供其他插件调用，包括经济系统、头衔系统、领地系统等。
+ARC Core 插件提供了丰富的 API 接口供其他插件调用，包括经济系统、头衔系统、领地系统等。统一通过 **`server.get_plugin("arc_core")`** 获取实例。
+
+### 弧光系列插件命名
+
+| 项 | 约定示例 |
+|---|---|
+| PyPI / 包名 | `endstone_arc_core`、`endstone_arc_achievement`、`endstone_arc_dtwt` … |
+| Entry / plugin id | `arc_core`、`arc_achievement`、`arc_dtwt`、`arc_button_shop` |
+| 数据目录 | `plugins/ARCCore/`、`plugins/ARCAchievement/` … |
+
+**成就插件（`endstone_arc_achievement` / `arc_achievement`）**：已拆为独立仓库；条件与面板自管，数据目录 `plugins/ARCAchievement/`；头衔定义、解锁发奖等委托本核心。击杀事件由成就插件自行监听。缺 `arc_core` 时成就插件禁用并打日志。统计表仍写在本核心 SQLite。
 
 ### 💰 经济系统 API
 
@@ -591,7 +598,7 @@ def api_get_all_money_data(self) -> dict
 - **返回值**: `dict` - 键为玩家名称，值为金钱数量
 - **示例**:
 ```python
-arc_plugin = server.get_plugin('ARCCore')
+arc_plugin = server.get_plugin('arc_core')
 money_data = arc_plugin.api_get_all_money_data()
 # 返回: {'PlayerA': 10000, 'PlayerB': 5000, ...}
 ```
@@ -655,21 +662,69 @@ arc_plugin.api_change_player_money('PlayerName', -500)
 
 ### 🏷️ 头衔系统 API
 
+成就等外部插件的典型流程：`api_set_title_definition` / `api_ensure_title_definition` 写入奖励头衔 → 条件达成后 `api_unlock_title`（或 `api_unlock_title_by_xuid`）解锁并发奖 → 可用 `api_has_unlocked_title` 去重。
+
 #### 为玩家解锁头衔
 ```python
 def api_unlock_title(self, player: Player, title: str) -> bool
 ```
-- **功能**：为指定玩家解锁头衔，若该头衔在头衔定义中配置了解锁奖励（金钱、物品），且玩家在线，则自动发放奖励
+- **功能**：为指定玩家解锁头衔，若该头衔在头衔定义中配置了解锁奖励（金钱、物品），且玩家在线，则自动发放奖励；新解锁且当前未佩戴头衔时自动佩戴
 - **参数**：
   - `player` (Player) - EndStone 玩家对象
-  - `title` (str) - 头衔名称（须已在头衔定义中存在，如默认头衔或 OP 创建的头衔）
-- **返回值**：`bool` - 是否解锁成功（头衔名无效或已解锁等情况可能返回 False）
+  - `title` (str) - 头衔名称
+- **返回值**：`bool` - 是否解锁成功（已解锁也返回 `True`，但不会重复发奖）
 - **示例**：
 ```python
-arc_plugin = server.get_plugin('ARCCore')
-# 玩家完成某成就后解锁头衔
+arc_plugin = server.get_plugin('arc_core')
 arc_plugin.api_unlock_title(player, '成就达人')
 ```
+
+#### 按 XUID 解锁头衔
+```python
+def api_unlock_title_by_xuid(self, xuid: str, title: str) -> bool
+```
+- **功能**：离线也可写入解锁记录；若该玩家在线且为**新**解锁，则与 `api_unlock_title` 相同：发奖 + 未佩戴时自动佩戴
+- **返回值**：`bool`
+
+#### 写入 / 确保头衔定义
+```python
+def api_set_title_definition(self, title: str, rarity: str, description: str, reward_money: float, reward_items: list | None = None) -> bool
+def api_ensure_title_definition(self, title: str, rarity: str = "普通", description: str = "", reward_money: float = 0.0, reward_items: list | None = None) -> bool
+def api_get_title_definition(self, title: str) -> dict | None
+```
+- **`api_set_title_definition`**：创建或**覆盖**定义（稀有度、介绍、`reward_money`、`reward_items`）
+- **`api_ensure_title_definition`**：仅当头衔不存在时插入，不覆盖 OP 已改定义
+- **`api_get_title_definition`**：返回 `title` / `rarity` / `description` / `reward_money` / `reward_items`；不存在为 `None`
+- **`reward_items`** 元素形如 `{"item_name": "minecraft:diamond", "count": 1}`（亦接受键 `id`）
+
+```python
+arc = server.get_plugin('arc_core')
+arc.api_set_title_definition(
+    '屠夫', '普通', '击杀家畜达标', 1000.0,
+    [{"item_name": "minecraft:beef", "count": 8}],
+)
+```
+
+#### 查询是否已解锁头衔
+```python
+def api_has_unlocked_title(self, title: str, *, player=None, player_name: str = "", xuid: str = "") -> bool
+```
+- **功能**：按 `player` → `xuid` → `player_name` 解析 XUID 后查询解锁表
+- **返回值**：`bool`
+
+#### 发放物品
+```python
+def api_give_player_items(self, player: Player, items: list | None) -> bool
+```
+- **功能**：向在线玩家执行 `give`；条目格式同头衔 `reward_items`
+- **返回值**：至少成功发出一条有效物品时为 `True`
+
+#### 按名解析 XUID
+```python
+def api_get_player_xuid_by_name(self, player_name: str) -> str | None
+```
+- **功能**：在线玩家优先，其次数据库（大小写不敏感、去空白）
+- **返回值**：`str | None`
 
 #### 获取新手引导文本
 ```python
@@ -679,7 +734,7 @@ def api_get_newbie_guide_text(self) -> str
 - **返回值**：`str` - 成功为去首尾空白后的文本；文件不存在或读取失败时返回空字符串 `""`
 - **示例**：
 ```python
-arc_plugin = server.get_plugin('ARCCore')
+arc_plugin = server.get_plugin('arc_core')
 guide = arc_plugin.api_get_newbie_guide_text()
 ```
 

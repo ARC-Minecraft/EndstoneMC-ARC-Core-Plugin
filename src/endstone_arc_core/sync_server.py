@@ -201,12 +201,20 @@ class SyncServer:
                     if not client.authenticated:
                         break  # 未认证的客户端超时断开
                     continue
+                except OSError as e:
+                    # 关服时 stop() 会从其它线程 close 套接字；Windows 上 recv 常报
+                    # WinError 10038（非套接字操作），属预期清理，勿当故障打 ERROR。
+                    if self._running:
+                        self._log("error", f"Client {addr} error: {e}")
+                    break
                 except Exception as e:
-                    self._log("error", f"Client {addr} error: {e}")
+                    if self._running:
+                        self._log("error", f"Client {addr} error: {e}")
                     break
             
         except Exception as e:
-            self._log("error", f"Client {addr} handler error: {e}")
+            if self._running:
+                self._log("error", f"Client {addr} handler error: {e}")
         finally:
             # 移除客户端
             with self._clients_lock:
@@ -215,7 +223,8 @@ class SyncServer:
                 conn.close()
             except Exception:
                 pass
-            self._log("info", f"Client {addr} disconnected")
+            if self._running:
+                self._log("info", f"Client {addr} disconnected")
 
     def _process_message(self, client: ConnectedClient, raw_msg: bytes):
         """处理接收到的消息"""

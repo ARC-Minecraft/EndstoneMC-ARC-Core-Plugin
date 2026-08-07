@@ -737,11 +737,13 @@ class LandSystem:
         max_z: int,
         exclude_land_ids: Optional[Set[int]] = None,
         creating_public_priority: Optional[int] = None,
+        creating_allow_non_public_land: bool = False,
     ) -> tuple:
         """检查领地范围是否可用。返回 (available, reason_key_or_None, overlapping_ids_or_None)
 
         exclude_land_ids：重设范围时排除当前领地自身与其它已排除 ID，避免与自身旧范围判重叠。
         creating_public_priority：创建/重设公共领地时传入其等级；None 表示私人/公会。
+        creating_allow_non_public_land：创建/重设公共且允许与私人/公会重叠时为 True（跳过私人/公会冲突）。
         """
         try:
             min_x, max_x = min(min_x, max_x), max(min_x, max_x)
@@ -783,14 +785,17 @@ class LandSystem:
                     continue
                 is_existing_public = self.is_public_land_owner(land.get("owner_xuid"))
                 if creating_priority is not None:
-                    # 公共盖公共：仅可覆盖更低优先级；不可盖私人/公会与同级/更高公共
+                    # 公共盖公共：仅可覆盖更低优先级；同级/更高仍冲突
                     if is_existing_public:
                         exist_priority = self.clamp_public_priority(
                             land.get("public_priority", 1)
                         )
                         if exist_priority < creating_priority:
                             continue
-                    # 私人/公会或同级及以上公共：进入重叠判定
+                    elif creating_allow_non_public_land:
+                        # 允许私人/公会与本公共共存：跳过私人/公会重叠
+                        continue
+                    # 私人/公会（未允许）或同级及以上公共：进入重叠判定
                 else:
                     # 私人/公会：可在允许圈私人的公共领地内创建
                     if is_existing_public and land.get("allow_non_public_land", 0):

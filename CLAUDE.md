@@ -36,8 +36,6 @@ There are **no tests** in this repository — no test runner, no test files.
 | `TeleportSystem.py` | Home/warp/TPA/random/death/cross-server teleport; `generate_tp_command_to_position()` helper |
 | `GuildSystem.py` | Guild CRUD, membership, invites, contribution points, size tiers, join approval |
 | `TitleSystem.py` | Title definitions, unlock tracking, equip/unequip, rarity colors |
-| `AchievementSystem.py` | Achievement definitions (JSON-based), kill/progress tracking, condition evaluation |
-| `achievement_conditions.py` | Condition type definitions (`kill_entity`, `kill_entity_sum`) |
 | `LanguageManager.py` | i18n via `key=value` text files (e.g., `ZH-CN.txt`); class-level dict cache |
 | `SettingManager.py` | Config via `core_setting.yml` (`KEY=VALUE` format); class-level dict cache |
 | `EntityDisplayNameManager.py` | Entity display name lookups from `entity_display_name.txt` |
@@ -48,7 +46,7 @@ There are **no tests** in this repository — no test runner, no test files.
 
 ### Key Design Patterns
 
-1. **Single monolith + satellite modules**: `arc_core_plugin.py` is the hub (~674KB). All event handlers, UI forms, and command logic live there. Satellite modules (`LandSystem`, `GuildSystem`, etc.) encapsulate domain logic and DB access.
+1. **Single monolith + satellite modules**: `arc_core_plugin.py` is the hub. Event handlers, UI forms, and command logic live there. Satellite modules (`LandSystem`, `GuildSystem`, etc.) encapsulate domain logic. Achievements are a separate plugin (`arc_achievement`).
 
 2. **Database routing**: `DatabaseManager` supports per-table routing to different SQLite files via `add_route(table_name, db_path)`. This enables cross-server data sharing (e.g., `PLAYER_DATABASE_PATH`, `GUILD_DATABASE_PATH` config keys).
 
@@ -59,7 +57,7 @@ There are **no tests** in this repository — no test runner, no test files.
    - `newbie_welcome.txt` / `newbie_commands.txt` — new-player welcome content and auto-commands (`{player}` placeholder)
    - `kill_reward.txt` — `minecraft:entity_type=money_amount` per line
    - `entity_display_name.txt` — `entity.minecraft.xxx.name=DisplayName`
-   - `achievements.json` — achievement definitions
+   - （成就定义已迁至独立插件 `plugins/ARCAchievement/achievements.json`）
 
 4. **XUID as primary key**: All player data uses Xbox XUID (not UUID or player name). Player names are resolved to XUID via online player list (case-insensitive) or database lookup (`LOWER(TRIM(name))`).
 
@@ -95,12 +93,15 @@ Multiple config keys (`PLAYER_DATABASE_PATH`, `PLAYER_ECONOMY_DATABASE_PATH`, `P
 Other EndStone plugins can call methods on the `ARCCorePlugin` instance via `server.get_plugin('arc_core')`:
 
 - **Economy**: `api_get_player_money`, `api_change_player_money`, `api_get_all_money_data`, `api_get_richest_player_money_data`
-- **Titles**: `api_unlock_title(player, title_name)`
+- **Titles**: `api_unlock_title`, `api_unlock_title_by_xuid`, `api_set_title_definition`, `api_ensure_title_definition`, `api_get_title_definition`, `api_has_unlocked_title`, `api_give_player_items`
+- **Player**: `api_get_player_xuid_by_name`, `api_get_player_playtime`
 - **Lands**: `api_if_position_in_land(dimension, (x,y,z))`（规范化维度 + 三维 Y + 多层生效领地）、`api_resolve_land_at_position`、`api_list_lands_at_position`、`api_get_land_info(land_id)`
 - **Guilds**: `api_get_player_guild_info(player_name)`, `api_add_guild_contribution(player_name, points)`, `api_get_player_guild_contribution`, `api_get_guild_total_contribution_by_player`, `api_set_guild_size_tier`
 - **Newbie**: `api_get_newbie_guide_text()`
 
 All API methods are thread-safe.
+
+Achievement logic lives in sibling plugin `endstone_arc_achievement` (`arc_achievement`, data dir `plugins/ARCAchievement/`). Core only forwards menu buttons to `/ach` and `/achop` when that plugin is present. Stats tables remain on core's SQLite via shared `database_manager`.
 
 ## Language
 
