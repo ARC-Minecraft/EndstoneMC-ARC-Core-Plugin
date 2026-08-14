@@ -3,7 +3,7 @@
 # EndStone ARC Core Plugin / EndStone弧光核心
 
 [![Codacy Grade](https://app.codacy.com/project/badge/Grade/2f830615baf347258558dcc2a5ab85a1)](https://app.codacy.com/gh/DEVILENMO/EndstoneMC-ARC-Core-Plugin/dashboard?utm_source=gh&utm_medium=referral&utm_content=&utm_campaign=Badge_grade)
-[![Version](https://img.shields.io/badge/version-v0.8.2-blue)](https://github.com/ARC-Minecraft/EndstoneMC-ARC-Core-Plugin)
+[![Version](https://img.shields.io/badge/version-v0.8.5-blue)](https://github.com/ARC-Minecraft/EndstoneMC-ARC-Core-Plugin)
 [![Python](https://img.shields.io/badge/python-3.13+-blue?logo=python&logoColor=white)](https://www.python.org/)
 [![EndStone API](https://img.shields.io/badge/EndStone_API-0.7+-black)](https://github.com/EndstoneMC/endstone)
 [![License](https://img.shields.io/github/license/ARC-Minecraft/EndstoneMC-ARC-Core-Plugin)](LICENSE)
@@ -19,7 +19,7 @@ EndStone ARC Core 是一个功能完整的 EndStone (Minecraft 基岩版服务�
 
 - **作者**: DEVILENMO
 - **邮箱**: DEVILENMO@gmail.com
-- **版本**: 0.8.2
+- **版本**: 0.8.5
 - **API 版本**: 0.7+
 - **推荐 Python 版本**: 3.13
 
@@ -81,7 +81,7 @@ EndStone ARC Core 是一个功能完整的 EndStone (Minecraft 基岩版服务�
 - **子领地系统** - 领地主人可在领地内创建子领地并授权他人；子领地为三维、不可重叠、不可超出父领地；交互时先判子领地权限再判父领地
 - **公共领地「允许圈私人领地」** - 公共领地可开启后，玩家可在其内购买私人领地；同一位置优先按私人领地权限判定
 - **公共领地三级优先级** - 字段 `public_priority`（1/2/3，**3 最高**，默认 1）。高优先级公共可覆盖低优先级公共；同级不可重叠。生效顺序：**私人/公会 > 公共(3>2>1)**；私人子领地权限仍先于父私人领地。创建公共领地时 OP 选择等级；OP 公共领地设置中可修改（若与同级/更高公共冲突则拒绝）
-- **公共领地「拦截生物生成」** - OP 公共领地设置中可开启；开启后通过 `ActorSpawnEvent` 取消该公共领地内的生物（`Mob`，不含玩家）生成；数据库字段 `block_actor_spawn`，**默认关闭**
+- **公共领地「拦截生物生成」** - OP 公共领地设置中可开启；开启后通过 `ActorSpawnEvent` 取消该公共领地内**除玩家外的全部实体**生成（含模组生物，不限原版 `Mob`）；数据库字段 `block_actor_spawn`，**默认关闭**
 - **领地移交功能** - 可将领地转移给其他玩家
 - **私人领地上架出售（v0.7.4）** - 领地详情中 **「出售领地（上架/改价/下架）」**：主人可设置正数标价并上架；其他玩家 **进入** 该私人领地时（非主人）在原有进入提示与边界粒子后，会收到 **购买表单**（领地名、标价、当前主人、购买/关闭）。购买时扣买家款、过户给买家、`owner_paid_money` 记为成交价，**清空授权列表**；卖家在线会收到成交通知。数据库 `lands` 表新增 **`for_sale`**、**`sale_price`**（旧库启动时自动 `ALTER`）。**公共领地 / 公会领地** 不适用此流程；若向卖家入账失败会尝试 **回滚过户并退款**（极端失败会提示联系管理员）
 - **私人领地成交增值税（v0.7.6 文档化）** - 配置 **`LAND_SALE_VAT_RATE`**（`core_setting.yml`，默认 `0.1` 即 10%，取值 **0～1**；**`0` 关闭**）。成交时 **买家按标价全额付款**；**卖家实收** = 成交价 − 增值税额。**税基（溢价）** = `max(0, 成交价 − 过户前 owner_paid_money)`；**增值税额** = 税基 × 税率（金额按分四舍五入）。平价或低于买入价成交不产生增值税。卖家在线提示中含成交价、增值税、实收（语言键 **`LAND_SALE_BUY_SUCCESS_SELLER`** 等，见 `ZH-CN.txt`）。**OP 重载配置** 后刷新税率
@@ -206,7 +206,7 @@ EndStone ARC Core 是一个功能完整的 EndStone (Minecraft 基岩版服务�
 - **OP 专属头衔** - 配置 `OP_TITLE`（单个），仅 OP 拥有；非 OP 进服时若正佩戴该头衔则自动解除
 - **头衔管理（玩家）** - 主菜单「我的信息」→「头衔管理」：选择佩戴/不佩戴（同入口下另有「修改密码」，见上文 **玩家管理系统**）
 - **OP 头衔管理** - OP 面板→「头衔管理」：**头衔属性管理**（编辑各头衔的稀有度、介绍、解锁奖励）、**创建新头衔**（名称 + 稀有度 + 介绍 + 奖励）、**给所有玩家添加头衔**（选择已有头衔，为当前数据库内所有玩家解锁，新人不会自动获得）、**给玩家单独添加头衔**（先输入玩家名，再选择要添加的头衔）；解锁时若玩家在线则发放该头衔的解锁奖励（金钱与物品）
-- **API** - 见下文「头衔系统 API」：`api_unlock_title`、`api_unlock_title_by_xuid`、`api_set_title_definition`、`api_ensure_title_definition`、`api_get_title_definition`、`api_has_unlocked_title`、`api_give_player_items`、`api_get_player_xuid_by_name` 等（供未来 `arc_achievement` 等插件调用）
+- **API** - 见下文「API 接口」：`api_unlock_title`、`api_set_title_definition`、`api_give_player_items` 等（供 `arc_achievement` 等插件调用）
 - **解锁头衔自动佩戴（v0.4.0）** - 通过 `api_unlock_title` 等途径解锁头衔时，若当前未佩戴任何头衔，则自动佩戴新解锁的头衔
 
 ### 🏰 公会系统（v0.7.0；v0.7.2 拓展规模与贡献点；v0.7.3 浏览与入会审批）
@@ -223,7 +223,7 @@ EndStone ARC Core 是一个功能完整的 EndStone (Minecraft 基岩版服务�
   - **私人公会贡献点**：保存在 `guild_members.contribution`；玩家通过 **API** 或 **每日签到（v0.7.3，见签到章节）** 等途径累加；**退出 / 被踢 / 公会解散** 时该玩家私人贡献点随成员行删除而 **清零**
   - **公共公会贡献点**：保存在 `guilds.total_contribution`；玩家每次获得私人贡献点时同步累加到所在公会公共值；**成员退出/被踢时公共值不会减少**（仅在公会解散时随公会行一并销毁）；当前 UI 中可被「升级公会规模」消耗
   - 玩家加入新公会时私人贡献点从 0 开始；新公会的公共贡献点也从 0 开始
-  - **对外插件接口（查询 + 发放）**：**发放**请使用 `api_add_guild_contribution(player_name, points)`（私人与公共同时 +points，在线会提示）；**查询**可使用 `api_get_player_guild_contribution`（私人）、`api_get_guild_total_contribution_by_player`（所在公会公共），或一次性读取 `api_get_player_guild_info`（含两种贡献与规模等）。详见下方「公会系统 API」与示例代码
+  - **对外插件接口（查询 + 发放）**：按玩家名可继续用 `api_get_player_guild_info`、`api_add_guild_contribution`（私人与公共同时 +points）。按公会 id 请用 **`api_get_player_guild_id`**、**`api_get_guild_info`**、**`api_get_guild_total_contribution`** / **`api_change_guild_total_contribution`**、**`api_get_member_guild_contribution`** / **`api_change_member_guild_contribution`**（私人点单独增减）、**`api_list_guild_members`**。详见下方「公会系统 API」
   - **底层消费接口**：`GuildSystem.consume_guild_contribution(guild_id, points)`（仅扣减公共值，不影响私人值），供领地等系统消耗公共贡献点
 - **全部公会浏览与入会（v0.7.3）**：主菜单 **公会 → 查看全部公会** — 列表按 **规模等级降序、同规模按公共贡献点降序**；支持 **按名称搜索**、分页；点选公会仅 **预览**（名称、简介、规模、人数/上限、公共贡献、入会说明）；**无公会** 玩家可 **申请加入 / 加入**（取决于 **入会审核**）；**已是本会成员** 仅提供 **我的公会** 跳转。会长 / 管理者在 **我的公会 → 入会审核设置** 中开关审核，在 **入会申请** 中处理待审。相关数据表：`guild_join_requests`、`guilds.join_requires_approval`
 - **跨服同步**：与 **`ENABLE_SYNC_CLIENT`** 互斥。文件方式下在 `core_setting.yml` 配置 **`GUILD_DATABASE_PATH`** 为各服可访问的 **同一 SQLite 文件路径**（留空则使用 `DATABASE_PATH` 主库）；远程客户端方式下通过 **`SYNC_CLIENT_SYNC_GUILD`** 控制是否同步公会数据
@@ -237,6 +237,7 @@ EndStone ARC Core 是一个功能完整的 EndStone (Minecraft 基岩版服务�
   - **方式 B · 共享文件**：**`ENABLE_SYNC_CLIENT=False`**，通过 **`PLAYER_DATABASE_PATH`**、**`PLAYER_ECONOMY_DATABASE_PATH`**、**`PLAYER_TITLE_DATABASE_PATH`**、**`GUILD_DATABASE_PATH`** 指向同一 SQLite 文件
 - **同步中心（可选）**：某一实例可设 **`ENABLE_SYNC_SERVER=True`** 监听 **`SYNC_SERVER_PORT`**（部署上常与 FRP **19135** 对应），供其他游戏服以客户端连接；与上述 A/B 消费方式独立
 - **分项同步开关（仅远程客户端）**：**`SYNC_CLIENT_SYNC_PLAYER`**、**`SYNC_CLIENT_SYNC_ECONOMY`**、**`SYNC_CLIENT_SYNC_TITLE`**、**`SYNC_CLIENT_SYNC_GUILD`** 可单独开关；关闭的类别不会拉取全量数据，也不会接收推送。若 A 与 B 同时配置，插件 **以远程客户端为准** 并忽略文件路径
+- **玩法配置以同步中心为准（v0.8.5，仅方式 A）**：开启对应分项后，从服连接同步中心时会拉取并覆盖该类别的玩法配置（写入本机 `core_setting.yml`）。例如同步经济则统一 **初始金钱 / 签到存款 / 传送与圈地价格**；同步公会则统一 **创建费用 / 规模上限 / 升级贡献点**。主服 OP 改配置或重载后会推送给已连接从服。本机路径、端口、`SYNC_CLIENT_*`、清道夫、出生点保护等仍各服独立。**方式 B（共享文件）不会自动同步配置文件**，需自行保证各服一致，或改用远程客户端
 - **模块**：`sync_protocol.py`、`sync_server.py`、`sync_client.py`、`sync_config.py`
 - **可同步数据表**：跨服玩家账号信息（`player_basic_info`）、经济（`player_economy`）、头衔（`title_definitions` / `player_title_unlock_time` / `player_title_equipped`）、公会（`guilds` / `guild_members` / `guild_invites`）
 - **本服本地表（不同步）**：**`player_local_info`** — `is_op`、剩余免费领地格、**签到**（每服独立）。始终写在本服 **`DATABASE_PATH`**，即使配置了 `PLAYER_DATABASE_PATH` 也不会进共享库
@@ -249,9 +250,13 @@ EndStone ARC Core 是一个功能完整的 EndStone (Minecraft 基岩版服务�
 - 对外 API：**`api_get_player_playtime(raw_player_name="", xuid="")`**，供 QQ Sync `/who` 与进离服播报查询
 
 ### 🔌 插件 API 系统
-- **经济系统 API** - 完整的金钱管理接口
-- **头衔系统 API** - 解锁/查询/写入头衔定义、按 xuid 解锁、发放物品等（供成就等弧光系列插件调用）
-- **玩家解析 API** - `api_get_player_xuid_by_name`
+- **统一玩家标识** - 多数接口同时支持游戏名与 **xuid**（填一个即可，xuid 优先）；旧的只传玩家名的调用仍可用
+- **经济系统 API** - 查询/增减金钱、财富排名；变动接口可返回结构化结果
+- **头衔系统 API** - 解锁/查询/列出定义、按 xuid 解锁、发放物品等（供成就等弧光系列插件调用）
+- **领地系统 API** - 坐标生效领地、玩家/公会领地列表、静默权限检查
+- **传送系统 API** - 传送在线玩家到坐标 / Home / 公共传送点，并列出 Home 与 Warp
+- **公会系统 API** - 按公会 id / 玩家 xuid 查询与单独增减公共、私人贡献点
+- **玩家解析 API** - `api_get_player_xuid_by_name` / `api_get_player_name_by_xuid`
 - **游戏时长 API** - `plugin.api_get_player_playtime(...)` 查询跨服累计时长与进服次数
 - **新手引导 API** - `plugin.api_get_newbie_guide_text()` 返回 `newbie_welcome.txt` 全文（供大模型聊天等插件使用）
 - **线程安全设计** - 支持多插件并发调用
@@ -394,6 +399,7 @@ SYNC_CLIENT_SYNC_PLAYER=True
 SYNC_CLIENT_SYNC_ECONOMY=True
 SYNC_CLIENT_SYNC_TITLE=True
 SYNC_CLIENT_SYNC_GUILD=True
+# 开启某类别时，该类别相关玩法配置也以同步中心为准（初始金钱、公会升级消耗等）
 
 # ----- 方式 B：共享数据库文件路径（与远程客户端互斥） -----
 PLAYER_DATABASE_PATH=
@@ -574,403 +580,114 @@ EndStone-ARC-CORE/
 
 ## 🔌 API 接口
 
-ARC Core 插件提供了丰富的 API 接口供其他插件调用，包括经济系统、头衔系统、领地系统等。统一通过 **`server.get_plugin("arc_core")`** 获取实例。
+其它 EndStone 插件通过 **`server.get_plugin("arc_core")`** 获取核心实例后调用下列方法。多数接口同时支持 **游戏名** 与 **xuid**（填一个即可，**xuid 优先**）；只传游戏名的旧写法仍然有效。接口线程安全。圈地 / 转账 / 建会等敏感写操作仍走游戏内密码验证，不对外提供。
 
-### 弧光系列插件命名
+插件 id：`arc_core`（与 pyproject entry-point 一致）。成就插件 id 为 `arc_achievement`，详见上文「成就系统」。
 
-| 项 | 约定示例 |
-|---|---|
-| PyPI / 包名 | `endstone_arc_core`、`endstone_arc_achievement`、`endstone_arc_dtwt` … |
-| Entry / plugin id | `arc_core`、`arc_achievement`、`arc_dtwt`、`arc_button_shop` |
-| 数据目录 | `plugins/ARCCore/`、`plugins/ARCAchievement/` … |
+### API 引用示例
 
-**成就插件（`endstone_arc_achievement` / `arc_achievement`）**：已拆为独立仓库；条件与面板自管，数据目录 `plugins/ARCAchievement/`；头衔定义、解锁发奖等委托本核心。击杀事件由成就插件自行监听。缺 `arc_core` 时成就插件禁用并打日志。统计表仍写在本核心 SQLite。
+以查询指定玩家金钱为例：
 
-### 💰 经济系统 API
-
-**统一接口设计**：所有API函数都基于统一的底层`*_by_name`系列函数实现，确保与插件内部功能使用相同的数据处理逻辑，提高一致性和可维护性。
-
-#### 1. 获取所有玩家金钱数据
-```python
-def api_get_all_money_data(self) -> dict
-```
-- **功能**: 获取所有玩家的金钱数据
-- **返回值**: `dict` - 键为玩家名称，值为金钱数量
-- **示例**:
-```python
-arc_plugin = server.get_plugin('arc_core')
-money_data = arc_plugin.api_get_all_money_data()
-# 返回: {'PlayerA': 10000, 'PlayerB': 5000, ...}
-```
-
-#### 2. 获取单个玩家金钱
-```python
-def api_get_player_money(self, player_name: str) -> float
-```
-- **功能**: 获取指定玩家的金钱数量（支持小数，精确到分）
-- **参数**: `player_name` (str) - 玩家名称
-- **返回值**: `float` - 玩家金钱数量，玩家不存在时返回 0.0
-- **示例**:
-```python
-money = arc_plugin.api_get_player_money('PlayerName')
-```
-
-#### 3. 获取最富有玩家信息
-```python
-def api_get_richest_player_money_data(self) -> list
-```
-- **功能**: 获取服务器中最富有玩家的信息
-- **返回值**: `list` - [玩家名称, 金钱数量]，无数据时返回 ['', 0]
-- **示例**:
-```python
-richest = arc_plugin.api_get_richest_player_money_data()
-# 返回: ['RichPlayer', 999999]
-```
-
-#### 4. 获取最贫穷玩家信息
-```python
-def api_get_poorest_player_money_data(self) -> list
-```
-- **功能**: 获取服务器中最贫穷玩家的信息
-- **返回值**: `list` - [玩家名称, 金钱数量]，无数据时返回 ['', 0]
-- **示例**:
-```python
-poorest = arc_plugin.api_get_poorest_player_money_data()
-# 返回: ['PoorPlayer', 100]
-```
-
-#### 5. 修改玩家金钱
-```python
-def api_change_player_money(self, player_name: str, money_to_change: float) -> bool
-```
-- **功能**: 增加或减少指定玩家的金钱（支持小数，精确到分）
-- **参数**: 
-  - `player_name` (str) - 玩家名称
-  - `money_to_change` (float) - 要改变的金钱数量（正数为增加，负数为减少）
-- **返回值**: `bool` - 是否操作成功
-- **注意事项**:
-  - 如果玩家在线，会自动发送金钱变动提示消息
-  - 变动数量经四舍五入到分后为 0 时视为无效，返回 False
-- **示例**:
-```python
-# 给玩家增加 1000 金钱
-arc_plugin.api_change_player_money('PlayerName', 1000)
-
-# 从玩家扣除 500 金钱
-arc_plugin.api_change_player_money('PlayerName', -500)
-```
-
-### 🏷️ 头衔系统 API
-
-成就等外部插件的典型流程：`api_set_title_definition` / `api_ensure_title_definition` 写入奖励头衔 → 条件达成后 `api_unlock_title`（或 `api_unlock_title_by_xuid`）解锁并发奖 → 可用 `api_has_unlocked_title` 去重。
-
-#### 为玩家解锁头衔
-```python
-def api_unlock_title(self, player: Player, title: str) -> bool
-```
-- **功能**：为指定玩家解锁头衔，若该头衔在头衔定义中配置了解锁奖励（金钱、物品），且玩家在线，则自动发放奖励；新解锁且当前未佩戴头衔时自动佩戴
-- **参数**：
-  - `player` (Player) - EndStone 玩家对象
-  - `title` (str) - 头衔名称
-- **返回值**：`bool` - 是否解锁成功（已解锁也返回 `True`，但不会重复发奖）
-- **示例**：
-```python
-arc_plugin = server.get_plugin('arc_core')
-arc_plugin.api_unlock_title(player, '成就达人')
-```
-
-#### 按 XUID 解锁头衔
-```python
-def api_unlock_title_by_xuid(self, xuid: str, title: str) -> bool
-```
-- **功能**：离线也可写入解锁记录；若该玩家在线且为**新**解锁，则与 `api_unlock_title` 相同：发奖 + 未佩戴时自动佩戴
-- **返回值**：`bool`
-
-#### 写入 / 确保头衔定义
-```python
-def api_set_title_definition(self, title: str, rarity: str, description: str, reward_money: float, reward_items: list | None = None) -> bool
-def api_ensure_title_definition(self, title: str, rarity: str = "普通", description: str = "", reward_money: float = 0.0, reward_items: list | None = None) -> bool
-def api_get_title_definition(self, title: str) -> dict | None
-```
-- **`api_set_title_definition`**：创建或**覆盖**定义（稀有度、介绍、`reward_money`、`reward_items`）
-- **`api_ensure_title_definition`**：仅当头衔不存在时插入，不覆盖 OP 已改定义
-- **`api_get_title_definition`**：返回 `title` / `rarity` / `description` / `reward_money` / `reward_items`；不存在为 `None`
-- **`reward_items`** 元素形如 `{"item_name": "minecraft:diamond", "count": 1}`（亦接受键 `id`）
-
-```python
-arc = server.get_plugin('arc_core')
-arc.api_set_title_definition(
-    '屠夫', '普通', '击杀家畜达标', 1000.0,
-    [{"item_name": "minecraft:beef", "count": 8}],
-)
-```
-
-#### 查询是否已解锁头衔
-```python
-def api_has_unlocked_title(self, title: str, *, player=None, player_name: str = "", xuid: str = "") -> bool
-```
-- **功能**：按 `player` → `xuid` → `player_name` 解析 XUID 后查询解锁表
-- **返回值**：`bool`
-
-#### 发放物品
-```python
-def api_give_player_items(self, player: Player, items: list | None) -> bool
-```
-- **功能**：向在线玩家执行 `give`；条目格式同头衔 `reward_items`
-- **返回值**：至少成功发出一条有效物品时为 `True`
-
-#### 按名解析 XUID
-```python
-def api_get_player_xuid_by_name(self, player_name: str) -> str | None
-```
-- **功能**：在线玩家优先，其次数据库（大小写不敏感、去空白）
-- **返回值**：`str | None`
-
-#### 获取新手引导文本
-```python
-def api_get_newbie_guide_text(self) -> str
-```
-- **功能**：返回 `plugins/ARCCore/newbie_welcome.txt` 的全文（与主菜单「新手引导」一致），供聊天机器人等插件作为系统提示或知识库
-- **返回值**：`str` - 成功为去首尾空白后的文本；文件不存在或读取失败时返回空字符串 `""`
-- **示例**：
-```python
-arc_plugin = server.get_plugin('arc_core')
-guide = arc_plugin.api_get_newbie_guide_text()
-```
-
-### 🏠 领地系统 API
-
-维度参数统一经 `normalize_dimension_id` 处理：原版如 `Overworld` / `overworld` → `minecraft:overworld`；自定义维度（如 `mymod:dim`）原样保留。查询按三维 AABB（含 Y）。多层生效顺序：**私人/公会 > 公共(public_priority 3>2>1)**。
-
-#### 1. 判断位置是否在领地内（返回生效领地 ID）
-```python
-def api_if_position_in_land(self, dimension: str, position: tuple) -> int | None
-```
-- **功能**：判断给定维度与坐标的**生效**主领地（多层优先级）
-- **参数**：
-  - `dimension` (str) - 维度 ID 或历史别名（会规范化）
-  - `position` (tuple) - `(x, y, z)`，内部 `floor` 后按三维范围查询
-- **返回值**：`int | None` - 不在任何领地内返回 `None`，否则返回生效领地的 `land_id`
-- **示例**：
-```python
-land_id = arc_plugin.api_if_position_in_land('minecraft:overworld', (100, 64, -200))
-# 亦兼容历史写法：'Overworld'
-if land_id is not None:
-    pass
-```
-
-#### 2. 解析坐标处的生效领地与子领地
-```python
-def api_resolve_land_at_position(self, dimension: str, position: tuple) -> dict
-```
-- **功能**：一次返回生效主领地、子领地、是否公共、优先级，以及覆盖该点的全部主领地 ID（优先级降序）
-- **返回值**（不在领地时 `land_id` 为 `None`）：
-  - `dimension` (str) - 规范化后的维度 ID
-  - `land_id` (int | None)
-  - `sub_land_id` (int | None) - 仅私人/公会生效领地内可能有值
-  - `is_public` (bool)
-  - `public_priority` (int | None) - 公共领地为 1/2/3
-  - `owner_xuid` (str)
-  - `covering_land_ids` (list[int]) - 覆盖该点的全部主领地，生效者在前
-- **示例**：
-```python
-r = arc_plugin.api_resolve_land_at_position('minecraft:overworld', (100, 64, -200))
-if r.get('land_id') is not None:
-    print(r['is_public'], r.get('public_priority'), r.get('sub_land_id'))
-```
-
-#### 3. 列出覆盖该点的全部主领地
-```python
-def api_list_lands_at_position(self, dimension: str, position: tuple) -> list
-```
-- **功能**：返回覆盖该点的全部主领地信息（含被上层覆盖的下层公共领地），按生效优先级降序
-- **返回值**：`list[dict]`，每项含 `land_id` 与 `api_get_land_info` 同款字段；无则 `[]`
-
-#### 4. 获取领地信息
-```python
-def api_get_land_info(self, land_id: int) -> dict
-```
-- **功能**：根据领地 ID 获取领地详细信息
-- **参数**：`land_id` (int) - 领地 ID
-- **返回值**：`dict` - 领地信息字典，不存在则返回空字典 `{}`。常见键包括：
-  - `land_name` - 领地名称
-  - `dimension` - 维度规范 ID（如 `minecraft:overworld`）
-  - `min_x`, `max_x`, `min_y`, `max_y`, `min_z`, `max_z` - 范围
-  - `tp_x`, `tp_y`, `tp_z` - 传送点坐标
-  - `shared_users` - 授权用户 XUID 列表
-  - `owner_xuid` - 拥有者键（如 `Player_<xuid>`、`GUILD_<id>`、公共领地键）
-  - `for_sale`（**v0.7.4+**）- 是否上架出售（bool）
-  - `sale_price`（**v0.7.4+**）- 上架标价（float，未上架为 `0`）
-  - `allow_explosion`, `allow_public_interact`, `allow_actor_interaction`, `allow_actor_damage`, `allow_frame`, `allow_non_public_land`, `block_actor_spawn` - 各类开关（`block_actor_spawn` 仅公共领地用于拦截生物生成，默认 `False`）
-  - `public_priority`（**公共领地三级优先级**）- 整型 1/2/3，3 最高；私人/公会领地不受此字段影响
-  - `owner_paid_money` - 购买时支付金额（出售过户后会更新为成交价）
-  - **私人领地上架成交**：卖家实收 = 成交价 − 增值税（见 **`LAND_SALE_VAT_RATE`**，对相对 `owner_paid_money` 的溢价计税）
-- **示例**：
-```python
-info = arc_plugin.api_get_land_info(land_id)
-if info:
-    owner = info.get('owner_xuid')
-    name = info.get('land_name')
-```
-
-### 🏰 公会系统 API（v0.7.3）
-
-#### 1. 获取玩家公会信息
-```python
-def api_get_player_guild_info(self, player_name: str) -> dict
-```
-- **功能**：获取玩家当前公会信息（含规模、容量、公会公共/玩家私人贡献点等）
-- **参数**：`player_name` (str) - 玩家名称
-- **返回值**：`dict`，玩家不存在或未加入公会时返回 `{}`，常见键：
-  - `guild_id` (int)
-  - `name` (str) - 公会名
-  - `role` (str) - `'owner' | 'manager' | 'member'`
-  - `size_tier` (str) - `'small' | 'medium' | 'large'`
-  - `capacity` (int) - 当前规模上限
-  - `member_count` (int) - 当前成员数（含会长）
-  - `total_contribution` (int) - 公会公共贡献点
-  - `personal_contribution` (int) - 玩家私人公会贡献点
-  - `motto` (str) - 公会简介
-  - `owner_xuid` (str) - 会长 XUID
-  - `join_requires_approval` (bool) - **v0.7.3+** 新成员入会是否需要会长/管理者审批（`False` 表示未满时可从「全部公会」直加）
-- **示例**：
-```python
-# 第二个参数请与服务器实际加载的插件 id 一致（entry-points 名一般为 arc_core）
-arc_plugin = server.get_plugin('arc_core')
-info = arc_plugin.api_get_player_guild_info('PlayerName')
-if info:
-    print(info['name'], info['size_tier'], info['total_contribution'], info.get('join_requires_approval'))
-```
-
-#### 2. 给玩家增加公会贡献点
-```python
-def api_add_guild_contribution(self, player_name: str, points: int) -> dict
-```
-- **功能**：给玩家增加公会贡献点 — 玩家私人贡献点和所在公会的公共贡献点 **同时各 +points**
-- **参数**：
-  - `player_name` (str) - 玩家名称
-  - `points` (int) - 必须为正整数；零或负数返回失败
-- **返回值**：`dict`
-  ```python
-  {
-      'ok': bool,                       # 是否成功
-      'error': Optional[str],           # 失败时为错误码（如 'GUILD_NOT_IN_GUILD'）
-      'personal_contribution': int,     # 增加后的玩家私人贡献点
-      'guild_total_contribution': int,  # 增加后的公会公共贡献点
-      'guild_id': int                   # 玩家所在公会 id；无公会时为 0
-  }
-  ```
-- **常见错误码**：
-  - `GUILD_INVALID_PLAYER` - 找不到玩家
-  - `GUILD_NOT_IN_GUILD` - 玩家未加入任何公会
-  - `GUILD_CONTRIB_INVALID_POINTS` - 点数 ≤ 0 或非整数
-  - `GUILD_DB_ERROR` - 数据库写入失败
-- **行为说明**：
-  - 玩家在线时会自动收到聊天提示（语言键 `GUILD_CONTRIB_ADDED_HINT`）
-  - 玩家退出 / 被踢 / 公会解散时，私人贡献点随成员行被删除而清零；公会公共贡献点不会因此减少
-- **示例**（小游戏插件结算时调用）：
-```python
-result = arc_plugin.api_add_guild_contribution('PlayerName', 50)
-if result['ok']:
-    pass  # 玩家已获得 50 点贡献，公会公共贡献也 +50
-else:
-    print('add contribution failed:', result['error'])
-```
-
-#### 查询 + 发放（整合示例，v0.7.3）
-
-第三方插件在完成任务、小游戏结算等场景下，只需 **玩家游戏名** 即可查询或发放贡献点：
-
-```python
-def on_minigame_reward(self, player_name: str):
-    arc = self.server.get_plugin('arc_core')
-    if arc is None:
-        return
-    personal = arc.api_get_player_guild_contribution(player_name)
-    guild_pool = arc.api_get_guild_total_contribution_by_player(player_name)
-    info = arc.api_get_player_guild_info(player_name)
-    if not info:
-        return  # 未加入公会则无法通过 API 累加贡献点
-    result = arc.api_add_guild_contribution(player_name, 25)
-    if result['ok']:
-        self.logger.info(
-            'guild contrib +25: personal %s -> %s, guild total %s',
-            personal,
-            result['personal_contribution'],
-            result['guild_total_contribution'],
-        )
-```
-
-#### 3. 获取玩家私人公会贡献点
-```python
-def api_get_player_guild_contribution(self, player_name: str) -> int
-```
-- **功能**：获取玩家当前私人公会贡献点（玩家未加入公会或不存在时返回 0）
-
-#### 4. 获取玩家所在公会的公共贡献点
-```python
-def api_get_guild_total_contribution_by_player(self, player_name: str) -> int
-```
-- **功能**：获取玩家所在公会的公共贡献点（玩家未加入公会时返回 0）
-
-#### 5. 设置公会规模等级
-```python
-def api_set_guild_size_tier(self, guild_name: str, tier: str) -> bool
-```
-- **功能**：设置指定公会的规模等级（`'small' / 'medium' / 'large'`）
-- **参数**：
-  - `guild_name` (str) - 公会名（精确匹配）
-  - `tier` (str) - 目标规模等级
-- **返回值**：`bool`
-- **限制**：若目标规模上限低于当前成员数，返回 `False`（拒绝降级）；公会不存在或参数非法也返回 `False`
-
-### 🔧 API 使用示例
-
-#### 完整的插件集成示例
 ```python
 from endstone.plugin import Plugin
 
 class MyPlugin(Plugin):
     def on_enable(self):
-        # 获取 ARC Core 插件实例
-        self.arc_core = self.server.get_plugin('arc_core')
-        
-        if self.arc_core is None:
-            self.logger.error("ARC Core plugin not found!")
+        self.arc = self.server.get_plugin("arc_core")
+        if self.arc is None:
+            self.logger.error("未找到 arc_core，请先安装 EndStone ARC Core")
             return
-    
-    def give_reward_to_player(self, player_name: str, amount: int):
-        """给玩家发放奖励金钱"""
-        try:
-            # 检查玩家当前金钱
-            current_money = self.arc_core.api_get_player_money(player_name)
-            self.logger.info(f"Player {player_name} current money: {current_money}")
-            
-            # 增加金钱
-            self.arc_core.api_change_player_money(player_name, amount)
-            
-            # 获取更新后的金钱
-            new_money = self.arc_core.api_get_player_money(player_name)
-            self.logger.info(f"Player {player_name} new money: {new_money}")
-            
-        except Exception as e:
-            self.logger.error(f"Failed to give reward: {e}")
+
+    def check_balance(self, player):
+        # 推荐：用 xuid（改名不影响）
+        money = self.arc.api_get_player_money(xuid=player.xuid)
+        # 亦可：只传游戏名
+        # money = self.arc.api_get_player_money(player.name)
+        self.logger.info(f"{player.name} 当前金钱: {money}")
 ```
 
-### 📋 API 注意事项
+### API 一览表
 
-1. **插件依赖**: 确保您的插件在 `plugin.yml` 中声明了对本插件的依赖
-2. **错误处理**: 所有 API 调用都应该包含适当的错误处理
-3. **线程安全**: 所有 API 方法都是线程安全的，可以在任何线程中调用
-4. **性能考虑**: 频繁调用 `api_get_all_money_data()` 可能影响性能，建议缓存结果
-5. **玩家存在性**: API 会自动处理不存在的玩家，但建议在调用前验证玩家是否存在
+#### 经济
 
-### 🚀 未来 API 计划
+| 函数 | 参数 | 返回值 |
+|------|------|--------|
+| `api_get_player_money` | `player_name=""`，`xuid=""` | `float`：余额；找不到为 `0.0` |
+| `api_change_player_money` | `player_name=""`，`money_to_change=0`，`xuid=""`，`notify=True` | `bool`：是否成功。正加负减；`notify=False` 不发余额提示 |
+| `api_adjust_player_money` | `delta`，`player_name=""`，`xuid=""`，`notify=True` | `dict`：`ok`，`error`，`xuid`，`money`（变动后），`delta`。错误码：`PLAYER_NOT_FOUND` / `MONEY_INVALID_AMOUNT` / `MONEY_DB_ERROR` |
+| `api_get_player_money_rank` | `player_name=""`，`xuid=""` | `int`：财富排名（从 1 起）；找不到为 `0` |
+| `api_get_all_money_data` | 无 | `dict`：`{玩家名: 金钱}` |
+| `api_get_richest_player_money_data` | 无 | `list`：`[玩家名, 金钱]`；无数据为 `["", 0]` |
+| `api_get_poorest_player_money_data` | 无 | `list`：`[玩家名, 金钱]`；无数据为 `["", 0]` |
 
-- **领地系统 API**: 查询、创建、管理领地的接口
-- **传送系统 API**: 程序化传送点管理
-- **权限系统 API**: 玩家权限查询和管理
-- **数据统计 API**: 服务器统计数据接口
+#### 头衔 / 发奖
+
+| 函数 | 参数 | 返回值 |
+|------|------|--------|
+| `api_unlock_title` | `player`（Player），`title` | `bool`：成功；新解锁且在线则发奖，未佩戴时自动佩戴 |
+| `api_unlock_title_by_xuid` | `xuid`，`title` | `bool`：离线可记解锁；在线且新解锁则发奖并可能自动佩戴 |
+| `api_set_title_definition` | `title`，`rarity`，`description`，`reward_money`，`reward_items=None` | `bool`：创建或**覆盖**定义。`reward_items` 形如 `[{"item_name":"minecraft:diamond","count":1}]`（亦接受键 `id`） |
+| `api_ensure_title_definition` | `title`，`rarity="普通"`，`description=""`，`reward_money=0.0`，`reward_items=None` | `bool`：仅当头衔不存在时插入，不覆盖已有定义 |
+| `api_get_title_definition` | `title` | `dict \| None`：`title` / `rarity` / `description` / `reward_money` / `reward_items` |
+| `api_list_title_definitions` | 无 | `list[dict]`：全部头衔定义（字段同上） |
+| `api_has_unlocked_title` | `title`，关键字：`player=None`，`player_name=""`，`xuid=""` | `bool`：解析顺序 `xuid` → `player` → `player_name` |
+| `api_get_equipped_title` | `player_name=""`，`xuid=""` | `str`：当前佩戴头衔；未佩戴 / 找不到为 `""` |
+| `api_list_unlocked_titles` | `player_name=""`，`xuid=""` | `list[str]`：已解锁头衔名 |
+| `api_give_player_items` | `player=None`，`items=None`，`player_name=""`，`xuid=""` | `bool`：向**在线**玩家 `give`；至少发出一条有效物品为 `True` |
+
+#### 玩家 / 其它
+
+| 函数 | 参数 | 返回值 |
+|------|------|--------|
+| `api_get_player_xuid_by_name` | `player_name` | `str \| None`：在线优先，其次数据库（大小写不敏感） |
+| `api_get_player_name_by_xuid` | `xuid`，`with_title=False` | `str`：找不到为 `""`；`with_title=True` 时为公会/头衔展示名 |
+| `api_get_player_playtime` | `raw_player_name=""`，`xuid=""` | `dict`：`session_count`，`total_playtime`（秒，含当前会话），`is_online`，`last_join_time`，`last_quit_time`，`xuid`；找不到时时长为 0 |
+| `api_get_newbie_guide_text` | 无 | `str`：`newbie_welcome.txt` 全文；失败为 `""` |
+
+#### 领地
+
+维度会规范化（如 `Overworld` → `minecraft:overworld`）；坐标按三维 AABB（含 Y）。生效顺序：私人/公会 > 公共(`public_priority` 3>2>1)。
+
+| 函数 | 参数 | 返回值 |
+|------|------|--------|
+| `api_if_position_in_land` | `dimension`，`position=(x,y,z)` | `int \| None`：生效主领地 `land_id`；不在领地为 `None` |
+| `api_resolve_land_at_position` | `dimension`，`position` | `dict`：`dimension`，`land_id`，`sub_land_id`，`is_public`，`public_priority`，`owner_xuid`，`covering_land_ids` |
+| `api_list_lands_at_position` | `dimension`，`position` | `list[dict]`：覆盖该点的全部主领地（含 `land_id`），按生效优先级降序 |
+| `api_get_land_info` | `land_id` | `dict`：领地详情；不存在为 `{}`。常见键：`land_name`，`dimension`，`min_/max_x/y/z`，`tp_x/y/z`，`shared_users`，`owner_xuid`，`for_sale`，`sale_price`，各类开关，`public_priority`，`owner_paid_money` |
+| `api_get_player_lands` | `player_name=""`，`xuid=""` | `list[dict]`：该玩家私人领地（含 `land_id`） |
+| `api_get_guild_lands` | `guild_id` | `list[dict]`：该公会领地（含 `land_id`） |
+| `api_check_land_access` | `dimension`，`position`，`player_name=""`，`xuid=""`，`action="build"` | `dict`：`allowed`，`land_id`，`sub_land_id`，`is_public`，`wilderness`，`action`。静默检查，不发聊天。`action` 为 `build` 或 `interact` |
+
+#### 传送
+
+仅对**在线**玩家生效。
+
+| 函数 | 参数 | 返回值 |
+|------|------|--------|
+| `api_teleport_player_to` | `dimension`，`x`，`y`，`z`，`player_name=""`，`xuid=""` | `dict`：`ok`，`error`。错误码：`PLAYER_NOT_ONLINE` / `TELEPORT_FAILED` |
+| `api_teleport_player_to_home` | `home_name`，`player_name=""`，`xuid=""` | `dict`：`ok`，`error`。另含 `PLAYER_NOT_FOUND` / `HOME_NOT_FOUND` |
+| `api_teleport_player_to_warp` | `warp_name`，`player_name=""`，`xuid=""` | `dict`：`ok`，`error`。另含 `WARP_NOT_FOUND` |
+| `api_list_player_homes` | `player_name=""`，`xuid=""` | `list[dict]`：`home_name`，`dimension`，`x`，`y`，`z` |
+| `api_list_public_warps` | 无 | `list[dict]`：`warp_name`，`dimension`，`x`，`y`，`z` |
+
+#### 公会
+
+| 函数 | 参数 | 返回值 |
+|------|------|--------|
+| `api_get_player_guild_info` | `player_name=""`，`xuid=""` | `dict`：含 `guild_id`，`name`，`role`，`size_tier`，`capacity`，`member_count`，`total_contribution`，`personal_contribution`，`motto`，`owner_xuid`，`join_requires_approval`；未入会为 `{}` |
+| `api_get_player_guild_id` | `player_name=""`，`xuid=""` | `int`：公会 id；未入会为 `0` |
+| `api_get_guild_info` | `guild_id` | `dict`：公会公开信息；不存在为 `{}` |
+| `api_list_guild_members` | `guild_id` | `list[dict]`：每项 `xuid`，`role`，`joined_at`，`contribution` |
+| `api_add_guild_contribution` | `player_name=""`，`points=0`，`xuid=""` | `dict`：`ok`，`error`，`personal_contribution`，`guild_total_contribution`，`guild_id`。私人与公共**同时各 +points**（须为正整数） |
+| `api_get_player_guild_contribution` | `player_name=""`，`xuid=""` | `int`：私人贡献点；未入会为 `0` |
+| `api_get_guild_total_contribution_by_player` | `player_name=""`，`xuid=""` | `int`：所在公会公共贡献；未入会为 `0` |
+| `api_get_guild_total_contribution` | `guild_id` | `int`：公会公共贡献点 |
+| `api_change_guild_total_contribution` | `guild_id`，`delta` | `dict`：`ok`，`error`，`guild_id`，`total_contribution`，`delta`。只改公共池；`delta` 可负；低于 0 失败 |
+| `api_get_member_guild_contribution` | `guild_id`，`player_name=""`，`xuid=""` | `int`：该成员私人贡献；非成员为 `0` |
+| `api_change_member_guild_contribution` | `guild_id`，`delta`，`player_name=""`，`xuid=""` | `dict`：`ok`，`error`，`guild_id`，`personal_contribution`，`delta`。只改私人；`delta` 可负 |
+| `api_set_guild_size_tier` | `guild_name`，`tier`（`small`/`medium`/`large`） | `bool`：目标容量低于当前人数时拒绝 |
+
+公会常见错误码：`GUILD_INVALID_PLAYER`、`GUILD_NOT_IN_GUILD`、`GUILD_NOT_FOUND`、`GUILD_CONTRIB_INVALID_POINTS`、`GUILD_CONTRIB_NOT_ENOUGH`、`GUILD_DB_ERROR`。
 
 ## 📄 许可证
 
@@ -984,7 +701,18 @@ class MyPlugin(Plugin):
 
 ## 📋 近期更新日志
 
-### v0.8.2（当前版本）
+### v0.8.5（当前版本）
+
+- ✅ **公共领地拦截生物生成修复**：原先仅取消 EndStone `Mob` 类型，模组生物常被包成普通 Actor 因而漏拦。开启 `block_actor_spawn` 后改为取消该公共领地内**除玩家外的全部实体**生成
+- ✅ **跨服玩法配置以主服为准**：远程客户端按已开启的同步类别，从同步中心拉取并覆盖对应 `core_setting.yml` 项（初始金钱、公会升级消耗、签到存款、传送/圈地价格等）。主服改配置或重载后推送；从服本地修改这些键会被主服覆盖。共享文件模式不自动同步配置
+- ✅ **公会 API 补齐**：按公会 id / 玩家 xuid 查询与单独增减公共、私人贡献点（`api_get_player_guild_id`、`api_get_guild_info`、`api_get_guild_total_contribution`、`api_change_guild_total_contribution`、`api_get_member_guild_contribution`、`api_change_member_guild_contribution`、`api_list_guild_members`）
+- ✅ **其它系统对外 API**：经济 / 头衔 / 领地 / 传送 / 玩家解析统一支持 **xuid**；新增 `api_adjust_player_money`、财富排名、头衔列表与佩戴查询、玩家/公会领地、静默领地权限检查、坐标/Home/Warp 传送、`api_get_player_name_by_xuid` 等。旧签名保持兼容
+
+### v0.8.4
+
+- ✅ **成就系统拆出**：成就迁至独立插件 `endstone_arc_achievement`（`arc_achievement`）；核心仅转发菜单入口并提供头衔/发奖 API。关服时忽略同步套接字已关闭后的 `recv` 噪声
+
+### v0.8.2
 
 - ✅ **玩家表拆分**：跨服 **`player_basic_info`**（密码、邀请、**游戏时长 / 进服次数**）；本服 **`player_local_info`**（`is_op`、剩余免费领地格、**签到**）。启动自动迁移
 - ✅ **QQ 中继移除**：不再经 SyncServer 转发 QQ 事件 / 群聊下行（原 `QQ_RELAY_MODE` / `EVENT_FORWARD` 已移除）。群服互通由 AstrBot 弧光 EndStone 消息中枢 + QQ Sync 插件负责；死亡使用 `api_send_event("death", …)`，成就等可用 `custom`
@@ -1003,7 +731,6 @@ class MyPlugin(Plugin):
 ### 计划中的功能
 - 🔄 更多语言包支持
 - 🔄 数据备份和恢复
-- 🔄 传送系统 API 扩展
 
 ---
 

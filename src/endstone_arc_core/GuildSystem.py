@@ -277,6 +277,86 @@ class GuildSystem:
         except Exception:
             return 0
 
+    def get_member_contribution_in_guild(self, guild_id: int, xuid: str) -> int:
+        """指定公会内该成员的私人贡献点；非该会成员返回 0。"""
+        xuid_s = str(xuid or "").strip()
+        try:
+            gid = int(guild_id)
+        except (TypeError, ValueError):
+            return 0
+        if not xuid_s or gid <= 0:
+            return 0
+        try:
+            row = self.db.query_one(
+                "SELECT contribution FROM guild_members WHERE xuid = ? AND guild_id = ?",
+                (xuid_s, gid),
+            )
+            if not row:
+                return 0
+            return int(row.get("contribution") or 0)
+        except Exception:
+            return 0
+
+    def change_guild_total_contribution(
+        self, guild_id: int, delta: int
+    ) -> Tuple[bool, Optional[str], int]:
+        """增减公会公共贡献点。结果不得为负；不足时失败且不改库。"""
+        try:
+            gid = int(guild_id)
+        except (TypeError, ValueError):
+            return False, "GUILD_NOT_FOUND", 0
+        try:
+            dlt = int(delta)
+        except (TypeError, ValueError):
+            return False, "GUILD_CONTRIB_INVALID_POINTS", 0
+        if not self.get_guild(gid):
+            return False, "GUILD_NOT_FOUND", 0
+        cur = self.get_guild_total_contribution(gid)
+        if dlt == 0:
+            return True, None, cur
+        new_val = cur + dlt
+        if new_val < 0:
+            return False, "GUILD_CONTRIB_NOT_ENOUGH", cur
+        ok = self.db.execute(
+            "UPDATE guilds SET total_contribution = ? WHERE id = ?",
+            (int(new_val), gid),
+        )
+        if not ok:
+            return False, "GUILD_DB_ERROR", cur
+        return True, None, self.get_guild_total_contribution(gid)
+
+    def change_member_contribution_in_guild(
+        self, guild_id: int, xuid: str, delta: int
+    ) -> Tuple[bool, Optional[str], int]:
+        """增减指定公会内该成员的私人贡献点（不影响公共池）。结果不得为负。"""
+        xuid_s = str(xuid or "").strip()
+        if not xuid_s:
+            return False, "GUILD_INVALID_PLAYER", 0
+        try:
+            gid = int(guild_id)
+        except (TypeError, ValueError):
+            return False, "GUILD_NOT_FOUND", 0
+        try:
+            dlt = int(delta)
+        except (TypeError, ValueError):
+            return False, "GUILD_CONTRIB_INVALID_POINTS", 0
+        mem = self.get_membership(xuid_s)
+        if not mem or int(mem.get("guild_id") or 0) != gid:
+            return False, "GUILD_NOT_IN_GUILD", 0
+        cur = self.get_member_contribution_in_guild(gid, xuid_s)
+        if dlt == 0:
+            return True, None, cur
+        new_val = cur + dlt
+        if new_val < 0:
+            return False, "GUILD_CONTRIB_NOT_ENOUGH", cur
+        ok = self.db.execute(
+            "UPDATE guild_members SET contribution = ? WHERE xuid = ? AND guild_id = ?",
+            (int(new_val), xuid_s, gid),
+        )
+        if not ok:
+            return False, "GUILD_DB_ERROR", cur
+        return True, None, self.get_member_contribution_in_guild(gid, xuid_s)
+
     def add_contribution_by_xuid(
         self, xuid: str, points: int
     ) -> Tuple[bool, Optional[str], Dict[str, int]]:

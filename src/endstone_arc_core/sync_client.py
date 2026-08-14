@@ -4,9 +4,13 @@ import socket
 import threading
 import time
 from contextlib import suppress
-from typing import Any, Dict, Optional, Set
+from typing import Any, Callable, Dict, Optional, Set
 
-from endstone_arc_core.sync_config import get_client_sync_tables
+from endstone_arc_core.sync_config import (
+    filter_incoming_settings,
+    get_client_sync_categories,
+    get_client_sync_tables,
+)
 from endstone_arc_core.sync_protocol import (
     SyncMessageType,
     SyncTable,
@@ -16,6 +20,7 @@ from endstone_arc_core.sync_protocol import (
     build_data_request,
     build_full_sync_request,
     build_heartbeat,
+    build_settings_pull_request,
     decode_message,
 )
 from endstone_arc_core.sync_write import iter_mirror_write_actions
@@ -42,6 +47,8 @@ class SyncClient:
         self.reconnect_interval = max(1, self._setting_int("SYNC_CLIENT_RECONNECT_INTERVAL", 10))
 
         self.enabled_tables: Set[str] = get_client_sync_tables(setting_manager)
+        self.enabled_categories: Set[str] = get_client_sync_categories(setting_manager)
+        self._on_settings: Optional[Callable[[Dict[str, str]], None]] = None
 
         self._socket: Optional[socket.socket] = None
         self._active = False  # 希望保持连接（允许断线重连）
@@ -84,6 +91,27 @@ class SyncClient:
             f"(reconnect every {self.reconnect_interval}s)",
         )
         return True
+
+    def set_settings_callback(self, callback: Optional[Callable[[Dict[str, str]], None]]) -> None:
+        self._on_settings = callback
+
+    def _apply_remote_settings(self, raw: Any) -> None:
+        settings = filter_incoming_settings(raw, self.enabled_categories)
+        if not settings or self._on_settings is None:
+            return
+        try:
+            self._on_settings(settings)
+        except Exception as e:
+            self._log("error", f"Apply remote settings error: {e}")
+
+    def request_settings(self) -> None:
+        """向同步中心请求当前玩法配置（重载本地配置后用于重新覆盖）。"""
+        if not self.is_running():
+            return
+        try:
+            self._send(build_settings_pull_request())
+        except Exception as e:
+            self._log("error", f"Request settings error: {e}")
 
     def stop(self) -> None:
         """停止客户端并取消重连。"""
@@ -251,6 +279,9 @@ class SyncClient:
         if not data.get("success"):
             self._log("error", f"Authentication failed: {data.get('message', '')}")
             return False
+        settings = data.get("settings")
+        if settings:
+            self._apply_remote_settings(settings)
         return True
 
     def _perform_full_sync(self) -> None:
@@ -320,7 +351,8 @@ class SyncClient:
                 data.get("operation", ""),
                 data.get("data", {}),
             )
-
+        elif msg_type == SyncMessageType.SETTINGS_PUSH:
+            self._apply_remote_settings(data.get("settings"))
         elif msg_type == SyncMessageType.HEARTBEAT:
             return time.time()
         return heartbeat_ts

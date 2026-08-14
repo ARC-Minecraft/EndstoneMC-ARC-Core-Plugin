@@ -12,7 +12,6 @@ from typing import Any, Callable, Dict, List, Optional, Set
 from endstone import ColorFormat, Player, GameMode
 from endstone.form import ActionForm, TextInput, ModalForm, Label, Dropdown
 from endstone.command import Command, CommandSender
-from endstone.actor import Mob
 from endstone.event import event_handler, PlayerJoinEvent, PlayerQuitEvent, PlayerRespawnEvent, BlockBreakEvent, BlockPlaceEvent, PlayerDeathEvent, PlayerInteractEvent, ActorExplodeEvent, PlayerInteractActorEvent, ActorDamageEvent, ActorDeathEvent, ActorSpawnEvent, PlayerChatEvent 
 from endstone.plugin import Plugin
 
@@ -46,7 +45,7 @@ from endstone_arc_core.arc_error_log import append_arc_error_log, format_context
 from endstone_arc_core.sky_eye_log import append_sky_eye_record, prune_sky_eye_logs
 from endstone_arc_core.sync_server import SyncServer
 from endstone_arc_core.sync_client import SyncClient
-from endstone_arc_core.sync_config import resolve_sync_consumer_mode
+from endstone_arc_core.sync_config import ALL_SHARED_SETTING_KEYS, resolve_sync_consumer_mode
 
 MAIN_PATH = 'plugins/ARCCore'
 # 天眼系统：玩家行为审计日志目录（按自然日 YYYYMMDD.txt）
@@ -473,6 +472,7 @@ class ARCCorePlugin(Plugin):
 
             self.sync_server = SyncServer(
                 database_manager=self.database_manager,
+                setting_manager=self.setting_manager,
                 auth_key=sync_auth_key,
                 bind_port=sync_port,
                 logger=self.logger,
@@ -488,6 +488,7 @@ class ARCCorePlugin(Plugin):
                 setting_manager=self.setting_manager,
                 logger=self.logger,
             )
+            self.sync_client.set_settings_callback(self._apply_synced_settings)
             if self.sync_client.start():
                 self.logger.info(
                     "[ARC Core] Sync client started "
@@ -496,8 +497,38 @@ class ARCCorePlugin(Plugin):
             else:
                 self.logger.error("[ARC Core] Failed to start sync client")
 
+        self.setting_manager.add_change_listener(self._on_local_setting_changed)
+
         # 本地写库上行/主机写库广播（签到、经济、称号、公会等）
         self.database_manager.set_write_notifier(self._on_db_write_for_sync)
+
+    def _apply_synced_settings(self, settings: Dict[str, str]) -> None:
+        """从服收到同步中心玩法配置后写入本地并刷新缓存。"""
+        def apply():
+            try:
+                changed = self.setting_manager.ApplySettings(settings)
+                if changed:
+                    self._reapply_cached_settings()
+                    self.logger.info(
+                        f"[ARC Core] Applied {changed} gameplay setting(s) from sync host"
+                    )
+            except Exception as e:
+                self.logger.error(f"[ARC Core] Apply synced settings error: {e}")
+
+        try:
+            self.server.scheduler.run_task(self, apply)
+        except Exception:
+            apply()
+
+    def _on_local_setting_changed(self, key: str, value: str) -> None:
+        """主服改玩法配置则推送；从服改同一批键则立刻向主服重新拉取覆盖。"""
+        if key not in ALL_SHARED_SETTING_KEYS:
+            return
+        if self.sync_server and self.sync_server.is_running():
+            self.sync_server.broadcast_settings({key: value})
+            return
+        if self.sync_client and self.sync_client.is_running():
+            self.sync_client.request_settings()
 
     def on_disable(self) -> None:
         try:
@@ -1458,12 +1489,10 @@ class ARCCorePlugin(Plugin):
 
     @event_handler
     def on_actor_spawn(self, event: ActorSpawnEvent):
-        """公共领地开启 block_actor_spawn 时拦截生物（Mob）生成；不拦截玩家与非 Mob 实体。"""
+        """公共领地开启 block_actor_spawn 时拦截除玩家外的全部实体生成（含模组生物）。"""
         try:
             actor = event.actor
             if actor is None or isinstance(actor, Player):
-                return
-            if not isinstance(actor, Mob):
                 return
             loc = actor.location
             if loc is None:
@@ -3585,6 +3614,26 @@ class ARCCorePlugin(Plugin):
             return None
         return self.title_system.get_title_definition(title_s)
 
+    def api_list_title_definitions(self) -> list:
+        """全部头衔定义列表（默认头衔、OP 头衔、数据库自定义头衔）。"""
+        out = []
+        for name in self.title_system.get_all_title_names():
+            title_s = str(name or "").strip()
+            if not title_s:
+                continue
+            defn = self.title_system.get_title_definition(title_s)
+            if defn:
+                out.append(defn)
+            else:
+                out.append({
+                    "title": title_s,
+                    "rarity": DEFAULT_RARITY,
+                    "description": "",
+                    "reward_money": 0.0,
+                    "reward_items": [],
+                })
+        return out
+
     def api_has_unlocked_title(
         self,
         title: str,
@@ -3603,8 +3652,8 @@ class ARCCorePlugin(Plugin):
                 resolved = str(player.xuid or "").strip()
             except Exception:
                 resolved = ""
-        if not resolved and player_name:
-            resolved = self.get_player_xuid_by_name(str(player_name).strip()) or ""
+        if not resolved:
+            resolved = self._api_resolve_player_xuid(player_name, "") or ""
         if not resolved:
             return False
         return bool(self.title_system.has_unlocked_title_by_xuid(resolved, title_s))
@@ -3613,11 +3662,20 @@ class ARCCorePlugin(Plugin):
         """供其他插件调用：按玩家名解析 XUID（在线优先，其次数据库，大小写不敏感）。"""
         return self.get_player_xuid_by_name(player_name)
 
-    def api_give_player_items(self, player: Player, items: Optional[List] = None) -> bool:
-        """给在线玩家发放物品列表。每项为 dict：item_name 或 id，以及 count。
+    def api_give_player_items(
+        self,
+        player: Optional[Player] = None,
+        items: Optional[List] = None,
+        player_name: str = "",
+        xuid: str = "",
+    ) -> bool:
+        """给在线玩家发放物品。可用 Player，或 player_name / xuid（须在线）。
 
-        任一有效条目成功发出即计为部分成功；无有效条目或玩家无效返回 False。
+        每项为 dict：item_name 或 id，以及 count。任一有效条目成功发出即计为部分成功。
         """
+        if player is None:
+            resolved = self._api_resolve_player_xuid(player_name, xuid)
+            player = self._find_online_player_by_xuid(resolved) if resolved else None
         if player is None or not items:
             return False
         if not isinstance(items, list):
@@ -12501,6 +12559,10 @@ class ARCCorePlugin(Plugin):
             self.language_manager.ReloadCurrentLanguage()
             self.entity_display_name_manager.reload()
             self.kill_reward_config.reload()
+            if self.sync_server and self.sync_server.is_running():
+                self.sync_server.broadcast_settings()
+            if self.sync_client and self.sync_client.is_running():
+                self.sync_client.request_settings()
             player.send_message(self.language_manager.GetText('OP_RELOAD_CONFIG_SUCCESS'))
             self.show_op_main_panel(player)
         except Exception as e:
@@ -13687,13 +13749,12 @@ class ARCCorePlugin(Plugin):
                 continue
         return money_data
 
-    def api_get_player_money(self, player_name: str) -> float:
-        """
-        获取目标玩家的金钱（API封装器）
-        :param player_name: 玩家名称
-        :return: 玩家金钱数量（支持小数，精确到分）
-        """
-        return self.get_player_money_by_name(player_name)
+    def api_get_player_money(self, player_name: str = "", xuid: str = "") -> float:
+        """获取玩家金钱。player_name 与 xuid 填一个即可，xuid 优先。找不到返回 0.0。"""
+        resolved = self._api_resolve_player_xuid(player_name, xuid)
+        if not resolved:
+            return 0.0
+        return self.economy.get_player_money_by_xuid(resolved)
 
     def api_get_richest_player_money_data(self) -> list:
         result = self.economy.get_richest_one()
@@ -13711,13 +13772,402 @@ class ARCCorePlugin(Plugin):
                 return [player_name, self._round_money(result['money'])]
         return ["", 0.0]
 
-    def api_change_player_money(self, player_name: str, money_to_change: float) -> bool:
-        if self._round_money(money_to_change) == 0:
-            if self.logger:
-                self.logger.error(f'{ColorFormat.RED}[ARC Core]Money change cannot be zero...')
+    def api_change_player_money(
+        self,
+        player_name: str = "",
+        money_to_change: float = 0,
+        xuid: str = "",
+        notify: bool = True,
+    ) -> bool:
+        """增减玩家金钱。player_name 与 xuid 填一个即可（xuid 优先）。四舍五入到分为 0 时返回 False。"""
+        result = self.api_adjust_player_money(
+            money_to_change, player_name=player_name, xuid=xuid, notify=notify
+        )
+        return bool(result.get("ok"))
+
+    def api_adjust_player_money(
+        self,
+        delta: float,
+        player_name: str = "",
+        xuid: str = "",
+        notify: bool = True,
+    ) -> dict:
+        """增减玩家金钱，返回变动后余额。delta 四舍五入到分后为 0 视为无效。"""
+        result = {
+            "ok": False,
+            "error": None,
+            "xuid": "",
+            "money": 0.0,
+            "delta": 0.0,
+        }
+        try:
+            dlt = self._round_money(delta)
+        except (TypeError, ValueError):
+            result["error"] = "MONEY_INVALID_AMOUNT"
+            return result
+        result["delta"] = dlt
+        if dlt == 0:
+            result["error"] = "MONEY_INVALID_AMOUNT"
+            return result
+        resolved = self._api_resolve_player_xuid(player_name, xuid)
+        if not resolved:
+            result["error"] = "PLAYER_NOT_FOUND"
+            return result
+        result["xuid"] = resolved
+        try:
+            ok = self.economy.change_player_money_by_xuid(resolved, dlt)
+            result["money"] = self.economy.get_player_money_by_xuid(resolved)
+            if not ok:
+                result["error"] = "MONEY_DB_ERROR"
+                return result
+            if notify:
+                online = self._find_online_player_by_xuid(resolved)
+                if online is not None:
+                    hint_key = "MONEY_ADD_HINT" if dlt > 0 else "MONEY_REDUCE_HINT"
+                    online.send_message(
+                        self.language_manager.GetText(hint_key).format(
+                            self._format_money_display(abs(dlt)),
+                            self._format_money_display(result["money"]),
+                        )
+                    )
+            try:
+                self._update_richest_title_if_needed()
+            except Exception:
+                pass
+            result["ok"] = True
+            return result
+        except Exception as e:
+            try:
+                if self.logger:
+                    self.logger.error(f"[ARC Core]api_adjust_player_money error: {e}")
+            except Exception:
+                pass
+            result["error"] = "MONEY_DB_ERROR"
+            return result
+
+    def api_get_player_money_rank(self, player_name: str = "", xuid: str = "") -> int:
+        """财富排名，从 1 开始；找不到返回 0。"""
+        resolved = self._api_resolve_player_xuid(player_name, xuid)
+        if not resolved:
+            return 0
+        rank = self.economy.get_player_money_rank_by_xuid(resolved)
+        try:
+            return int(rank or 0)
+        except (TypeError, ValueError):
+            return 0
+
+    def api_get_player_name_by_xuid(self, xuid: str, with_title: bool = False) -> str:
+        """按 xuid 取玩家名。with_title=True 时带公会/头衔展示名；找不到返回空字符串。"""
+        name = self.get_player_name_by_xuid(str(xuid or "").strip(), return_with_title=bool(with_title))
+        return str(name) if name else ""
+
+    def api_get_equipped_title(self, player_name: str = "", xuid: str = "") -> str:
+        """当前佩戴头衔；未佩戴或找不到玩家返回空字符串。"""
+        resolved = self._api_resolve_player_xuid(player_name, xuid)
+        if not resolved:
+            return ""
+        title = self.title_system.get_equipped_title_by_xuid(resolved)
+        return str(title).strip() if title else ""
+
+    def api_list_unlocked_titles(self, player_name: str = "", xuid: str = "") -> list:
+        """已解锁头衔名列表。"""
+        resolved = self._api_resolve_player_xuid(player_name, xuid)
+        if not resolved:
+            return []
+        return list(self.title_system.get_unlocked_titles_by_xuid(resolved))
+
+    def api_get_player_lands(self, player_name: str = "", xuid: str = "") -> list:
+        """玩家名下私人领地列表（含 land_id）。"""
+        resolved = self._api_resolve_player_xuid(player_name, xuid)
+        if not resolved:
+            return []
+        lands = self.land_system.get_player_lands(resolved) or {}
+        out = []
+        for lid, info in lands.items():
+            item = dict(info or {})
+            item["land_id"] = int(lid)
+            out.append(item)
+        return out
+
+    def api_get_guild_lands(self, guild_id: int) -> list:
+        """公会名下领地列表（含 land_id）。"""
+        try:
+            gid = int(guild_id)
+        except (TypeError, ValueError):
+            return []
+        lands = self.land_system.get_guild_lands(gid) or {}
+        out = []
+        for lid, info in lands.items():
+            item = dict(info or {})
+            item["land_id"] = int(lid)
+            out.append(item)
+        return out
+
+    def api_check_land_access(
+        self,
+        dimension: str,
+        position: tuple,
+        player_name: str = "",
+        xuid: str = "",
+        action: str = "build",
+    ) -> dict:
+        """静默检查玩家在该点的建造或交互权限（不向玩家发提示）。"""
+        result = {
+            "allowed": False,
+            "land_id": None,
+            "sub_land_id": None,
+            "is_public": False,
+            "wilderness": False,
+            "action": str(action or "build"),
+        }
+        resolved = self._api_resolve_player_xuid(player_name, xuid)
+        if not resolved:
+            return result
+        try:
+            from endstone_arc_core.dimension_utils import normalize_dimension_id
+
+            if not position or len(position) < 3:
+                return result
+            dim = normalize_dimension_id(dimension)
+            x = math.floor(float(position[0]))
+            y = math.floor(float(position[1]))
+            z = math.floor(float(position[2]))
+            land_id = self.get_land_at_pos(dim, x, z, y)
+            if land_id is None:
+                result["allowed"] = True
+                result["wilderness"] = True
+                return result
+            result["land_id"] = int(land_id)
+            result["is_public"] = bool(self.is_public_land(land_id))
+            sub_id = self.get_sub_land_at_pos(land_id, x, y, z)
+            if sub_id is not None:
+                result["sub_land_id"] = int(sub_id)
+            is_op = self._api_player_is_op(resolved)
+            want_interact = str(action or "build").strip().lower() == "interact"
+            if result["sub_land_id"] is not None:
+                sub_info = self.get_sub_land_info(result["sub_land_id"])
+                if sub_info and self._xuid_has_sub_land_access(resolved, sub_info):
+                    result["allowed"] = True
+                    return result
+            land_info = self.get_land_info(land_id) or {}
+            if not land_info:
+                result["allowed"] = True
+                return result
+            if self._xuid_has_land_build_access(resolved, land_info, is_op):
+                result["allowed"] = True
+                return result
+            if want_interact and self._xuid_has_land_interact_access(resolved, land_info, is_op):
+                result["allowed"] = True
+            return result
+        except Exception:
+            return result
+
+    def _api_player_is_op(self, xuid: str) -> bool:
+        online = self._find_online_player_by_xuid(xuid)
+        if online is not None:
+            try:
+                return bool(online.is_op)
+            except Exception:
+                pass
+        try:
+            row = self.database_manager.query_one(
+                "SELECT is_op FROM player_local_info WHERE xuid = ?",
+                (str(xuid),),
+            )
+            if not row:
+                return False
+            return bool(int(row.get("is_op") or 0))
+        except Exception:
             return False
-        return self.change_player_money_by_name(player_name, money_to_change, notify=True)
-    
+
+    def _xuid_matches_land_owner_key(self, xuid: str, owner_key: str) -> bool:
+        xu = str(xuid)
+        ok = str(owner_key or "").strip()
+        px = LandSystem.parse_land_owner_player_xuid(ok)
+        if px is not None and px == xu:
+            return True
+        if ok == xu:
+            return True
+        gid = LandSystem.parse_land_owner_guild_id(ok)
+        if gid is not None and getattr(self, "guild_system", None):
+            mem = self.guild_system.get_membership(xu)
+            if mem and int(mem.get("guild_id") or 0) == gid:
+                return True
+        return False
+
+    def _xuid_in_shared_users(self, xuid: str, owner_key: str, shared_users) -> bool:
+        xu = str(xuid)
+        seq = shared_users or []
+        if not any(str(u) == xu for u in seq):
+            return False
+        guild_id = LandSystem.parse_land_owner_guild_id(str(owner_key or ""))
+        if guild_id is None:
+            return True
+        if not getattr(self, "guild_system", None):
+            return False
+        mem = self.guild_system.get_membership(xu)
+        return bool(mem and int(mem.get("guild_id") or 0) == int(guild_id))
+
+    def _xuid_has_sub_land_access(self, xuid: str, sub_info: dict) -> bool:
+        owner_key = str(sub_info.get("owner_xuid") or "")
+        shared = sub_info.get("shared_users") or []
+        return self._xuid_matches_land_owner_key(xuid, owner_key) or self._xuid_in_shared_users(
+            xuid, owner_key, shared
+        )
+
+    def _xuid_has_land_build_access(self, xuid: str, land_info: dict, is_op: bool) -> bool:
+        owner_key = str(land_info.get("owner_xuid") or "")
+        if self.land_system.is_public_land_owner(owner_key):
+            return bool(is_op)
+        shared = land_info.get("shared_users") or []
+        return self._xuid_matches_land_owner_key(xuid, owner_key) or self._xuid_in_shared_users(
+            xuid, owner_key, shared
+        )
+
+    def _xuid_has_land_interact_access(self, xuid: str, land_info: dict, is_op: bool) -> bool:
+        if self._xuid_has_land_build_access(xuid, land_info, is_op):
+            return True
+        owner_key = str(land_info.get("owner_xuid") or "")
+        if land_info.get("allow_public_interact", False):
+            if LandSystem.parse_land_owner_guild_id(owner_key) is None:
+                return True
+        if not land_info.get("allow_guild_member_interact"):
+            return False
+        owner_px = LandSystem.parse_land_owner_player_xuid(owner_key)
+        if not owner_px or not getattr(self, "guild_system", None):
+            return False
+        pmem = self.guild_system.get_membership(str(xuid))
+        omem = self.guild_system.get_membership(owner_px)
+        if not pmem or not omem:
+            return False
+        g1 = int(pmem.get("guild_id") or 0)
+        g2 = int(omem.get("guild_id") or 0)
+        return g1 > 0 and g1 == g2
+
+    def api_teleport_player_to(
+        self,
+        dimension: str,
+        x: float,
+        y: float,
+        z: float,
+        player_name: str = "",
+        xuid: str = "",
+    ) -> dict:
+        """将在线玩家传送到指定坐标。离线或不存在返回失败。"""
+        result = {"ok": False, "error": None}
+        resolved = self._api_resolve_player_xuid(player_name, xuid)
+        player = self._find_online_player_by_xuid(resolved) if resolved else None
+        if player is None and str(player_name or "").strip():
+            try:
+                player = self.server.get_player(str(player_name).strip())
+            except Exception:
+                player = None
+        if player is None:
+            result["error"] = "PLAYER_NOT_ONLINE"
+            return result
+        try:
+            from endstone_arc_core.dimension_utils import normalize_dimension_id
+
+            dim = normalize_dimension_id(dimension)
+            cmd = generate_tp_command_to_position(
+                player.name, (x, y, z), dim or "overworld"
+            )
+            self.server.dispatch_command(self.server.command_sender, cmd)
+            result["ok"] = True
+            return result
+        except Exception as e:
+            try:
+                if self.logger:
+                    self.logger.error(f"[ARC Core]api_teleport_player_to error: {e}")
+            except Exception:
+                pass
+            result["error"] = "TELEPORT_FAILED"
+            return result
+
+    def api_list_player_homes(self, player_name: str = "", xuid: str = "") -> list:
+        """玩家 Home 列表。"""
+        resolved = self._api_resolve_player_xuid(player_name, xuid)
+        if not resolved:
+            return []
+        homes = self.teleport_system.get_player_homes(resolved) or {}
+        out = []
+        for name, row in homes.items():
+            out.append({
+                "home_name": str(name),
+                "dimension": str(row.get("dimension") or ""),
+                "x": row.get("x"),
+                "y": row.get("y"),
+                "z": row.get("z"),
+            })
+        return out
+
+    def api_list_public_warps(self) -> list:
+        """公共传送点列表。"""
+        warps = self.teleport_system.get_all_public_warps() or {}
+        out = []
+        for name, row in warps.items():
+            out.append({
+                "warp_name": str(name),
+                "dimension": str(row.get("dimension") or ""),
+                "x": row.get("x"),
+                "y": row.get("y"),
+                "z": row.get("z"),
+            })
+        return out
+
+    def api_teleport_player_to_home(
+        self,
+        home_name: str,
+        player_name: str = "",
+        xuid: str = "",
+    ) -> dict:
+        """将在线玩家传送到其指定 Home。"""
+        result = {"ok": False, "error": None}
+        name = str(home_name or "").strip()
+        if not name:
+            result["error"] = "HOME_NOT_FOUND"
+            return result
+        resolved = self._api_resolve_player_xuid(player_name, xuid)
+        if not resolved:
+            result["error"] = "PLAYER_NOT_FOUND"
+            return result
+        home = self.teleport_system.get_player_home(resolved, name)
+        if not home:
+            result["error"] = "HOME_NOT_FOUND"
+            return result
+        return self.api_teleport_player_to(
+            str(home.get("dimension") or ""),
+            home.get("x"),
+            home.get("y"),
+            home.get("z"),
+            xuid=resolved,
+        )
+
+    def api_teleport_player_to_warp(
+        self,
+        warp_name: str,
+        player_name: str = "",
+        xuid: str = "",
+    ) -> dict:
+        """将在线玩家传送到指定公共传送点。"""
+        result = {"ok": False, "error": None}
+        name = str(warp_name or "").strip()
+        if not name:
+            result["error"] = "WARP_NOT_FOUND"
+            return result
+        warp = self.teleport_system.get_public_warp(name)
+        if not warp:
+            result["error"] = "WARP_NOT_FOUND"
+            return result
+        return self.api_teleport_player_to(
+            str(warp.get("dimension") or ""),
+            warp.get("x"),
+            warp.get("y"),
+            warp.get("z"),
+            player_name=player_name,
+            xuid=xuid,
+        )
+
     def api_if_position_in_land(self, dimension: str, position: tuple) -> Optional[int]:
         """
         判断位置是否在领地内（多层生效领地）。
@@ -13849,31 +14299,17 @@ class ARCCorePlugin(Plugin):
         return self.get_land_info(land_id)
 
     # ─── 公会 API ─────────────────────────────────────────────────────────
-    def api_get_player_guild_info(self, player_name: str) -> dict:
+    def api_get_player_guild_info(self, player_name: str = "", xuid: str = "") -> dict:
         """
         获取玩家当前公会信息（含规模、容量、公私贡献点）。
-        :param player_name: 玩家名称
-        :return: dict 例如：
-            {
-              'guild_id': int,
-              'name': str,
-              'role': 'owner' | 'manager' | 'member',
-              'size_tier': 'small' | 'medium' | 'large',
-              'capacity': int,
-              'member_count': int,
-              'total_contribution': int,
-              'personal_contribution': int,
-              'motto': str,
-              'owner_xuid': str,
-              'join_requires_approval': bool  # 新成员入会是否需要管理员审批（v0.7.3+）
-            }
-            玩家不存在或未加入公会时返回空字典 {}。
+        player_name 与 xuid 填一个即可，xuid 优先。
+        玩家不存在或未加入公会时返回空字典 {}。
         """
         try:
-            xuid = self.get_player_xuid_by_name(player_name)
-            if not xuid:
+            resolved = self._api_resolve_player_xuid(player_name, xuid)
+            if not resolved:
                 return {}
-            mem = self.guild_system.get_membership(xuid)
+            mem = self.guild_system.get_membership(resolved)
             if not mem:
                 return {}
             gid = int(mem.get("guild_id") or 0)
@@ -13882,25 +14318,12 @@ class ARCCorePlugin(Plugin):
             g = self.guild_system.get_guild(gid)
             if not g:
                 return {}
-            tier = self.guild_system.normalize_size_tier(g.get("size_tier"))
-            jra = g.get("join_requires_approval")
-            try:
-                join_requires_approval = int(jra) != 0 if jra is not None else True
-            except (TypeError, ValueError):
-                join_requires_approval = True
-            return {
-                "guild_id": gid,
-                "name": str(g.get("name") or ""),
-                "role": str(mem.get("role") or ""),
-                "size_tier": tier,
-                "capacity": int(self.guild_system.get_size_tier_max(tier)),
-                "member_count": int(self.guild_system.count_members(gid)),
-                "total_contribution": int(g.get("total_contribution") or 0),
-                "personal_contribution": int(self.guild_system.get_member_contribution(xuid)),
-                "motto": str(g.get("motto") or ""),
-                "owner_xuid": str(g.get("owner_xuid") or ""),
-                "join_requires_approval": bool(join_requires_approval),
-            }
+            info = self._guild_public_info_dict(gid, g)
+            if not info:
+                return {}
+            info["role"] = str(mem.get("role") or "")
+            info["personal_contribution"] = int(self.guild_system.get_member_contribution(resolved))
+            return info
         except Exception as e:
             try:
                 if self.logger:
@@ -13909,7 +14332,7 @@ class ARCCorePlugin(Plugin):
                 pass
             return {}
 
-    def api_add_guild_contribution(self, player_name: str, points: int) -> dict:
+    def api_add_guild_contribution(self, player_name: str = "", points: int = 0, xuid: str = "") -> dict:
         """
         给玩家增加公会贡献点：
             - 玩家私人公会贡献点 += points
@@ -13935,18 +14358,18 @@ class ARCCorePlugin(Plugin):
             "guild_id": 0,
         }
         try:
-            xuid = self.get_player_xuid_by_name(player_name)
-            if not xuid:
+            resolved = self._api_resolve_player_xuid(player_name, xuid)
+            if not resolved:
                 result["error"] = "GUILD_INVALID_PLAYER"
                 return result
-            ok, err, info = self.guild_system.add_contribution_by_xuid(xuid, points)
+            ok, err, info = self.guild_system.add_contribution_by_xuid(resolved, points)
             result["ok"] = bool(ok)
             result["error"] = err
             result["personal_contribution"] = int(info.get("personal", 0))
             result["guild_total_contribution"] = int(info.get("guild_total", 0))
             result["guild_id"] = int(info.get("guild_id", 0))
             if ok:
-                online = self._find_online_player_by_xuid(xuid)
+                online = self._find_online_player_by_xuid(resolved)
                 if online is not None:
                     try:
                         msg_template = self.language_manager.GetText("GUILD_CONTRIB_ADDED_HINT")
@@ -13971,28 +14394,28 @@ class ARCCorePlugin(Plugin):
             result["error"] = "GUILD_DB_ERROR"
             return result
 
-    def api_get_player_guild_contribution(self, player_name: str) -> int:
+    def api_get_player_guild_contribution(self, player_name: str = "", xuid: str = "") -> int:
         """
         获取玩家当前的私人公会贡献点。
-        玩家未加入公会或不存在时返回 0。
+        玩家未加入公会或不存在时返回 0。player_name 与 xuid 填一个即可。
         """
         try:
-            xuid = self.get_player_xuid_by_name(player_name)
-            if not xuid:
+            resolved = self._api_resolve_player_xuid(player_name, xuid)
+            if not resolved:
                 return 0
-            return int(self.guild_system.get_member_contribution(xuid))
+            return int(self.guild_system.get_member_contribution(resolved))
         except Exception:
             return 0
 
-    def api_get_guild_total_contribution_by_player(self, player_name: str) -> int:
+    def api_get_guild_total_contribution_by_player(self, player_name: str = "", xuid: str = "") -> int:
         """
         获取玩家所在公会的公共贡献点。玩家未加入公会时返回 0。
         """
         try:
-            xuid = self.get_player_xuid_by_name(player_name)
-            if not xuid:
+            resolved = self._api_resolve_player_xuid(player_name, xuid)
+            if not resolved:
                 return 0
-            mem = self.guild_system.get_membership(xuid)
+            mem = self.guild_system.get_membership(resolved)
             if not mem:
                 return 0
             gid = int(mem.get("guild_id") or 0)
@@ -14026,6 +14449,193 @@ class ARCCorePlugin(Plugin):
             return bool(ok)
         except Exception:
             return False
+
+    def _api_resolve_player_xuid(self, player_name: str = "", xuid: str = "") -> Optional[str]:
+        xuid_s = str(xuid or "").strip()
+        if xuid_s:
+            return xuid_s
+        name = str(player_name or "").strip()
+        if not name:
+            return None
+        return self.get_player_xuid_by_name(name)
+
+    def _guild_public_info_dict(self, guild_id: int, g: Optional[dict] = None) -> dict:
+        try:
+            gid = int(guild_id)
+        except (TypeError, ValueError):
+            return {}
+        if gid <= 0:
+            return {}
+        if g is None:
+            g = self.guild_system.get_guild(gid)
+        if not g:
+            return {}
+        tier = self.guild_system.normalize_size_tier(g.get("size_tier"))
+        jra = g.get("join_requires_approval")
+        try:
+            join_requires_approval = int(jra) != 0 if jra is not None else True
+        except (TypeError, ValueError):
+            join_requires_approval = True
+        return {
+            "guild_id": gid,
+            "name": str(g.get("name") or ""),
+            "size_tier": tier,
+            "capacity": int(self.guild_system.get_size_tier_max(tier)),
+            "member_count": int(self.guild_system.count_members(gid)),
+            "total_contribution": int(g.get("total_contribution") or 0),
+            "motto": str(g.get("motto") or ""),
+            "owner_xuid": str(g.get("owner_xuid") or ""),
+            "join_requires_approval": bool(join_requires_approval),
+        }
+
+    def api_get_player_guild_id(self, player_name: str = "", xuid: str = "") -> int:
+        """获取玩家当前公会 id。未加入或不存在时返回 0。player_name 与 xuid 填一个即可，xuid 优先。"""
+        try:
+            resolved = self._api_resolve_player_xuid(player_name, xuid)
+            if not resolved:
+                return 0
+            mem = self.guild_system.get_membership(resolved)
+            if not mem:
+                return 0
+            return int(mem.get("guild_id") or 0)
+        except Exception:
+            return 0
+
+    def api_get_guild_info(self, guild_id: int) -> dict:
+        """按公会 id 获取公会信息。不存在时返回 {}。"""
+        try:
+            return self._guild_public_info_dict(guild_id)
+        except Exception as e:
+            try:
+                if self.logger:
+                    self.logger.error(f"[ARC Core]api_get_guild_info error: {e}")
+            except Exception:
+                pass
+            return {}
+
+    def api_get_guild_total_contribution(self, guild_id: int) -> int:
+        """按公会 id 获取公共贡献点。公会不存在时返回 0。"""
+        try:
+            return int(self.guild_system.get_guild_total_contribution(guild_id))
+        except Exception:
+            return 0
+
+    def api_change_guild_total_contribution(self, guild_id: int, delta: int) -> dict:
+        """增减公会公共贡献点（可正可负，结果不得低于 0）。不影响成员私人贡献。"""
+        result = {
+            "ok": False,
+            "error": None,
+            "guild_id": 0,
+            "total_contribution": 0,
+            "delta": 0,
+        }
+        try:
+            result["delta"] = int(delta)
+        except (TypeError, ValueError):
+            result["error"] = "GUILD_CONTRIB_INVALID_POINTS"
+            return result
+        try:
+            gid = int(guild_id)
+        except (TypeError, ValueError):
+            result["error"] = "GUILD_NOT_FOUND"
+            return result
+        result["guild_id"] = gid
+        try:
+            ok, err, total = self.guild_system.change_guild_total_contribution(gid, result["delta"])
+            result["ok"] = bool(ok)
+            result["error"] = err
+            result["total_contribution"] = int(total)
+            return result
+        except Exception as e:
+            try:
+                if self.logger:
+                    self.logger.error(f"[ARC Core]api_change_guild_total_contribution error: {e}")
+            except Exception:
+                pass
+            result["error"] = "GUILD_DB_ERROR"
+            return result
+
+    def api_get_member_guild_contribution(
+        self, guild_id: int, player_name: str = "", xuid: str = ""
+    ) -> int:
+        """按公会 id + 玩家（名或 xuid）获取该成员私人贡献点。非该会成员返回 0。"""
+        try:
+            resolved = self._api_resolve_player_xuid(player_name, xuid)
+            if not resolved:
+                return 0
+            return int(self.guild_system.get_member_contribution_in_guild(guild_id, resolved))
+        except Exception:
+            return 0
+
+    def api_change_member_guild_contribution(
+        self, guild_id: int, delta: int, player_name: str = "", xuid: str = ""
+    ) -> dict:
+        """增减指定公会内该成员的私人贡献点（可正可负，结果不得低于 0）。不影响公共池。"""
+        result = {
+            "ok": False,
+            "error": None,
+            "guild_id": 0,
+            "personal_contribution": 0,
+            "delta": 0,
+        }
+        try:
+            result["delta"] = int(delta)
+        except (TypeError, ValueError):
+            result["error"] = "GUILD_CONTRIB_INVALID_POINTS"
+            return result
+        try:
+            gid = int(guild_id)
+        except (TypeError, ValueError):
+            result["error"] = "GUILD_NOT_FOUND"
+            return result
+        result["guild_id"] = gid
+        try:
+            resolved = self._api_resolve_player_xuid(player_name, xuid)
+            if not resolved:
+                result["error"] = "GUILD_INVALID_PLAYER"
+                return result
+            ok, err, personal = self.guild_system.change_member_contribution_in_guild(
+                gid, resolved, result["delta"]
+            )
+            result["ok"] = bool(ok)
+            result["error"] = err
+            result["personal_contribution"] = int(personal)
+            return result
+        except Exception as e:
+            try:
+                if self.logger:
+                    self.logger.error(f"[ARC Core]api_change_member_guild_contribution error: {e}")
+            except Exception:
+                pass
+            result["error"] = "GUILD_DB_ERROR"
+            return result
+
+    def api_list_guild_members(self, guild_id: int) -> list:
+        """列出公会成员。每项含 xuid、role、joined_at、contribution。公会不存在或失败返回 []。"""
+        try:
+            gid = int(guild_id)
+        except (TypeError, ValueError):
+            return []
+        if gid <= 0 or not self.guild_system.get_guild(gid):
+            return []
+        try:
+            rows = self.guild_system.list_members(gid) or []
+            out = []
+            for row in rows:
+                out.append({
+                    "xuid": str(row.get("xuid") or ""),
+                    "role": str(row.get("role") or ""),
+                    "joined_at": str(row.get("joined_at") or ""),
+                    "contribution": int(row.get("contribution") or 0),
+                })
+            return out
+        except Exception as e:
+            try:
+                if self.logger:
+                    self.logger.error(f"[ARC Core]api_list_guild_members error: {e}")
+            except Exception:
+                pass
+            return []
 
     # 公告系统
     def _load_broadcast_messages(self):
@@ -14493,45 +15103,34 @@ class ARCCorePlugin(Plugin):
             "is_online": False,
             "last_join_time": None,
             "last_quit_time": None,
+            "xuid": "",
         }
         try:
             import time as _time
-            name = (raw_player_name or "").strip()
-            xuid_s = str(xuid or "").strip()
-            if not name and not xuid_s:
+            resolved = self._api_resolve_player_xuid(raw_player_name, xuid)
+            if not resolved:
                 return empty
-            if xuid_s:
-                row = self.database_manager.query_one(
-                    "SELECT * FROM player_basic_info WHERE xuid = ?",
-                    (xuid_s,),
-                )
-            else:
-                row = self.database_manager.query_one(
-                    "SELECT * FROM player_basic_info WHERE name = ?",
-                    (name,),
-                )
+            row = self.database_manager.query_one(
+                "SELECT * FROM player_basic_info WHERE xuid = ?",
+                (resolved,),
+            )
             if not row:
                 return empty
             total = int(row.get("total_playtime") or 0)
-            key = str(row.get("xuid") or "")
+            key = str(row.get("xuid") or resolved)
             started = self._play_session_start.get(key) if key else None
             is_online = started is not None
             if is_online:
                 total += max(0, int(_time.time()) - int(started))
-            if not is_online and name:
-                try:
-                    is_online = any(
-                        getattr(pl, "name", "") == name
-                        for pl in (getattr(self.server, "online_players", []) or [])
-                    )
-                except Exception:
-                    pass
+            if not is_online:
+                is_online = self._find_online_player_by_xuid(key) is not None
             return {
                 "session_count": int(row.get("session_count") or 0),
                 "total_playtime": total,
                 "is_online": bool(is_online),
                 "last_join_time": row.get("last_join_time"),
                 "last_quit_time": row.get("last_quit_time"),
+                "xuid": key,
             }
         except Exception as e:
             if self.logger:

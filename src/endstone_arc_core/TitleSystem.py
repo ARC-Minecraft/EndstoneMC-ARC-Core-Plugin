@@ -242,6 +242,16 @@ class TitleSystem:
         )
         return [r["title"] for r in rows if r.get("title")]
 
+    def get_unlocked_titles_by_xuid(self, xuid: str) -> List[str]:
+        xs = str(xuid or "").strip()
+        if not xs:
+            return []
+        rows = self.database_manager.query_all(
+            "SELECT title FROM player_title_unlock_time WHERE xuid = ? ORDER BY title",
+            (xs,),
+        )
+        return [r["title"] for r in rows if r.get("title")]
+
     def get_title_unlock_time(self, player: Player, title: str) -> Optional[str]:
         """玩家某头衔的解锁时间（ISO 字符串），未解锁返回 None。"""
         row = self.database_manager.query_one(

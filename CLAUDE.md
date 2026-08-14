@@ -90,13 +90,14 @@ Multiple config keys (`PLAYER_DATABASE_PATH`, `PLAYER_ECONOMY_DATABASE_PATH`, `P
 
 ## Plugin API
 
-Other EndStone plugins can call methods on the `ARCCorePlugin` instance via `server.get_plugin('arc_core')`:
+Other EndStone plugins can call methods on the `ARCCorePlugin` instance via `server.get_plugin('arc_core')`. Player identity: pass `player_name` and/or `xuid` (`xuid` wins). Old name-only calls remain valid.
 
-- **Economy**: `api_get_player_money`, `api_change_player_money`, `api_get_all_money_data`, `api_get_richest_player_money_data`
-- **Titles**: `api_unlock_title`, `api_unlock_title_by_xuid`, `api_set_title_definition`, `api_ensure_title_definition`, `api_get_title_definition`, `api_has_unlocked_title`, `api_give_player_items`
-- **Player**: `api_get_player_xuid_by_name`, `api_get_player_playtime`
-- **Lands**: `api_if_position_in_land(dimension, (x,y,z))`（规范化维度 + 三维 Y + 多层生效领地）、`api_resolve_land_at_position`、`api_list_lands_at_position`、`api_get_land_info(land_id)`
-- **Guilds**: `api_get_player_guild_info(player_name)`, `api_add_guild_contribution(player_name, points)`, `api_get_player_guild_contribution`, `api_get_guild_total_contribution_by_player`, `api_set_guild_size_tier`
+- **Economy**: `api_get_player_money`、`api_change_player_money`、`api_adjust_player_money`、`api_get_player_money_rank`、`api_get_all_money_data`、`api_get_richest_player_money_data`
+- **Titles**: `api_unlock_title`、`api_unlock_title_by_xuid`、`api_set_title_definition`、`api_ensure_title_definition`、`api_get_title_definition`、`api_list_title_definitions`、`api_has_unlocked_title`、`api_get_equipped_title`、`api_list_unlocked_titles`、`api_give_player_items`
+- **Player**: `api_get_player_xuid_by_name`、`api_get_player_name_by_xuid`、`api_get_player_playtime`
+- **Lands**: `api_if_position_in_land(dimension, (x,y,z))`（规范化维度 + 三维 Y + 多层生效领地）、`api_resolve_land_at_position`、`api_list_lands_at_position`、`api_get_land_info(land_id)`、`api_get_player_lands`、`api_get_guild_lands`、`api_check_land_access`
+- **Teleport**: `api_teleport_player_to`、`api_list_player_homes`、`api_list_public_warps`、`api_teleport_player_to_home`、`api_teleport_player_to_warp`
+- **Guilds**: `api_get_player_guild_info`、`api_get_player_guild_id`、`api_get_guild_info`、`api_get_guild_total_contribution`、`api_change_guild_total_contribution`、`api_get_member_guild_contribution`、`api_change_member_guild_contribution`、`api_list_guild_members`、`api_add_guild_contribution`、`api_get_player_guild_contribution`、`api_get_guild_total_contribution_by_player`、`api_set_guild_size_tier`
 - **Newbie**: `api_get_newbie_guide_text()`
 
 All API methods are thread-safe.

@@ -1195,7 +1195,7 @@ class LandSystem:
         return self._set_land_flag(land_id, "allow_non_public_land", allow)
 
     def set_land_block_actor_spawn(self, land_id: int, block: bool) -> bool:
-        """开启后，公共领地内取消生物（Mob，不含玩家）生成。"""
+        """开启后，公共领地内取消除玩家外的全部实体生成。"""
         return self._set_land_flag(land_id, "block_actor_spawn", block)
 
     # ─── 领地授权 ─────────────────────────────────────────────────────────────

@@ -9,13 +9,17 @@ from contextlib import suppress
 from typing import Any, Callable, Dict, List, Optional, Set
 from dataclasses import dataclass, field
 
+from endstone_arc_core.sync_config import (
+    categories_from_tables,
+    filter_incoming_settings,
+    snapshot_shared_settings,
+)
 from endstone_arc_core.sync_protocol import (
     SyncMessageType,
     SyncTable,
     TABLE_TO_ENUM,
     ENUM_TO_TABLE,
     decode_message,
-    encode_message,
     build_auth_response,
     build_query_response,
     build_data_response,
@@ -24,6 +28,7 @@ from endstone_arc_core.sync_protocol import (
     build_heartbeat,
     build_push_notify,
     build_error_response,
+    build_settings_push,
 )
 from endstone_arc_core.sync_write import iter_mirror_write_actions, query_sync_table, select_all_sync_table
 
@@ -38,6 +43,7 @@ class ConnectedClient:
     authenticated: bool = False
     last_heartbeat: float = field(default_factory=time.time)
     sync_tables: Set[str] = field(default_factory=set)
+    protocol_version: int = 1
     
     def is_alive(self) -> bool:
         """检查连接是否存活（心跳超时 60 秒）"""
@@ -58,6 +64,7 @@ class SyncServer:
         bind_host: str = "0.0.0.0",  # nosec B104 — 跨服同步中心需监听所有网卡
         bind_port: int = 19999,
         logger=None,
+        setting_manager=None,
     ):
         """
         初始化同步服务器
@@ -67,8 +74,10 @@ class SyncServer:
         :param bind_host: 绑定地址
         :param bind_port: 绑定端口
         :param logger: 日志记录器
+        :param setting_manager: 配置管理器（用于向从服下发玩法配置）
         """
         self.db = database_manager
+        self.settings = setting_manager
         self.auth_key = auth_key
         self.bind_host = bind_host
         self.bind_port = bind_port
@@ -265,6 +274,7 @@ class SyncServer:
         SyncMessageType.BATCH_SYNC_REQUEST: lambda self, c, d: self._handle_batch_sync(c, d),
         SyncMessageType.FULL_SYNC_REQUEST: lambda self, c, d: self._handle_full_sync(c, d),
         SyncMessageType.PULL_REQUEST: lambda self, c, d: self._handle_pull(c, d),
+        SyncMessageType.SETTINGS_PULL_REQUEST: lambda self, c, d: self._handle_settings_pull(c, d),
     }
 
     def _handle_auth(self, client: ConnectedClient, data: Dict):
@@ -281,6 +291,10 @@ class SyncServer:
         client.server_id = server_id
         client.server_name = server_name
         client.authenticated = True
+        try:
+            client.protocol_version = int(data.get('protocol_version') or 1)
+        except (TypeError, ValueError):
+            client.protocol_version = 1
 
         requested_tables = data.get('sync_tables')
         if isinstance(requested_tables, list):
@@ -293,8 +307,13 @@ class SyncServer:
         
         with self._clients_lock:
             self._clients.add(client)
-        
-        client.conn.sendall(build_auth_response(True, "Authentication successful"))
+
+        auth_settings = None
+        if client.protocol_version >= 2:
+            auth_settings = self._settings_for_client(client)
+        client.conn.sendall(build_auth_response(
+            True, "Authentication successful", settings=auth_settings
+        ))
         self._log("info", f"Client authenticated: {server_name} ({server_id}) from {client.addr}")
 
     def _handle_heartbeat(self, client: ConnectedClient):
@@ -479,6 +498,40 @@ class SyncServer:
             client.conn.sendall(build_query_response(True, results))
         except Exception as e:
             client.conn.sendall(build_query_response(False, [], str(e)))
+
+    def _settings_for_client(self, client: ConnectedClient) -> Dict[str, str]:
+        if self.settings is None:
+            return {}
+        cats = categories_from_tables(client.sync_tables)
+        return snapshot_shared_settings(self.settings, cats)
+
+    def _handle_settings_pull(self, client: ConnectedClient, data: Dict) -> None:
+        try:
+            settings = self._settings_for_client(client)
+            client.conn.sendall(build_settings_push(settings))
+        except Exception as e:
+            self._log("error", f"Settings pull error: {e}")
+
+    def broadcast_settings(self, settings: Optional[Dict[str, str]] = None) -> None:
+        """向协议版本 >=2 的从服推送玩法配置（可部分键；None 表示按客户端类别全量快照）。"""
+        disconnected = []
+        with self._clients_lock:
+            for client in self._clients:
+                if not client.authenticated or client.protocol_version < 2:
+                    continue
+                cats = categories_from_tables(client.sync_tables)
+                if settings is None:
+                    payload = self._settings_for_client(client)
+                else:
+                    payload = filter_incoming_settings(settings, cats)
+                if not payload:
+                    continue
+                try:
+                    client.conn.sendall(build_settings_push(payload))
+                except Exception:
+                    disconnected.append(client)
+            for client in disconnected:
+                self._clients.discard(client)
 
     def _broadcast_push(self, table: SyncTable, operation: str, data: Dict, exclude: Optional[ConnectedClient] = None):
         """广播推送通知给所有已连接的客户端"""

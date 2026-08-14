@@ -29,6 +29,7 @@ SYNC_CLIENT_AUTH_KEY=
 # 同步中心不可达或断线后的重连间隔（秒，默认 10）
 SYNC_CLIENT_RECONNECT_INTERVAL=10
 # 分项同步开关（仅远程客户端模式生效；关闭的类别不会拉取/接收推送）
+# 开启某类别时，该类别相关的玩法配置也以同步中心（主服）为准，避免各服初始金钱、公会升级消耗等不一致
 SYNC_CLIENT_SYNC_PLAYER=True
 SYNC_CLIENT_SYNC_ECONOMY=True
 SYNC_CLIENT_SYNC_TITLE=True

@@ -31,6 +31,8 @@ class SyncMessageType(IntEnum):
     SERVER_STATUS = 0x31         # 服务器状态查询
     PULL_REQUEST = 0x32          # 拉取数据请求（客户端主动拉取）
     PUSH_NOTIFY = 0x33           # 服务器推送通知（服务器端数据变更）
+    SETTINGS_PULL_REQUEST = 0x40  # 客户端请求玩法配置快照
+    SETTINGS_PUSH = 0x41          # 同步中心下发玩法配置
 
     # 错误和响应
     ERROR_RESPONSE = 0xFF         # 错误响应
@@ -63,6 +65,9 @@ TABLE_TO_ENUM = {
 }
 
 ENUM_TO_TABLE = {v: k for k, v in TABLE_TO_ENUM.items()}
+
+# 2+：认证响应可带 settings；可收 SETTINGS_PUSH。旧客户端不发此字段，视为 1。
+PROTOCOL_VERSION = 2
 
 
 def encode_message(msg_type: SyncMessageType, data: Dict[str, Any]) -> bytes:
@@ -100,23 +105,42 @@ def build_auth_request(
     server_name: str,
     auth_key: str,
     sync_tables: Optional[List[str]] = None,
+    protocol_version: int = PROTOCOL_VERSION,
 ) -> bytes:
     """构建认证请求"""
     payload = {
         'server_id': server_id,
         'server_name': server_name,
         'auth_key': auth_key,
+        'protocol_version': int(protocol_version),
     }
     if sync_tables is not None:
         payload['sync_tables'] = sync_tables
     return encode_message(SyncMessageType.AUTH_REQUEST, payload)
 
 
-def build_auth_response(success: bool, message: str = "") -> bytes:
-    """构建认证响应"""
-    return encode_message(SyncMessageType.AUTH_RESPONSE, {
+def build_auth_response(
+    success: bool,
+    message: str = "",
+    settings: Optional[Dict[str, str]] = None,
+) -> bytes:
+    """构建认证响应；settings 仅新客户端使用，旧客户端会忽略未知字段。"""
+    payload = {
         'success': success,
         'message': message,
+    }
+    if settings is not None:
+        payload['settings'] = settings
+    return encode_message(SyncMessageType.AUTH_RESPONSE, payload)
+
+
+def build_settings_pull_request() -> bytes:
+    return encode_message(SyncMessageType.SETTINGS_PULL_REQUEST, {})
+
+
+def build_settings_push(settings: Dict[str, str]) -> bytes:
+    return encode_message(SyncMessageType.SETTINGS_PUSH, {
+        'settings': settings,
     })
 
 
