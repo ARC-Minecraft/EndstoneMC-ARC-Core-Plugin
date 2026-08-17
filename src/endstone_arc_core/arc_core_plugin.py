@@ -10482,6 +10482,10 @@ class ARCCorePlugin(Plugin):
         min_z, max_z = info["min_z"], info["max_z"]
 
         if_allowed, reason, overlap_ids = self.check_land_availability(dimension, min_x, max_x, min_y, max_y, min_z, max_z)
+        overlap_lands_text = ""
+        if overlap_ids:
+            land_parts = [f"#{lid} {self.get_land_name(lid) or ''}".strip() for lid in overlap_ids]
+            overlap_lands_text = ", ".join(land_parts)
         if not if_allowed:
             if reason == "SYSTEM_ERROR":
                 self.report_arc_error(
@@ -10489,12 +10493,18 @@ class ARCCorePlugin(Plugin):
                     f"show_pending_land_purchase_panel check_land_availability SYSTEM_ERROR dim={dimension!r} overlap_ids={overlap_ids!r}",
                     player,
                 )
-            msg = self.language_manager.GetText(f"CHECK_NEW_LAND_AVAILABILITY_FAIL_{reason}")
-            if overlap_ids:
-                land_parts = [f"#{lid} {self.get_land_name(lid) or ''}".strip() for lid in overlap_ids]
-                msg = msg + "\n" + self.language_manager.GetText("LAND_OVERLAP_WITH_LANDS").format(", ".join(land_parts))
-            player.send_message(msg)
-            return
+                msg = self.language_manager.GetText(f"CHECK_NEW_LAND_AVAILABILITY_FAIL_{reason}")
+                if overlap_lands_text:
+                    msg = msg + "\n" + self.language_manager.GetText("LAND_OVERLAP_WITH_LANDS").format(overlap_lands_text)
+                player.send_message(msg)
+                return
+            # 非 OP：与私人/公会等冲突时仍直接拦下；OP 需能进入面板以创建「允许覆盖」的公共领地
+            if not player.is_op:
+                msg = self.language_manager.GetText(f"CHECK_NEW_LAND_AVAILABILITY_FAIL_{reason}")
+                if overlap_lands_text:
+                    msg = msg + "\n" + self.language_manager.GetText("LAND_OVERLAP_WITH_LANDS").format(overlap_lands_text)
+                player.send_message(msg)
+                return
 
         length = max_x - min_x + 1
         height = max_y - min_y + 1
@@ -10514,13 +10524,13 @@ class ARCCorePlugin(Plugin):
         used_free_blocks = min(volume, remaining_free_blocks)
 
         player_money = self.get_player_money(player)
-        can_afford_private = player.is_op or player_money >= money_cost
+        can_afford_private = if_allowed and (player.is_op or player_money >= money_cost)
 
         guild_contrib_cost = int(volume * int(self.land_price))
         mem_gl = self.guild_system.get_membership(str(player.xuid))
         guild_total_contrib = 0
         can_offer_guild_land_button = False
-        if mem_gl:
+        if if_allowed and mem_gl:
             _gid = int(mem_gl.get("guild_id") or 0)
             if _gid > 0:
                 guild_total_contrib = int(
@@ -10547,15 +10557,20 @@ class ARCCorePlugin(Plugin):
             hint_guild = self.language_manager.GetText(
                 "NEW_LAND_MODE_GUILD_NOT_IN_GUILD"
             )
-        content = (
-            base_text
-            + "\n"
-            + hint_public
-            + "\n"
-            + hint_guild
-            + "\n"
-            + self.language_manager.GetText("NEW_LAND_PURCHASE_CONTENT_SUFFIX")
-        )
+        content_parts = [
+            base_text,
+            hint_public,
+            hint_guild,
+            self.language_manager.GetText("NEW_LAND_PURCHASE_CONTENT_SUFFIX"),
+        ]
+        if not if_allowed and player.is_op and overlap_lands_text:
+            content_parts.insert(
+                1,
+                self.language_manager.GetText("NEW_LAND_OP_OVERLAP_PUBLIC_HINT").format(
+                    overlap_lands_text
+                ),
+            )
+        content = "\n".join(content_parts)
 
         purchase_form = ActionForm(
             title=self.language_manager.GetText("LAND_PENDING_PURCHASE_PANEL_TITLE"),
@@ -10580,21 +10595,27 @@ class ARCCorePlugin(Plugin):
             self.language_manager.GetText("LAND_PENDING_RESTART_PICK_BUTTON"),
             on_click=self.start_interactive_land_creation,
         )
-        if can_afford_private:
+        if if_allowed:
+            if can_afford_private:
+                purchase_form.add_button(
+                    self.language_manager.GetText("LAND_BTN_CREATE_PRIVATE_LAND"),
+                    on_click=lambda p, dim=dimension, m1=min_x, m2=max_x, m3=min_y, m4=max_y, m5=min_z, m6=max_z, vol=volume, mc=money_cost, uf=used_free_blocks: self.player_buy_new_land(
+                        p, dim, m1, m2, m3, m4, m5, m6, vol, mc, uf
+                    ),
+                )
+            else:
+                purchase_form.add_button(
+                    self.language_manager.GetText("BUY_NEW_LAND_NO_MONEY_TEXT")
+                )
+        elif player.is_op:
             purchase_form.add_button(
-                self.language_manager.GetText("LAND_BTN_CREATE_PRIVATE_LAND"),
-                on_click=lambda p, dim=dimension, m1=min_x, m2=max_x, m3=min_y, m4=max_y, m5=min_z, m6=max_z, vol=volume, mc=money_cost, uf=used_free_blocks: self.player_buy_new_land(
-                    p, dim, m1, m2, m3, m4, m5, m6, vol, mc, uf
-                ),
+                self.language_manager.GetText("LAND_BTN_PRIVATE_BLOCKED_BY_OVERLAP")
             )
-        else:
-            purchase_form.add_button(
-                self.language_manager.GetText("BUY_NEW_LAND_NO_MONEY_TEXT")
-            )
+        prefer_allow_private = bool(not if_allowed and player.is_op)
         purchase_form.add_button(
             self.language_manager.GetText("LAND_BTN_CREATE_PUBLIC_LAND"),
-            on_click=lambda p, dim=dimension, m1=min_x, m2=max_x, m3=min_y, m4=max_y, m5=min_z, m6=max_z: self.show_create_public_land_priority_modal(
-                p, dim, m1, m2, m3, m4, m5, m6
+            on_click=lambda p, dim=dimension, m1=min_x, m2=max_x, m3=min_y, m4=max_y, m5=min_z, m6=max_z, allow_def=prefer_allow_private: self.show_create_public_land_priority_modal(
+                p, dim, m1, m2, m3, m4, m5, m6, default_allow_non_public=allow_def
             ),
         )
         if can_offer_guild_land_button:
@@ -10760,6 +10781,7 @@ class ARCCorePlugin(Plugin):
         max_y: int,
         min_z: int,
         max_z: int,
+        default_allow_non_public: bool = False,
     ) -> None:
         """创建公共领地前选择优先级（1/2/3）及是否允许私人/公会覆盖。"""
         if not player.is_op:
@@ -10789,7 +10811,7 @@ class ARCCorePlugin(Plugin):
                     "PUBLIC_LAND_ALLOW_PRIVATE_OPTION_ALLOW"
                 ),
             ],
-            default_index=0,
+            default_index=1 if default_allow_non_public else 0,
         )
 
         def on_submit(p: Player, json_str: str):
