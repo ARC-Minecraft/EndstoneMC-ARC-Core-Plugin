@@ -3,7 +3,7 @@
 # EndStone ARC Core Plugin / EndStone弧光核心
 
 [![Codacy Grade](https://app.codacy.com/project/badge/Grade/2f830615baf347258558dcc2a5ab85a1)](https://app.codacy.com/gh/DEVILENMO/EndstoneMC-ARC-Core-Plugin/dashboard?utm_source=gh&utm_medium=referral&utm_content=&utm_campaign=Badge_grade)
-[![Version](https://img.shields.io/badge/version-v0.8.5-blue)](https://github.com/ARC-Minecraft/EndstoneMC-ARC-Core-Plugin)
+[![Version](https://img.shields.io/badge/version-v0.8.6-blue)](https://github.com/ARC-Minecraft/EndstoneMC-ARC-Core-Plugin)
 [![Python](https://img.shields.io/badge/python-3.13+-blue?logo=python&logoColor=white)](https://www.python.org/)
 [![EndStone API](https://img.shields.io/badge/EndStone_API-0.7+-black)](https://github.com/EndstoneMC/endstone)
 [![License](https://img.shields.io/github/license/ARC-Minecraft/EndstoneMC-ARC-Core-Plugin)](LICENSE)
@@ -19,7 +19,7 @@ EndStone ARC Core 是一个功能完整的 EndStone (Minecraft 基岩版服务�
 
 - **作者**: DEVILENMO
 - **邮箱**: DEVILENMO@gmail.com
-- **版本**: 0.8.5
+- **版本**: 0.8.6
 - **API 版本**: 0.7+
 - **推荐 Python 版本**: 3.13
 
@@ -701,7 +701,11 @@ class MyPlugin(Plugin):
 
 ## 📋 近期更新日志
 
-### v0.8.5（当前版本）
+### v0.8.6（当前版本）
+
+- ✅ **进服时长中断修复**：语言文件末尾若有空的 `PLAYER_JOIN_MESSAGE=`，会覆盖文案并使 `broadcast_message` 抛错，游戏时长/进服次数因此记不上。空文案改为跳过；加载语言时也不再用空键覆盖已有翻译
+
+### v0.8.5
 
 - ✅ **公共领地拦截生物生成修复**：原先仅取消 EndStone `Mob` 类型，模组生物常被包成普通 Actor 因而漏拦。开启 `block_actor_spawn` 后改为取消该公共领地内**除玩家外的全部实体**生成
 - ✅ **跨服玩法配置以主服为准**：远程客户端按已开启的同步类别，从同步中心拉取并覆盖对应 `core_setting.yml` 项（初始金钱、公会升级消耗、签到存款、传送/圈地价格等）。主服改配置或重载后推送；从服本地修改这些键会被主服覆盖。共享文件模式不自动同步配置

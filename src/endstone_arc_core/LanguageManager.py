@@ -28,7 +28,15 @@ class LanguageManager:
                 line = line.strip()
                 if line and "=" in line:
                     key, value = line.split("=", 1)
-                    LanguageManager.language_dict[self.language_code][key.strip()] = value.strip()
+                    key = key.strip()
+                    value = value.strip()
+                    if not key:
+                        continue
+                    existing = LanguageManager.language_dict[self.language_code].get(key, "")
+                    # Trailing auto-appended empty keys must not overwrite a real translation.
+                    if existing and not value:
+                        continue
+                    LanguageManager.language_dict[self.language_code][key] = value
 
     def GetText(self, key, lang_code=None):
         # If no language code provided, use instance's language code

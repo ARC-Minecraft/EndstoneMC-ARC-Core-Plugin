@@ -838,6 +838,18 @@ class ARCCorePlugin(Plugin):
     def _run_land_buy_for_player_verified(self, player: Player) -> None:
         self._execute_land_buy(player)
 
+    def _broadcast_text(self, text: str) -> None:
+        """Broadcast non-empty chat text. Endstone rejects empty messages."""
+        msg = str(text or "").strip()
+        if msg:
+            self.server.broadcast_message(msg)
+
+    def _send_text(self, player, text: str) -> None:
+        """Send non-empty chat text to one player."""
+        msg = str(text or "").strip()
+        if player is not None and msg:
+            player.send_message(msg)
+
     # Event handlers
     @event_handler
     def on_player_join(self, event: PlayerJoinEvent):
@@ -851,10 +863,12 @@ class ARCCorePlugin(Plugin):
             # 执行新人指令
             self._execute_newbie_commands(event.player)
         
-        self.server.broadcast_message(self.language_manager.GetText('PLAYER_JOIN_MESSAGE').format(event.player.name))
+        self._broadcast_text(
+            self.language_manager.GetText('PLAYER_JOIN_MESSAGE').format(event.player.name)
+        )
         self.player_sensitive_password_verified.pop(event.player.name, None)
         self._pending_sensitive_action_by_player.pop(event.player.name, None)
-        event.player.send_message(self.language_manager.GetText('PLAYER_JOIN_HINT'))
+        self._send_text(event.player, self.language_manager.GetText('PLAYER_JOIN_HINT'))
 
         # 登录时提示可领取的邀请奖励次数
         try:
@@ -953,7 +967,9 @@ class ARCCorePlugin(Plugin):
         except Exception:
             pass
         self._record_player_quit_playtime(event.player)
-        self.server.broadcast_message(self.language_manager.GetText('PLAYER_QUIT_MESSAGE').format(event.player.name))
+        self._broadcast_text(
+            self.language_manager.GetText('PLAYER_QUIT_MESSAGE').format(event.player.name)
+        )
         self.player_sensitive_password_verified.pop(event.player.name, None)
         self._pending_sensitive_action_by_player.pop(event.player.name, None)
 
