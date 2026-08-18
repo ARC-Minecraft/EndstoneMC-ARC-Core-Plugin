@@ -3,7 +3,7 @@
 # EndStone ARC Core Plugin / EndStone弧光核心
 
 [![Codacy Grade](https://app.codacy.com/project/badge/Grade/2f830615baf347258558dcc2a5ab85a1)](https://app.codacy.com/gh/DEVILENMO/EndstoneMC-ARC-Core-Plugin/dashboard?utm_source=gh&utm_medium=referral&utm_content=&utm_campaign=Badge_grade)
-[![Version](https://img.shields.io/badge/version-v0.8.7-blue)](https://github.com/ARC-Minecraft/EndstoneMC-ARC-Core-Plugin)
+[![Version](https://img.shields.io/badge/version-v0.8.8-blue)](https://github.com/ARC-Minecraft/EndstoneMC-ARC-Core-Plugin)
 [![Python](https://img.shields.io/badge/python-3.13+-blue?logo=python&logoColor=white)](https://www.python.org/)
 [![EndStone API](https://img.shields.io/badge/EndStone_API-0.7+-black)](https://github.com/EndstoneMC/endstone)
 [![License](https://img.shields.io/github/license/ARC-Minecraft/EndstoneMC-ARC-Core-Plugin)](LICENSE)
@@ -55,12 +55,13 @@ EndStone ARC Core 是一个功能完整的 EndStone (Minecraft 基岩版服务�
 - **免费领地格子**、**OP 标记**、**签到** 均为本服数据，不随 `PLAYER_DATABASE_PATH` / 同步中心跨服覆盖
 - **游戏时长 / 进服次数** 写在跨服表 `player_basic_info`，随同步中心或共享库跨服累计
 
-### 👁️ 天眼系统（Sky Eye，v0.7.6）
-- **用途**：可选开启的玩家行为审计日志，按自然日写入文本，便于排查与合规留痕
-- **配置**（`core_setting.yml`）：**`ENABLE_SKY_EYE`**（`True`/`False`，默认关闭）、**`SKY_EYE_MAX_RETENTION_DAYS`**（按文件名日期保留的天数，默认 **7**；更早日期的日志文件会被自动删除；**`0`** 表示不自动删除旧文件）
-- **存储路径**：**`plugins/ARCCore/sky_eye/`**（目录名对应英文 **Sky Eye**）；每日一个文件，文件名 **`YYYYMMDD.txt`**（例如 `20260511.txt`），UTF-8 追加写入
-- **记录字段**：时间、行为类型、玩家名、XUID、维度、**坐标**、**主手物品**（`物品IDx数量`，空手为 `empty`）、`detail`（如方块类型、死亡原因、实体类型、进服是否新玩家等）
-- **已挂钩行为**：进服 / 离服、方块破坏与放置、对方块交互与无方块交互、与实体交互、玩家死亡（含死因原始字符串）；关闭开关时不写盘
+### 👁️ 天眼系统（Sky Eye，v0.8.8）
+- **用途**：可选开启的玩家行为审计；写入独立 SQLite，供排查与弧光天星即时查询
+- **配置**（`core_setting.yml`）：**`ENABLE_SKY_EYE`**（`True`/`False`，默认关闭）、**`SKY_EYE_MAX_RETENTION_DAYS`**（保留天数，默认 **7**；更早记录会从库中删除；**`0`** 表示不自动删除）
+- **存储**：**`plugins/ARCCore/sky_eye/skyeye.db`**（独立库，不进主库、不走跨服同步）。升级前的按日 **`YYYYMMDD.txt`** 仍会按同一保留天数清理，新事件不再写 txt
+- **记录字段**：时间、行为、玩家名、XUID、维度、坐标、主手物品、`detail`、**是否在领地内**、领地 ID/名称/主人、攻击对象（打了谁 / 被谁打）
+- **已挂钩行为**：进服 / 离服、方块破坏与放置、对方块交互与无方块交互、与实体交互、**玩家造成的伤害（含 PvP）**、玩家死亡（含击杀者）；关闭开关时不写盘
+- **对外查询 API**（其它插件 / 天星）：`api_sky_eye_query`、`api_sky_eye_query_text`、`api_sky_eye_player_now`。天星工具：`mc_skyeye_player` / `mc_skyeye_combat` / `mc_skyeye_location`（仅 OP / QQ 管理）
 
 ### 💰 银行经济系统
 - 完整的货币管理系统，**金钱精确到分**（float 存储，两位小数）
@@ -345,9 +346,9 @@ CLEANER_INTERVAL=600                 # 清理间隔 (秒)
 # 全局爆炸拦截（默认开启）：True=取消一切爆炸事件；False=仅按领地 allow_explosion 保护
 BLOCK_ALL_EXPLOSIONS=True
 
-# 天眼系统（Sky Eye，v0.7.6）：玩家行为审计日志 plugins/ARCCore/sky_eye/YYYYMMDD.txt
+# 天眼系统（Sky Eye，v0.8.8）：独立 SQLite plugins/ARCCore/sky_eye/skyeye.db
 ENABLE_SKY_EYE=False                 # 是否启用天眼日志
-SKY_EYE_MAX_RETENTION_DAYS=7         # 按自然日保留天数，0=不自动删旧文件
+SKY_EYE_MAX_RETENTION_DAYS=7         # 按自然日保留天数，0=不自动删旧记录
 
 # 新人欢迎系统和OP设置（部分项也可在 OP 面板「经济管理」中修改）
 HIDE_OP_IN_MONEY_RANKING=True        # 金钱排行榜是否隐藏OP玩家
@@ -504,7 +505,7 @@ give {player} krep:acp45 42
 - **传送点**: 私人传送点、公共传送点坐标信息
 - **成就进度表（可选，由 arc_achievement 写入）**: **`player_achievement_stats`** — 击杀进度与完成标记；定义 JSON 在 **`plugins/ARCAchievement/achievements.json`**
 - **服务器配置**: 出生点坐标、系统设置
-- **天眼审计（v0.7.6）**：非数据库；开启后写入 **`plugins/ARCCore/sky_eye/*.txt`**（按日），见「天眼系统」
+- **天眼审计（v0.8.8）**：独立 SQLite **`plugins/ARCCore/sky_eye/skyeye.db`**，按 `SKY_EYE_MAX_RETENTION_DAYS` 滚动删除；见「天眼系统」
 
 ### 🆕 数据库自动升级系统 (v0.1.4新增)
 - **智能检测**: 自动检测数据库版本并执行必要的升级
@@ -521,7 +522,7 @@ EndStone-ARC-CORE/
 ├── src/endstone_arc_core/
 │   ├── __init__.py              # 插件初始化
 │   ├── arc_core_plugin.py       # 主插件类
-│   ├── sky_eye_log.py           # 天眼系统按日日志与滚动清理（v0.7.6+）
+│   ├── sky_eye_log.py           # 天眼独立 SQLite 与滚动清理（v0.8.8）
 │   ├── TitleSystem.py           # 头衔系统
 │   ├── LandSystem.py            # 领地系统
 │   ├── KillRewardConfig.py      # 击杀奖励配置（v0.4.0+）
@@ -701,7 +702,12 @@ class MyPlugin(Plugin):
 
 ## 📋 近期更新日志
 
-### v0.8.7（当前版本）
+### v0.8.8（当前版本）
+
+- ✅ **天眼改独立 SQLite**：事件写入 `plugins/ARCCore/sky_eye/skyeye.db`，按 `SKY_EYE_MAX_RETENTION_DAYS` 滚动删除；每条记录带领地内外、领地名/主人，并记录玩家攻击与死亡击杀者
+- ✅ **天星查询接口**：`api_sky_eye_query` / `api_sky_eye_query_text` / `api_sky_eye_player_now`；AstrBot 工具 `mc_skyeye_player`、`mc_skyeye_combat`、`mc_skyeye_location`（仅管理员）
+
+### v0.8.7
 
 - ✅ **OP 圈地冲突面板**：选区与现有领地重叠时，普通玩家仍直接拦住；OP 可进入待购面板创建「允许私人/公会覆盖」的公共领地，并默认勾选允许覆盖
 

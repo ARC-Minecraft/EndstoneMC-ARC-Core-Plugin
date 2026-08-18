@@ -42,14 +42,15 @@ from endstone_arc_core.GuildSystem import (
 from endstone_arc_core.EntityDisplayNameManager import EntityDisplayNameManager
 from endstone_arc_core.KillRewardConfig import KillRewardConfig, normalize_entity_type_id
 from endstone_arc_core.arc_error_log import append_arc_error_log, format_context_lines
-from endstone_arc_core.sky_eye_log import append_sky_eye_record, prune_sky_eye_logs
+from endstone_arc_core.sky_eye_log import SkyEyeStore, format_sky_eye_records, prune_sky_eye_logs
 from endstone_arc_core.sync_server import SyncServer
 from endstone_arc_core.sync_client import SyncClient
 from endstone_arc_core.sync_config import ALL_SHARED_SETTING_KEYS, resolve_sync_consumer_mode
 
 MAIN_PATH = 'plugins/ARCCore'
-# 天眼系统：玩家行为审计日志目录（按自然日 YYYYMMDD.txt）
+# 天眼系统：独立 SQLite + 兼容清理旧按日 txt
 SKY_EYE_LOG_DIR_NAME = 'sky_eye'
+SKY_EYE_DB_NAME = 'skyeye.db'
 # 公会浏览列表每页按钮数量（避免表单按钮过多）
 GUILD_BROWSE_PAGE_SIZE = 18
 
@@ -121,6 +122,7 @@ class ARCCorePlugin(Plugin):
         default_language_dode = self.setting_manager.GetSetting('DEFAULT_LANGUAGE_CODE')
         self.language_manager = LanguageManager(default_language_dode if default_language_dode is not None else 'ZH-CN')
         self.database_manager = DatabaseManager(Path(MAIN_PATH) / self.setting_manager.GetSetting('DATABASE_PATH'))
+        self.sky_eye_store = SkyEyeStore(Path(MAIN_PATH) / SKY_EYE_LOG_DIR_NAME / SKY_EYE_DB_NAME)
 
         # 跨服数据消费方式：远程客户端 与 共享文件路径 互斥
         self._sync_consumer_mode, self._sync_mode_conflict = resolve_sync_consumer_mode(self.setting_manager)
@@ -449,9 +451,10 @@ class ARCCorePlugin(Plugin):
         except Exception:
             pass
 
-        # 天眼：启动时若已开启则立即按保留天数清理过期日文件
+        # 天眼：启动时若已开启则立即按保留天数清理 SQLite 与旧 txt
         if self._sky_eye_setting_bool("ENABLE_SKY_EYE", True):
             try:
+                self.sky_eye_store.prune(self._sky_eye_retention_days())
                 prune_sky_eye_logs(
                     Path(MAIN_PATH) / SKY_EYE_LOG_DIR_NAME,
                     self._sky_eye_retention_days(),
@@ -545,6 +548,11 @@ class ARCCorePlugin(Plugin):
         if self.sync_server and self.sync_server.is_running():
             self.sync_server.stop()
             self.logger.info("[ARC Core] Sync server stopped.")
+        try:
+            if getattr(self, "sky_eye_store", None) is not None:
+                self.sky_eye_store.close()
+        except Exception:
+            pass
         self.logger.info(f"{ColorFormat.YELLOW}[ARC Core]Plugin disabled!")
 
     def _arc_persistent_error(
@@ -1174,6 +1182,18 @@ class ARCCorePlugin(Plugin):
         try:
             loc = event.player.location
             death_cause = self._get_death_cause(event)
+            killer_name = ""
+            killer_xuid = ""
+            killer_type = ""
+            try:
+                damage_source = getattr(event, "damage_source", None)
+                killer = getattr(damage_source, "actor", None) if damage_source is not None else None
+                killer_name, killer_xuid, killer_type = self._sky_eye_identity(killer)
+            except Exception:
+                pass
+            detail = f"cause={death_cause}" if death_cause else "cause=-"
+            if killer_name:
+                detail = f"{detail};killer={killer_name}"
             self._sky_eye_append(
                 "PlayerDeath",
                 event.player,
@@ -1181,7 +1201,10 @@ class ARCCorePlugin(Plugin):
                 float(loc.x),
                 float(loc.y),
                 float(loc.z),
-                detail=f"cause={death_cause}" if death_cause else "cause=-",
+                detail=detail,
+                target_name=killer_name,
+                target_xuid=killer_xuid,
+                target_type=killer_type,
             )
         except Exception:
             pass
@@ -1456,7 +1479,24 @@ class ARCCorePlugin(Plugin):
             return
 
         actor_location = event.actor.location
-        target_desc = getattr(event.actor, 'identifier', getattr(event.actor, 'type', 'actor'))
+        target_name, target_xuid, target_type = self._sky_eye_identity(event.actor)
+        target_desc = target_type if target_type not in ("", "player") else (
+            getattr(event.actor, "identifier", getattr(event.actor, "type", "actor"))
+        )
+        if target_name:
+            target_desc = target_name if target_type == "player" else f"{target_name}"
+        self._sky_eye_append(
+            "ActorDamage",
+            attacker,
+            get_dimension_id(actor_location.dimension),
+            float(actor_location.x),
+            float(actor_location.y),
+            float(actor_location.z),
+            detail=f"target={target_desc}",
+            target_name=target_name,
+            target_xuid=target_xuid,
+            target_type=target_type if target_type else str(target_desc),
+        )
         self._send_op_debug_message(
             attacker, 'ActorDamage', str(target_desc),
             get_dimension_id(actor_location.dimension), actor_location.x, actor_location.y, actor_location.z
@@ -1757,6 +1797,43 @@ class ARCCorePlugin(Plugin):
         text = str(item_type).strip()
         return text if text else "unknown"
 
+    def _sky_eye_identity(self, actor) -> tuple[str, str, str]:
+        if actor is None:
+            return "", "", ""
+        actor_type = str(getattr(actor, "type", "") or getattr(actor, "identifier", "") or "")
+        name = str(getattr(actor, "name", "") or "").strip()
+        xuid = str(getattr(actor, "xuid", "") or "").strip()
+        is_player = isinstance(actor, Player) or actor_type == "minecraft:player"
+        if is_player:
+            return name or "?", xuid, "player"
+        return name or actor_type or "?", xuid, actor_type or "entity"
+
+    def _sky_eye_land_snapshot(self, dimension: str, pos_x: float, pos_y: float, pos_z: float) -> dict:
+        empty = {"in_land": False, "land_id": None, "land_name": "", "land_owner": ""}
+        try:
+            land_id = self.get_land_at_pos(
+                dimension,
+                int(math.floor(float(pos_x))),
+                int(math.floor(float(pos_z))),
+                int(math.floor(float(pos_y))),
+            )
+        except Exception:
+            return empty
+        if land_id is None:
+            return empty
+        try:
+            land_name = self.get_land_name(land_id) or f"#{land_id}"
+            land_owner = self.get_land_display_owner_name(land_id) or ""
+        except Exception:
+            land_name = f"#{land_id}"
+            land_owner = ""
+        return {
+            "in_land": True,
+            "land_id": int(land_id),
+            "land_name": str(land_name),
+            "land_owner": str(land_owner),
+        }
+
     def _sky_eye_append(
         self,
         action: str,
@@ -1766,6 +1843,9 @@ class ARCCorePlugin(Plugin):
         pos_y: float,
         pos_z: float,
         detail: str = "",
+        target_name: str = "",
+        target_xuid: str = "",
+        target_type: str = "",
     ) -> None:
         if not self._sky_eye_setting_bool("ENABLE_SKY_EYE", True):
             return
@@ -1774,10 +1854,12 @@ class ARCCorePlugin(Plugin):
         try:
             player_name = getattr(player, "name", "") or "?"
             player_xuid = str(getattr(player, "xuid", "") or "")
-            hand = self._sky_eye_format_main_hand(player)
-            append_sky_eye_record(
-                MAIN_PATH,
-                SKY_EYE_LOG_DIR_NAME,
+            try:
+                hand = self._sky_eye_format_main_hand(player)
+            except Exception:
+                hand = "-"
+            land = self._sky_eye_land_snapshot(dimension or "-", pos_x, pos_y, pos_z)
+            self.sky_eye_store.append(
                 self._sky_eye_retention_days(),
                 action,
                 player_name,
@@ -1788,6 +1870,13 @@ class ARCCorePlugin(Plugin):
                 pos_z,
                 hand,
                 detail,
+                in_land=bool(land.get("in_land")),
+                land_id=land.get("land_id"),
+                land_name=str(land.get("land_name") or ""),
+                land_owner=str(land.get("land_owner") or ""),
+                target_name=target_name,
+                target_xuid=target_xuid,
+                target_type=target_type,
             )
         except Exception:
             pass
@@ -14308,6 +14397,128 @@ class ARCCorePlugin(Plugin):
             }
         except Exception:
             return empty
+
+    def api_sky_eye_query(
+        self,
+        player_name: str = "",
+        xuid: str = "",
+        action: str = "",
+        minutes: int = 30,
+        time_from: str = "",
+        time_to: str = "",
+        dimension: str = "",
+        x: Any = None,
+        y: Any = None,
+        z: Any = None,
+        radius: Any = 8,
+        combat_role: str = "",
+        in_land: Optional[bool] = None,
+        limit: int = 40,
+    ) -> list:
+        """查询天眼 SQLite。返回事件字典列表（新→旧）。ENABLE_SKY_EYE 关闭时仍可读历史。"""
+        try:
+            from endstone_arc_core.dimension_utils import normalize_dimension_id
+
+            dim = normalize_dimension_id(dimension) if str(dimension or "").strip() else ""
+            px = None if x in (None, "") else float(x)
+            py = None if y in (None, "") else float(y)
+            pz = None if z in (None, "") else float(z)
+            rad = None if radius in (None, "") else float(radius)
+            return self.sky_eye_store.query(
+                player_name=str(player_name or "").strip(),
+                player_xuid=str(xuid or "").strip(),
+                action=str(action or "").strip(),
+                minutes=int(minutes) if minutes not in (None, "") else 30,
+                time_from=str(time_from or ""),
+                time_to=str(time_to or ""),
+                dimension=dim,
+                x=px,
+                y=py,
+                z=pz,
+                radius=rad,
+                combat_role=str(combat_role or ""),
+                in_land=in_land,
+                limit=int(limit or 40),
+            )
+        except Exception:
+            return []
+
+    def api_sky_eye_query_text(self, **kwargs) -> str:
+        """天眼查询的纯文本，供弧光天星 / AstrBot 工具直接阅读。"""
+        heading = str(kwargs.pop("heading", "") or "")
+        records = self.api_sky_eye_query(**kwargs)
+        return format_sky_eye_records(records, heading=heading)
+
+    def api_sky_eye_player_now(self, player_name: str = "", xuid: str = "") -> dict:
+        """在线则返回实时坐标与是否在领地；离线则返回最近一条天眼记录。"""
+        result = {
+            "online": False,
+            "player_name": str(player_name or "").strip(),
+            "xuid": str(xuid or "").strip(),
+            "dimension": "",
+            "x": None,
+            "y": None,
+            "z": None,
+            "in_land": False,
+            "land_id": None,
+            "land_name": "",
+            "land_owner": "",
+            "source": "",
+        }
+        resolved_name = result["player_name"]
+        player = None
+        try:
+            if result["xuid"]:
+                for online in list(self.server.online_players or []):
+                    if str(getattr(online, "xuid", "") or "") == result["xuid"]:
+                        player = online
+                        break
+            if player is None and resolved_name:
+                player = self.server.get_player(resolved_name)
+                if player is None:
+                    lowered = resolved_name.lower()
+                    for online in list(self.server.online_players or []):
+                        if str(getattr(online, "name", "") or "").lower() == lowered:
+                            player = online
+                            break
+        except Exception:
+            player = None
+        if player is not None:
+            loc = getattr(player, "location", None)
+            result["online"] = True
+            result["player_name"] = str(getattr(player, "name", "") or resolved_name)
+            result["xuid"] = str(getattr(player, "xuid", "") or result["xuid"])
+            result["source"] = "online"
+            if loc is not None:
+                dim = get_dimension_id(loc.dimension) if getattr(loc, "dimension", None) is not None else ""
+                result["dimension"] = dim
+                result["x"] = float(loc.x)
+                result["y"] = float(loc.y)
+                result["z"] = float(loc.z)
+                land = self._sky_eye_land_snapshot(dim, loc.x, loc.y, loc.z)
+                result.update(land)
+            return result
+        records = self.api_sky_eye_query(
+            player_name=resolved_name, xuid=result["xuid"], minutes=24 * 60, limit=1
+        )
+        if not records:
+            result["source"] = "none"
+            return result
+        item = records[0]
+        result["player_name"] = item.get("player_name") or resolved_name
+        result["xuid"] = item.get("player_xuid") or result["xuid"]
+        result["dimension"] = item.get("dimension") or ""
+        result["x"] = item.get("x")
+        result["y"] = item.get("y")
+        result["z"] = item.get("z")
+        result["in_land"] = bool(item.get("in_land"))
+        result["land_id"] = item.get("land_id")
+        result["land_name"] = item.get("land_name") or ""
+        result["land_owner"] = item.get("land_owner") or ""
+        result["source"] = "sky_eye"
+        result["last_action"] = item.get("action")
+        result["last_ts"] = item.get("ts")
+        return result
 
     def api_get_land_info(self, land_id: int) -> dict:
         """
