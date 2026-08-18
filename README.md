@@ -3,7 +3,7 @@
 # EndStone ARC Core Plugin / EndStone弧光核心
 
 [![Codacy Grade](https://app.codacy.com/project/badge/Grade/2f830615baf347258558dcc2a5ab85a1)](https://app.codacy.com/gh/DEVILENMO/EndstoneMC-ARC-Core-Plugin/dashboard?utm_source=gh&utm_medium=referral&utm_content=&utm_campaign=Badge_grade)
-[![Version](https://img.shields.io/badge/version-v0.8.10-blue)](https://github.com/ARC-Minecraft/EndstoneMC-ARC-Core-Plugin)
+[![Version](https://img.shields.io/badge/version-v0.8.11-blue)](https://github.com/ARC-Minecraft/EndstoneMC-ARC-Core-Plugin)
 [![Python](https://img.shields.io/badge/python-3.13+-blue?logo=python&logoColor=white)](https://www.python.org/)
 [![EndStone API](https://img.shields.io/badge/EndStone_API-0.7+-black)](https://github.com/EndstoneMC/endstone)
 [![License](https://img.shields.io/github/license/ARC-Minecraft/EndstoneMC-ARC-Core-Plugin)](LICENSE)
@@ -19,7 +19,7 @@ EndStone ARC Core 是一个功能完整的 EndStone (Minecraft 基岩版服务�
 
 - **作者**: DEVILENMO
 - **邮箱**: DEVILENMO@gmail.com
-- **版本**: 0.8.10
+- **版本**: 0.8.11
 - **API 版本**: 0.7+
 - **推荐 Python 版本**: 3.13
 
@@ -190,7 +190,8 @@ EndStone ARC Core 是一个功能完整的 EndStone (Minecraft 基岩版服务�
 - 多维度出生点支持
 
 ### ⚙️ OP 管理面板（v0.4.0 整理）
-- **主菜单顺序**（自上而下）：重载配置 → **工具** → **经济管理** → 领地管理 → 传送管理 → 成就管理（需安装 `arc_achievement`）→ 签到配置 → 邀请奖励配置 → 头衔管理 → 返回
+- **主菜单顺序**（自上而下）：重载配置 → **配置文件设置** → **工具** → **经济管理** → 领地管理 → 传送管理 → 成就管理（需安装 `arc_achievement`）→ 签到配置 → 邀请奖励配置 → 头衔管理 → 返回
+- **配置文件设置（v0.8.11）** - 按分类浏览并修改 `core_setting.yml`：开关/多选用下拉框；逗号分隔列表与签到奖励池为「条目按钮 + 增加新配置」，点进单条可删除。保存后即时写入并刷新缓存（路径/同步类项建议重启）
 - **工具**：切换游戏模式、清除掉落物、记录坐标 1/2、调试模式、执行命令（`@p1`/`@p2`、留空重复上次命令）
 - **经济管理**（原「金钱管理」）：**增减在线玩家存款**；**经济参数配置** 写入 `PLAYER_INIT_MONEY_NUM`、`HIDE_OP_IN_MONEY_RANKING`、`RICHEST_TITLE_NAME`（与 `core_setting.yml` 玩家经济段一致）
 - **领地管理**：管理所有领地、管理脚下领地、重建领地区块映射；**公共领地** 详情内可 **重设公共领地范围**（与玩家重设流程一致，不扣款）（返回统一回到领地管理子菜单）
@@ -528,6 +529,8 @@ EndStone-ARC-CORE/
 ├── src/endstone_arc_core/
 │   ├── __init__.py              # 插件初始化
 │   ├── arc_core_plugin.py       # 主插件类
+│   ├── setting_catalog.py       # OP 配置文件设置目录（v0.8.11）
+│   ├── op_settings_ui.py        # OP 配置文件设置 UI（v0.8.11）
 │   ├── sky_eye_log.py           # 天眼独立 SQLite 与滚动清理（v0.8.8）
 │   ├── TitleSystem.py           # 头衔系统
 │   ├── LandSystem.py            # 领地系统
@@ -708,7 +711,11 @@ class MyPlugin(Plugin):
 
 ## 📋 近期更新日志
 
-### v0.8.10（当前版本）
+### v0.8.11（当前版本）
+
+- ✅ **OP 配置文件设置**：`core_setting.yml` 全部项可在 OP 面板按分类用 UI 修改。布尔/多选为下拉框；列表为动态按钮 +「增加新配置」，点进单条可删除
+
+### v0.8.10
 
 - ✅ **拦截生物生成：全局模式 + 领地开关**：`PUBLIC_LAND_BLOCK_ACTOR_SPAWN_MODE` 为 **False** 时各公共领地固定显示「不开启拦截」且无开关按钮；为 **blacklist** / **whitelist** 时每个领地可单独开启/关闭拦截。名单仍为 `PUBLIC_LAND_BLOCK_ACTOR_SPAWN_LIST`
 

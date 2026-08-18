@@ -12180,6 +12180,8 @@ class ARCCorePlugin(Plugin):
         )
         op_main_panel.add_button(self.language_manager.GetText('OP_PANEL_RELOAD_CONFIG_BUTTON'),
                                  on_click=self.op_reload_config)
+        op_main_panel.add_button(self.language_manager.GetText('OP_CORE_SETTINGS_BUTTON'),
+                                 on_click=self.show_op_core_settings_panel)
         op_main_panel.add_button(self.language_manager.GetText('OP_TOOLS_ENTRY'),
                                  on_click=self.show_op_tools_panel)
         op_main_panel.add_button(self.language_manager.GetText('OP_ECONOMY_MANAGE_ENTRY'),
@@ -12206,6 +12208,12 @@ class ARCCorePlugin(Plugin):
                                   on_click=self.show_main_menu)
         player.send_form(op_main_panel)
 
+    def show_op_core_settings_panel(self, player: Player):
+        """OP：在面板中浏览并修改 core_setting.yml。"""
+        if not getattr(self, "op_settings_ui", None):
+            from endstone_arc_core.op_settings_ui import OpSettingsUi
+            self.op_settings_ui = OpSettingsUi(self)
+        self.op_settings_ui.show_groups(player)
 
     def show_op_title_manage_panel(self, player: Player):
         """OP 头衔管理子菜单：头衔属性管理、创建新头衔、给全体添加、给单独玩家添加。"""
