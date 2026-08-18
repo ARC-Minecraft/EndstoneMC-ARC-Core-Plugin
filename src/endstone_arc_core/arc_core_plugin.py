@@ -1545,7 +1545,7 @@ class ARCCorePlugin(Plugin):
 
     @event_handler
     def on_actor_spawn(self, event: ActorSpawnEvent):
-        """公共领地开启 block_actor_spawn 时拦截除玩家外的全部实体生成（含模组生物）。"""
+        """公共领地按拦截模式与名单取消除玩家外的实体生成（含模组生物）。"""
         try:
             actor = event.actor
             if actor is None or isinstance(actor, Player):
@@ -1561,7 +1561,13 @@ class ARCCorePlugin(Plugin):
             if land_id is None or not self.is_public_land(land_id):
                 return
             land_info = self.get_land_info(land_id)
-            if land_info and land_info.get("block_actor_spawn", False):
+            if not land_info:
+                return
+            actor_type = getattr(actor, "type", None) or getattr(actor, "identifier", None) or ""
+            if self.land_system.should_block_public_land_actor_spawn(
+                land_info.get("block_actor_spawn_mode"),
+                actor_type,
+            ):
                 event.is_cancelled = True
         except Exception as e:
             self.logger.error(f"Handle actor spawn event error: {str(e)}")
@@ -13597,9 +13603,9 @@ class ARCCorePlugin(Plugin):
         status_lines.append('开放生物伤害: ' + (self.language_manager.GetText('LAND_ACTOR_DAMAGE_STATUS_ENABLED') if land_info.get('allow_actor_damage') else self.language_manager.GetText('LAND_ACTOR_DAMAGE_STATUS_DISABLED')))
         status_lines.append(
             self.language_manager.GetText('BLOCK_ACTOR_SPAWN_CURRENT_STATUS').format(
-                self.language_manager.GetText('BLOCK_ACTOR_SPAWN_STATUS_ENABLED')
-                if land_info.get('block_actor_spawn')
-                else self.language_manager.GetText('BLOCK_ACTOR_SPAWN_STATUS_DISABLED')
+                self._block_actor_spawn_mode_label(
+                    land_info.get('block_actor_spawn_mode')
+                )
             )
         )
         anpl_enabled = self.language_manager.GetText('ALLOW_NON_PUBLIC_LAND_STATUS_ENABLED') if land_info.get('allow_non_public_land') else self.language_manager.GetText('ALLOW_NON_PUBLIC_LAND_STATUS_DISABLED')
@@ -13640,7 +13646,7 @@ class ARCCorePlugin(Plugin):
         )
         settings_panel.add_button(
             self.language_manager.GetText('BLOCK_ACTOR_SPAWN_SETTING_BUTTON_TEXT'),
-            on_click=lambda p=player, l_id=land_id, pg=from_page: self.show_op_public_land_toggle_panel(p, l_id, 'block_actor_spawn', pg)
+            on_click=lambda p=player, l_id=land_id, pg=from_page: self.show_op_public_land_block_actor_spawn_panel(p, l_id, pg)
         )
         settings_panel.add_button(
             self.language_manager.GetText('ALLOW_NON_PUBLIC_LAND_SETTING_BUTTON_TEXT'),
@@ -13748,6 +13754,88 @@ class ARCCorePlugin(Plugin):
                 self.language_manager.GetText("PUBLIC_LAND_PRIORITY_FAILED")
             )
         self.show_op_public_land_settings_panel(player, land_id, from_page)
+
+    def _block_actor_spawn_mode_label(self, mode) -> str:
+        mode = LandSystem.clamp_block_actor_spawn_mode(mode)
+        key = {
+            LandSystem.BLOCK_ACTOR_SPAWN_MODE_OFF: "BLOCK_ACTOR_SPAWN_MODE_OFF",
+            LandSystem.BLOCK_ACTOR_SPAWN_MODE_BLACKLIST: "BLOCK_ACTOR_SPAWN_MODE_BLACKLIST",
+            LandSystem.BLOCK_ACTOR_SPAWN_MODE_WHITELIST: "BLOCK_ACTOR_SPAWN_MODE_WHITELIST",
+        }[mode]
+        return self.language_manager.GetText(key)
+
+    def show_op_public_land_block_actor_spawn_panel(
+        self, player: Player, land_id: int, from_page: int
+    ):
+        """OP 修改公共领地拦截生物生成模式面板。"""
+        land_info = self.get_land_info(land_id)
+        if not land_info or not self.is_public_land(land_id):
+            self.show_op_all_lands_panel(player, from_page)
+            return
+        current = LandSystem.clamp_block_actor_spawn_mode(
+            land_info.get("block_actor_spawn_mode")
+        )
+        content = (
+            self.language_manager.GetText("BLOCK_ACTOR_SPAWN_CURRENT_STATUS").format(
+                self._block_actor_spawn_mode_label(current)
+            )
+            + "\n"
+            + self.language_manager.GetText("BLOCK_ACTOR_SPAWN_LIST_HINT")
+        )
+        panel = ActionForm(
+            title=self.language_manager.GetText("BLOCK_ACTOR_SPAWN_SETTING_TITLE"),
+            content=content,
+            on_close=None,
+        )
+        for mode in (
+            LandSystem.BLOCK_ACTOR_SPAWN_MODE_OFF,
+            LandSystem.BLOCK_ACTOR_SPAWN_MODE_BLACKLIST,
+            LandSystem.BLOCK_ACTOR_SPAWN_MODE_WHITELIST,
+        ):
+            btn = self._block_actor_spawn_mode_label(mode)
+            if mode == current:
+                btn = self.language_manager.GetText(
+                    "BLOCK_ACTOR_SPAWN_MODE_OPTION_CURRENT"
+                ).format(btn)
+            panel.add_button(
+                btn,
+                on_click=lambda p=player, l_id=land_id, md=mode, pg=from_page: self.op_set_public_land_block_actor_spawn_mode(
+                    p, l_id, md, pg
+                ),
+            )
+        panel.add_button(
+            self.language_manager.GetText("RETURN_BUTTON_TEXT"),
+            on_click=lambda p=player, l_id=land_id, pg=from_page: self.show_op_public_land_settings_panel(
+                p, l_id, pg
+            ),
+        )
+        player.send_form(panel)
+
+    def op_set_public_land_block_actor_spawn_mode(
+        self, player: Player, land_id: int, mode: str, from_page: int
+    ):
+        """OP 设置公共领地拦截生物生成模式。"""
+        land_info = self.get_land_info(land_id)
+        if not land_info or not self.is_public_land(land_id):
+            player.send_message(self.language_manager.GetText("BLOCK_ACTOR_SPAWN_FAILED"))
+            self.show_op_public_land_settings_panel(player, land_id, from_page)
+            return
+        new_mode = LandSystem.clamp_block_actor_spawn_mode(mode)
+        old_mode = LandSystem.clamp_block_actor_spawn_mode(
+            land_info.get("block_actor_spawn_mode")
+        )
+        if new_mode == old_mode:
+            self.show_op_public_land_settings_panel(player, land_id, from_page)
+            return
+        if self.land_system.set_land_block_actor_spawn_mode(land_id, new_mode):
+            player.send_message(
+                self.language_manager.GetText("BLOCK_ACTOR_SPAWN_UPDATED").format(
+                    land_id, self._block_actor_spawn_mode_label(new_mode)
+                )
+            )
+        else:
+            player.send_message(self.language_manager.GetText("BLOCK_ACTOR_SPAWN_FAILED"))
+        self.show_op_public_land_settings_panel(player, land_id, from_page)
     
     def show_op_public_land_toggle_panel(self, player: Player, land_id: int, setting_key: str, from_page: int):
         """OP 公共领地单项设置切换面板"""
@@ -13779,9 +13867,6 @@ class ARCCorePlugin(Plugin):
         elif setting_key == 'allow_non_public_land':
             status_text = self.language_manager.GetText('ALLOW_NON_PUBLIC_LAND_STATUS_ENABLED') if current else self.language_manager.GetText('ALLOW_NON_PUBLIC_LAND_STATUS_DISABLED')
             title = self.language_manager.GetText('ALLOW_NON_PUBLIC_LAND_SETTING_BUTTON_TEXT')
-        elif setting_key == 'block_actor_spawn':
-            status_text = self.language_manager.GetText('BLOCK_ACTOR_SPAWN_STATUS_ENABLED') if current else self.language_manager.GetText('BLOCK_ACTOR_SPAWN_STATUS_DISABLED')
-            title = self.language_manager.GetText('BLOCK_ACTOR_SPAWN_SETTING_TITLE')
         else:  # allow_actor_damage
             status_text = self.language_manager.GetText('LAND_ACTOR_DAMAGE_STATUS_ENABLED') if current else self.language_manager.GetText('LAND_ACTOR_DAMAGE_STATUS_DISABLED')
             title = self.language_manager.GetText('LAND_ACTOR_DAMAGE_SETTING_TITLE')
@@ -13797,7 +13882,6 @@ class ARCCorePlugin(Plugin):
             'allow_actor_interaction': ('LAND_ACTOR_INTERACTION_TOGGLE_ENABLE_BUTTON', 'LAND_ACTOR_INTERACTION_TOGGLE_DISABLE_BUTTON'),
             'allow_frame': ('LAND_FRAME_TOGGLE_ENABLE_BUTTON', 'LAND_FRAME_TOGGLE_DISABLE_BUTTON'),
             'allow_actor_damage': ('LAND_ACTOR_DAMAGE_TOGGLE_ENABLE_BUTTON', 'LAND_ACTOR_DAMAGE_TOGGLE_DISABLE_BUTTON'),
-            'block_actor_spawn': ('BLOCK_ACTOR_SPAWN_TOGGLE_ENABLE_BUTTON', 'BLOCK_ACTOR_SPAWN_TOGGLE_DISABLE_BUTTON'),
             'allow_non_public_land': ('ALLOW_NON_PUBLIC_LAND_TOGGLE_ENABLE_BUTTON', 'ALLOW_NON_PUBLIC_LAND_TOGGLE_DISABLE_BUTTON'),
         }[setting_key]
         btn_text = self.language_manager.GetText(enable_key[0]) if not current else self.language_manager.GetText(enable_key[1])
@@ -13816,7 +13900,6 @@ class ARCCorePlugin(Plugin):
             'allow_actor_interaction': self.land_system.set_land_allow_actor_interaction,
             'allow_frame': self.land_system.set_land_allow_frame,
             'allow_actor_damage': self.land_system.set_land_allow_actor_damage,
-            'block_actor_spawn': self.land_system.set_land_block_actor_spawn,
             'allow_non_public_land': self.land_system.set_land_allow_non_public_land,
         }
         msg_map = {
@@ -13826,7 +13909,6 @@ class ARCCorePlugin(Plugin):
             'allow_actor_interaction': ('LAND_ACTOR_INTERACTION_SETTING_UPDATED_ENABLE', 'LAND_ACTOR_INTERACTION_SETTING_UPDATED_DISABLE', 'LAND_ACTOR_INTERACTION_SETTING_FAILED'),
             'allow_frame': ('LAND_FRAME_SETTING_UPDATED_ENABLE', 'LAND_FRAME_SETTING_UPDATED_DISABLE', 'LAND_FRAME_SETTING_FAILED'),
             'allow_actor_damage': ('LAND_ACTOR_DAMAGE_SETTING_UPDATED_ENABLE', 'LAND_ACTOR_DAMAGE_SETTING_UPDATED_DISABLE', 'LAND_ACTOR_DAMAGE_SETTING_FAILED'),
-            'block_actor_spawn': ('BLOCK_ACTOR_SPAWN_UPDATED_ENABLE', 'BLOCK_ACTOR_SPAWN_UPDATED_DISABLE', 'BLOCK_ACTOR_SPAWN_FAILED'),
             'allow_non_public_land': ('ALLOW_NON_PUBLIC_LAND_UPDATED_ENABLE', 'ALLOW_NON_PUBLIC_LAND_UPDATED_DISABLE', 'ALLOW_NON_PUBLIC_LAND_FAILED'),
         }
         msg_enable, msg_disable, msg_fail = msg_map[setting_key]
@@ -14541,7 +14623,8 @@ class ARCCorePlugin(Plugin):
             'for_sale': 是否上架出售（bool，私人领地）,
             'sale_price': 上架价格（float，未上架为 0）,
             'public_priority': 公共领地优先级 1/2/3（3 最高；非公共亦可能有默认值）,
-            'block_actor_spawn': 是否拦截生物生成（公共领地设置）,
+            'block_actor_spawn_mode': 拦截生物生成模式（off / blacklist / whitelist，默认 off）,
+            'block_actor_spawn': 模式非 off 时为 True（兼容旧字段）,
             ... 其它 allow_* 开关
         } 不存在则返回空字典
         """

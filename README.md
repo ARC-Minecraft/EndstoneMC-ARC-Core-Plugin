@@ -3,7 +3,7 @@
 # EndStone ARC Core Plugin / EndStone弧光核心
 
 [![Codacy Grade](https://app.codacy.com/project/badge/Grade/2f830615baf347258558dcc2a5ab85a1)](https://app.codacy.com/gh/DEVILENMO/EndstoneMC-ARC-Core-Plugin/dashboard?utm_source=gh&utm_medium=referral&utm_content=&utm_campaign=Badge_grade)
-[![Version](https://img.shields.io/badge/version-v0.8.8-blue)](https://github.com/ARC-Minecraft/EndstoneMC-ARC-Core-Plugin)
+[![Version](https://img.shields.io/badge/version-v0.8.9-blue)](https://github.com/ARC-Minecraft/EndstoneMC-ARC-Core-Plugin)
 [![Python](https://img.shields.io/badge/python-3.13+-blue?logo=python&logoColor=white)](https://www.python.org/)
 [![EndStone API](https://img.shields.io/badge/EndStone_API-0.7+-black)](https://github.com/EndstoneMC/endstone)
 [![License](https://img.shields.io/github/license/ARC-Minecraft/EndstoneMC-ARC-Core-Plugin)](LICENSE)
@@ -19,7 +19,7 @@ EndStone ARC Core 是一个功能完整的 EndStone (Minecraft 基岩版服务�
 
 - **作者**: DEVILENMO
 - **邮箱**: DEVILENMO@gmail.com
-- **版本**: 0.8.7
+- **版本**: 0.8.9
 - **API 版本**: 0.7+
 - **推荐 Python 版本**: 3.13
 
@@ -82,7 +82,7 @@ EndStone ARC Core 是一个功能完整的 EndStone (Minecraft 基岩版服务�
 - **子领地系统** - 领地主人可在领地内创建子领地并授权他人；子领地为三维、不可重叠、不可超出父领地；交互时先判子领地权限再判父领地
 - **公共领地「允许圈私人领地」** - 公共领地可开启后，玩家可在其内购买私人领地；同一位置优先按私人领地权限判定
 - **公共领地三级优先级** - 字段 `public_priority`（1/2/3，**3 最高**，默认 1）。高优先级公共可覆盖低优先级公共；同级不可重叠。生效顺序：**私人/公会 > 公共(3>2>1)**；私人子领地权限仍先于父私人领地。创建公共领地时 OP 选择等级；OP 公共领地设置中可修改（若与同级/更高公共冲突则拒绝）
-- **公共领地「拦截生物生成」** - OP 公共领地设置中可开启；开启后通过 `ActorSpawnEvent` 取消该公共领地内**除玩家外的全部实体**生成（含模组生物，不限原版 `Mob`）；数据库字段 `block_actor_spawn`，**默认关闭**
+- **公共领地「拦截生物生成」** - OP 公共领地设置中可选模式（默认 **Off**）：**Off** 不拦截；**黑名单** 只拦截配置名单上的实体；**白名单** 名单上的不拦截、其余拦截。配置 **`PUBLIC_LAND_BLOCK_ACTOR_SPAWN_LIST`**（逗号分隔实体 ID，如 `minecraft:zombie`）。通过 `ActorSpawnEvent` 取消该公共领地内**除玩家外**的匹配实体生成（含模组生物）。数据库字段 `block_actor_spawn_mode`；旧开关 `block_actor_spawn=1` 启动时迁移为白名单（名单为空则仍拦截全部）
 - **领地移交功能** - 可将领地转移给其他玩家
 - **私人领地上架出售（v0.7.4）** - 领地详情中 **「出售领地（上架/改价/下架）」**：主人可设置正数标价并上架；其他玩家 **进入** 该私人领地时（非主人）在原有进入提示与边界粒子后，会收到 **购买表单**（领地名、标价、当前主人、购买/关闭）。购买时扣买家款、过户给买家、`owner_paid_money` 记为成交价，**清空授权列表**；卖家在线会收到成交通知。数据库 `lands` 表新增 **`for_sale`**、**`sale_price`**（旧库启动时自动 `ALTER`）。**公共领地 / 公会领地** 不适用此流程；若向卖家入账失败会尝试 **回滚过户并退款**（极端失败会提示联系管理员）
 - **私人领地成交增值税（v0.7.6 文档化）** - 配置 **`LAND_SALE_VAT_RATE`**（`core_setting.yml`，默认 `0.1` 即 10%，取值 **0～1**；**`0` 关闭**）。成交时 **买家按标价全额付款**；**卖家实收** = 成交价 − 增值税额。**税基（溢价）** = `max(0, 成交价 − 过户前 owner_paid_money)`；**增值税额** = 税基 × 税率（金额按分四舍五入）。平价或低于买入价成交不产生增值税。卖家在线提示中含成交价、增值税、实收（语言键 **`LAND_SALE_BUY_SUCCESS_SELLER`** 等，见 `ZH-CN.txt`）。**OP 重载配置** 后刷新税率
@@ -361,6 +361,10 @@ DEFAULT_FREE_LAND_BLOCKS=100         # 新玩家默认免费领地格子数
 
 # 公共领地白名单保护生物 (v0.2.1，逗号分隔)
 PUBLIC_LAND_PROTECTED_ENTITIES=minecraft:villager,minecraft:iron_golem,minecraft:snow_golem
+
+# 公共领地拦截生物生成名单 (v0.8.9，逗号分隔实体 ID)
+# 领地模式为白名单：名单上的不拦截；黑名单：只拦截名单上的；Off：不拦截
+PUBLIC_LAND_BLOCK_ACTOR_SPAWN_LIST=
 
 # 头衔系统 (v0.3.0)：逗号分隔为默认头衔；OP_TITLE 仅一个，仅 OP 拥有。对应头衔的稀有度、介绍、解锁奖励可在 OP 面板→头衔管理→头衔属性管理中编辑，也可创建新头衔
 DEFAULT_TITLE=创始玩家, 核心成员, ARC Player
@@ -654,7 +658,7 @@ class MyPlugin(Plugin):
 | `api_if_position_in_land` | `dimension`，`position=(x,y,z)` | `int \| None`：生效主领地 `land_id`；不在领地为 `None` |
 | `api_resolve_land_at_position` | `dimension`，`position` | `dict`：`dimension`，`land_id`，`sub_land_id`，`is_public`，`public_priority`，`owner_xuid`，`covering_land_ids` |
 | `api_list_lands_at_position` | `dimension`，`position` | `list[dict]`：覆盖该点的全部主领地（含 `land_id`），按生效优先级降序 |
-| `api_get_land_info` | `land_id` | `dict`：领地详情；不存在为 `{}`。常见键：`land_name`，`dimension`，`min_/max_x/y/z`，`tp_x/y/z`，`shared_users`，`owner_xuid`，`for_sale`，`sale_price`，各类开关，`public_priority`，`owner_paid_money` |
+| `api_get_land_info` | `land_id` | `dict`：领地详情；不存在为 `{}`。常见键：`land_name`，`dimension`，`min_/max_x/y/z`，`tp_x/y/z`，`shared_users`，`owner_xuid`，`for_sale`，`sale_price`，各类开关，`public_priority`，`block_actor_spawn_mode`（`off`/`blacklist`/`whitelist`），`block_actor_spawn`（兼容：非 off 为 True），`owner_paid_money` |
 | `api_get_player_lands` | `player_name=""`，`xuid=""` | `list[dict]`：该玩家私人领地（含 `land_id`） |
 | `api_get_guild_lands` | `guild_id` | `list[dict]`：该公会领地（含 `land_id`） |
 | `api_check_land_access` | `dimension`，`position`，`player_name=""`，`xuid=""`，`action="build"` | `dict`：`allowed`，`land_id`，`sub_land_id`，`is_public`，`wilderness`，`action`。静默检查，不发聊天。`action` 为 `build` 或 `interact` |
@@ -702,7 +706,11 @@ class MyPlugin(Plugin):
 
 ## 📋 近期更新日志
 
-### v0.8.8（当前版本）
+### v0.8.9（当前版本）
+
+- ✅ **公共领地拦截生物生成改为模式**：OP 设置由开关改为 **Off / 黑名单 / 白名单**（默认 Off）。配置 **`PUBLIC_LAND_BLOCK_ACTOR_SPAWN_LIST`**（逗号分隔实体 ID）：白名单=名单上的不拦截，黑名单=只拦截名单上的。旧库 `block_actor_spawn=1` 迁移为白名单（名单为空则仍拦截全部）
+
+### v0.8.8
 
 - ✅ **天眼改独立 SQLite**：事件写入 `plugins/ARCCore/sky_eye/skyeye.db`，按 `SKY_EYE_MAX_RETENTION_DAYS` 滚动删除；每条记录带领地内外、领地名/主人，并记录玩家攻击与死亡击杀者
 - ✅ **天星查询接口**：`api_sky_eye_query` / `api_sky_eye_query_text` / `api_sky_eye_player_now`；AstrBot 工具 `mc_skyeye_player`、`mc_skyeye_combat`、`mc_skyeye_location`（仅管理员）

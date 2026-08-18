@@ -68,6 +68,8 @@ LAND_ONLY_PLACE_BLOCKS=minecraft:beacon,minecraft:spawner,lfg_ff:structure_place
 DISABLED_BLOCKS=minecraft:hopper,minecraft:observer
 # 公共领地内白名单保护生物（逗号分隔，在此列表中的生物在公共领地内不可被伤害）
 PUBLIC_LAND_PROTECTED_ENTITIES=minecraft:villager_v2,minecraft:iron_golem,minecraft:snow_golem
+# 公共领地拦截生物生成名单（逗号分隔实体 ID）。领地模式为白名单时名单上的不拦截；黑名单时只拦截名单上的；Off 不拦截
+PUBLIC_LAND_BLOCK_ACTOR_SPAWN_LIST=
 # 公共领地禁止交互的方块（开启了允许方块交互前提下）
 PUBLIC_LAND_INTERACT_BLOCK_BLACKLIST=minecraft:frame,minecraft:glow_frame,minecraft:oak_shelf,minecraft:spruce_shelf,minecraft:birch_shelf,minecraft:jungle_shelf,minecraft:acacia_shelf,minecraft:dark_oak_shelf,minecraft:mangrove_shelf,minecraft:cherry_shelf,minecraft:pale_oak_shelf,minecraft:bamboo_shelf,minecraft:crimson_shelf,minecraft:warped_shelf
 

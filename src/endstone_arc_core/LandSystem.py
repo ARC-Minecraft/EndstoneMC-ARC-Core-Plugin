@@ -22,6 +22,18 @@ class LandSystem:
     PUBLIC_PRIORITY_MAX = 3
     PUBLIC_PRIORITY_DEFAULT = 1
 
+    # 公共领地拦截生物生成模式：off / blacklist / whitelist（默认 off）
+    BLOCK_ACTOR_SPAWN_MODE_OFF = "off"
+    BLOCK_ACTOR_SPAWN_MODE_BLACKLIST = "blacklist"
+    BLOCK_ACTOR_SPAWN_MODE_WHITELIST = "whitelist"
+    BLOCK_ACTOR_SPAWN_MODES = frozenset(
+        {
+            BLOCK_ACTOR_SPAWN_MODE_OFF,
+            BLOCK_ACTOR_SPAWN_MODE_BLACKLIST,
+            BLOCK_ACTOR_SPAWN_MODE_WHITELIST,
+        }
+    )
+
     # 未开放展示框（allow_frame）时禁止交互/破坏的方块；配置项留空则使用此集合
     _DEFAULT_PUBLIC_LAND_INTERACT_BLOCK_BLACKLIST = frozenset({
         "minecraft:frame",
@@ -59,6 +71,29 @@ class LandSystem:
         if p > LandSystem.PUBLIC_PRIORITY_MAX:
             return LandSystem.PUBLIC_PRIORITY_MAX
         return p
+
+    @staticmethod
+    def clamp_block_actor_spawn_mode(value: Any) -> str:
+        """拦截生物生成模式：off / blacklist / whitelist；非法值按 off。"""
+        s = str(value or "").strip().lower()
+        if s in LandSystem.BLOCK_ACTOR_SPAWN_MODES:
+            return s
+        if s in ("0", "false", "disabled", "no"):
+            return LandSystem.BLOCK_ACTOR_SPAWN_MODE_OFF
+        if s in ("1", "black", "blocklist"):
+            return LandSystem.BLOCK_ACTOR_SPAWN_MODE_BLACKLIST
+        if s in ("2", "white", "allowlist", "true", "enabled", "yes"):
+            return LandSystem.BLOCK_ACTOR_SPAWN_MODE_WHITELIST
+        return LandSystem.BLOCK_ACTOR_SPAWN_MODE_OFF
+
+    @staticmethod
+    def normalize_actor_type_id(raw: Any) -> str:
+        s = str(raw or "").lower().strip()
+        if not s:
+            return ""
+        if ":" not in s:
+            s = "minecraft:" + s
+        return s
 
     @staticmethod
     def land_owner_key_player(xuid: Any) -> str:
@@ -115,6 +150,7 @@ class LandSystem:
         self._persistent_error_cb: Optional[
             Callable[[str, str, Optional[BaseException]], None]
         ] = None
+        self._block_actor_spawn_list: frozenset = frozenset()
         self._load_config()
 
     def set_persistent_error_callback(
@@ -136,6 +172,9 @@ class LandSystem:
         self.land_price = self._parse_int("LAND_PRICE", 100)
         self.land_sell_refund_coefficient = self._parse_float("LAND_SELL_REFUND_COEFFICIENT", 0.9)
         self.land_min_size = self._parse_int("LAND_MIN_SIZE", 5)
+        self._block_actor_spawn_list = self._parse_actor_id_set(
+            "PUBLIC_LAND_BLOCK_ACTOR_SPAWN_LIST"
+        )
 
     def reload_config(self):
         self._load_config()
@@ -154,6 +193,17 @@ class LandSystem:
             return float(self.setting_manager.GetSetting(key))
         except (ValueError, TypeError):
             return default
+
+    def _parse_actor_id_set(self, key: str) -> frozenset:
+        raw = self.setting_manager.GetSetting(key)
+        if not raw or not str(raw).strip():
+            return frozenset()
+        parsed = set()
+        for part in str(raw).split(","):
+            nid = self.normalize_actor_type_id(part)
+            if nid:
+                parsed.add(nid)
+        return frozenset(parsed)
 
     def _log(self, level: str, message: str):
         if self.logger:
@@ -316,6 +366,7 @@ class LandSystem:
                 "allow_non_public_land": "INTEGER DEFAULT 0",
                 "allow_guild_member_interact": "INTEGER DEFAULT 0",
                 "block_actor_spawn": "INTEGER DEFAULT 0",
+                "block_actor_spawn_mode": "TEXT DEFAULT 'off'",
                 "public_priority": "INTEGER DEFAULT 1",
                 "for_sale": "INTEGER DEFAULT 0",
                 "sale_price": "REAL DEFAULT 0",
@@ -388,6 +439,17 @@ class LandSystem:
             _add_col("allow_non_public_land", "INTEGER DEFAULT 0")
             _add_col("allow_guild_member_interact", "INTEGER DEFAULT 0")
             _add_col("block_actor_spawn", "INTEGER DEFAULT 0")
+            added_spawn_mode = not self._column_exists("lands", "block_actor_spawn_mode")
+            _add_col("block_actor_spawn_mode", "TEXT DEFAULT 'off'")
+            if added_spawn_mode:
+                # 旧开关 1=拦截全部 → 白名单（名单为空时仍拦截全部）
+                try:
+                    self.db.execute(
+                        "UPDATE lands SET block_actor_spawn_mode = 'whitelist' "
+                        "WHERE COALESCE(block_actor_spawn, 0) != 0"
+                    )
+                except Exception as e:
+                    print(f"[ARC Core]Migrate block_actor_spawn_mode error: {str(e)}")
             _add_col("public_priority", "INTEGER DEFAULT 1")
             _add_col("for_sale", "INTEGER DEFAULT 0")
             _add_col("sale_price", "REAL DEFAULT 0")
@@ -822,9 +884,21 @@ class LandSystem:
     # ─── 领地属性读写 ────────────────────────────────────────────────────────
 
     @staticmethod
+    def _parse_block_actor_spawn_mode(row) -> str:
+        raw_mode = row.get("block_actor_spawn_mode")
+        mode = LandSystem.clamp_block_actor_spawn_mode(raw_mode)
+        # 新列默认 off 但旧开关仍为 1：视为白名单（名单为空则仍全拦）
+        if mode == LandSystem.BLOCK_ACTOR_SPAWN_MODE_OFF and bool(
+            row.get("block_actor_spawn", 0)
+        ):
+            return LandSystem.BLOCK_ACTOR_SPAWN_MODE_WHITELIST
+        return mode
+
+    @staticmethod
     def _parse_land_row(row) -> dict:
         if not row:
             return {}
+        spawn_mode = LandSystem._parse_block_actor_spawn_mode(row)
         return {
             "land_name": row["land_name"],
             "dimension": row["dimension"],
@@ -848,7 +922,8 @@ class LandSystem:
             "allow_guild_member_interact": bool(
                 row.get("allow_guild_member_interact", 0)
             ),
-            "block_actor_spawn": bool(row.get("block_actor_spawn", 0)),
+            "block_actor_spawn_mode": spawn_mode,
+            "block_actor_spawn": spawn_mode != LandSystem.BLOCK_ACTOR_SPAWN_MODE_OFF,
             "public_priority": LandSystem.clamp_public_priority(
                 row.get("public_priority", 1)
             ),
@@ -1149,7 +1224,6 @@ class LandSystem:
             "allow_frame",
             "allow_guild_member_interact",
             "allow_non_public_land",
-            "block_actor_spawn",
         }
     )
 
@@ -1164,7 +1238,6 @@ class LandSystem:
             "allow_frame": "UPDATE lands SET allow_frame = ? WHERE land_id = ?",
             "allow_guild_member_interact": "UPDATE lands SET allow_guild_member_interact = ? WHERE land_id = ?",
             "allow_non_public_land": "UPDATE lands SET allow_non_public_land = ? WHERE land_id = ?",
-            "block_actor_spawn": "UPDATE lands SET block_actor_spawn = ? WHERE land_id = ?",
         }[col]
         try:
             return bool(self.db.execute(sql, (1 if value else 0, land_id)))
@@ -1194,9 +1267,44 @@ class LandSystem:
     def set_land_allow_non_public_land(self, land_id: int, allow: bool) -> bool:
         return self._set_land_flag(land_id, "allow_non_public_land", allow)
 
+    def set_land_block_actor_spawn_mode(self, land_id: int, mode: str) -> bool:
+        """设置公共领地拦截生物生成模式：off / blacklist / whitelist。"""
+        mode = self.clamp_block_actor_spawn_mode(mode)
+        flag = 0 if mode == self.BLOCK_ACTOR_SPAWN_MODE_OFF else 1
+        try:
+            return bool(
+                self.db.execute(
+                    "UPDATE lands SET block_actor_spawn_mode = ?, block_actor_spawn = ? "
+                    "WHERE land_id = ?",
+                    (mode, flag, land_id),
+                )
+            )
+        except Exception as e:
+            self._log("error", f"Set land block_actor_spawn_mode error: {str(e)}")
+            return False
+
     def set_land_block_actor_spawn(self, land_id: int, block: bool) -> bool:
-        """开启后，公共领地内取消除玩家外的全部实体生成。"""
-        return self._set_land_flag(land_id, "block_actor_spawn", block)
+        """兼容旧开关：True=白名单（名单为空则全拦），False=关闭。"""
+        mode = (
+            self.BLOCK_ACTOR_SPAWN_MODE_WHITELIST
+            if block
+            else self.BLOCK_ACTOR_SPAWN_MODE_OFF
+        )
+        return self.set_land_block_actor_spawn_mode(land_id, mode)
+
+    def get_block_actor_spawn_list(self) -> Set[str]:
+        return set(self._block_actor_spawn_list)
+
+    def should_block_public_land_actor_spawn(self, mode: Any, actor_type_id: Any) -> bool:
+        """按模式与拦截名单判断是否取消该实体生成。玩家应在调用前排除。"""
+        mode = self.clamp_block_actor_spawn_mode(mode)
+        if mode == self.BLOCK_ACTOR_SPAWN_MODE_OFF:
+            return False
+        actor_id = self.normalize_actor_type_id(actor_type_id)
+        listed = bool(actor_id) and actor_id in self._block_actor_spawn_list
+        if mode == self.BLOCK_ACTOR_SPAWN_MODE_WHITELIST:
+            return not listed
+        return listed
 
     # ─── 领地授权 ─────────────────────────────────────────────────────────────
 
