@@ -3,7 +3,7 @@
 # EndStone ARC Core Plugin / EndStone弧光核心
 
 [![Codacy Grade](https://app.codacy.com/project/badge/Grade/2f830615baf347258558dcc2a5ab85a1)](https://app.codacy.com/gh/DEVILENMO/EndstoneMC-ARC-Core-Plugin/dashboard?utm_source=gh&utm_medium=referral&utm_content=&utm_campaign=Badge_grade)
-[![Version](https://img.shields.io/badge/version-v0.8.11-blue)](https://github.com/ARC-Minecraft/EndstoneMC-ARC-Core-Plugin)
+[![Version](https://img.shields.io/badge/version-v0.8.12-blue)](https://github.com/ARC-Minecraft/EndstoneMC-ARC-Core-Plugin)
 [![Python](https://img.shields.io/badge/python-3.13+-blue?logo=python&logoColor=white)](https://www.python.org/)
 [![EndStone API](https://img.shields.io/badge/EndStone_API-0.7+-black)](https://github.com/EndstoneMC/endstone)
 [![License](https://img.shields.io/github/license/ARC-Minecraft/EndstoneMC-ARC-Core-Plugin)](LICENSE)
@@ -19,7 +19,7 @@ EndStone ARC Core 是一个功能完整的 EndStone (Minecraft 基岩版服务�
 
 - **作者**: DEVILENMO
 - **邮箱**: DEVILENMO@gmail.com
-- **版本**: 0.8.11
+- **版本**: 0.8.12
 - **API 版本**: 0.7+
 - **推荐 Python 版本**: 3.13
 
@@ -711,7 +711,12 @@ class MyPlugin(Plugin):
 
 ## 📋 近期更新日志
 
-### v0.8.11（当前版本）
+### v0.8.12（当前版本）
+
+- ✅ **天眼扩展**：银行变动、领地创建/删除、弧光传送、按钮商店（由 arc_button_shop 调用）、丢弃/拾取/切换主手/消耗物品、玩家传送事件
+- ✅ **公开 API**：`api_sky_eye_log()` 供其他插件写入天眼
+
+### v0.8.11
 
 - ✅ **OP 配置文件设置**：`core_setting.yml` 全部项可在 OP 面板按分类用 UI 修改。布尔/多选为下拉框；列表为动态按钮 +「增加新配置」，点进单条可删除
 

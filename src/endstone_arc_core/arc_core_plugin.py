@@ -12,7 +12,7 @@ from typing import Any, Callable, Dict, List, Optional, Set
 from endstone import ColorFormat, Player, GameMode
 from endstone.form import ActionForm, TextInput, ModalForm, Label, Dropdown
 from endstone.command import Command, CommandSender
-from endstone.event import event_handler, PlayerJoinEvent, PlayerQuitEvent, PlayerRespawnEvent, BlockBreakEvent, BlockPlaceEvent, PlayerDeathEvent, PlayerInteractEvent, ActorExplodeEvent, PlayerInteractActorEvent, ActorDamageEvent, ActorDeathEvent, ActorSpawnEvent, PlayerChatEvent 
+from endstone.event import event_handler, PlayerJoinEvent, PlayerQuitEvent, PlayerRespawnEvent, BlockBreakEvent, BlockPlaceEvent, PlayerDeathEvent, PlayerInteractEvent, ActorExplodeEvent, PlayerInteractActorEvent, ActorDamageEvent, ActorDeathEvent, ActorSpawnEvent, PlayerChatEvent, PlayerDropItemEvent, PlayerPickupItemEvent, PlayerItemHeldEvent, PlayerItemConsumeEvent, PlayerTeleportEvent
 from endstone.plugin import Plugin
 
 from endstone_arc_core.DatabaseManager import DatabaseManager
@@ -1609,6 +1609,105 @@ class ARCCorePlugin(Plugin):
         except Exception:
             return
 
+        except Exception:
+            return
+
+    @event_handler
+    def on_player_drop_item(self, event: PlayerDropItemEvent):
+        try:
+            player = event.player
+            if player is None:
+                return
+            item_text = self._sky_eye_format_item_stack(getattr(event, "item", None))
+            dim, x, y, z = self._sky_eye_player_location(player)
+            self._sky_eye_append("ItemDrop", player, dim, x, y, z, detail=f"item={item_text}")
+        except Exception:
+            pass
+
+    @event_handler
+    def on_player_pickup_item(self, event: PlayerPickupItemEvent):
+        try:
+            player = event.player
+            if player is None:
+                return
+            item_obj = getattr(event, "item", None)
+            stack = getattr(item_obj, "item_stack", None) if item_obj is not None else None
+            item_text = self._sky_eye_format_item_stack(stack)
+            if item_text in ("empty", "unknown") and item_obj is not None:
+                item_text = str(getattr(item_obj, "type", "") or item_obj)
+            dim, x, y, z = self._sky_eye_player_location(player)
+            self._sky_eye_append("ItemPickup", player, dim, x, y, z, detail=f"item={item_text}")
+        except Exception:
+            pass
+
+    @event_handler
+    def on_player_item_held(self, event: PlayerItemHeldEvent):
+        try:
+            player = event.player
+            if player is None:
+                return
+            new_slot = int(getattr(event, "new_slot", -1))
+            prev_slot = int(getattr(event, "previous_slot", -1))
+            inv = getattr(player, "inventory", None)
+            stack = None
+            if inv is not None and new_slot >= 0:
+                getter = getattr(inv, "get_item", None)
+                if callable(getter):
+                    stack = getter(new_slot)
+            item_text = self._sky_eye_format_item_stack(stack)
+            dim, x, y, z = self._sky_eye_player_location(player)
+            self._sky_eye_append(
+                "ItemHeldChange",
+                player,
+                dim,
+                x,
+                y,
+                z,
+                detail=f"slot {prev_slot}->{new_slot};item={item_text}",
+            )
+        except Exception:
+            pass
+
+    @event_handler
+    def on_player_item_consume(self, event: PlayerItemConsumeEvent):
+        try:
+            player = event.player
+            if player is None:
+                return
+            item_text = self._sky_eye_format_item_stack(getattr(event, "item", None))
+            dim, x, y, z = self._sky_eye_player_location(player)
+            self._sky_eye_append("ItemConsume", player, dim, x, y, z, detail=f"item={item_text}")
+        except Exception:
+            pass
+
+    @event_handler
+    def on_player_teleport(self, event: PlayerTeleportEvent):
+        try:
+            player = event.player
+            if player is None:
+                return
+            from_loc = getattr(event, "from_location", None) or getattr(event, "from", None)
+            to_loc = getattr(event, "to_location", None) or getattr(event, "to", None)
+            if from_loc is None or to_loc is None:
+                return
+            from_dim = get_dimension_id(getattr(from_loc, "dimension", None)) if getattr(from_loc, "dimension", None) is not None else "-"
+            to_dim = get_dimension_id(getattr(to_loc, "dimension", None)) if getattr(to_loc, "dimension", None) is not None else "-"
+            detail = (
+                f"from={from_dim}({float(from_loc.x):.1f},{float(from_loc.y):.1f},{float(from_loc.z):.1f})"
+                f";to={to_dim}({float(to_loc.x):.1f},{float(to_loc.y):.1f},{float(to_loc.z):.1f})"
+            )
+            self._sky_eye_append(
+                "PlayerTeleport",
+                player,
+                to_dim,
+                float(to_loc.x),
+                float(to_loc.y),
+                float(to_loc.z),
+                detail=detail,
+            )
+        except Exception:
+            pass
+
     def _load_kill_reward_guild_contrib_ratio(self) -> float:
         """读取 KILL_REWARD_GUILD_CONTRIB_RATIO；非法/缺省按 0 处理。"""
         raw = self.setting_manager.GetSetting("KILL_REWARD_GUILD_CONTRIB_RATIO")
@@ -1782,17 +1881,13 @@ class ARCCorePlugin(Plugin):
         except (ValueError, TypeError):
             return 7
 
-    def _sky_eye_format_main_hand(self, player: Player) -> str:
-        inv = getattr(player, "inventory", None)
-        if inv is None:
-            return "-"
-        stack = getattr(inv, "item_in_main_hand", None)
+    def _sky_eye_format_item_stack(self, stack) -> str:
         if stack is None:
             return "empty"
         item_type = getattr(stack, "type", None)
         if item_type is None:
             return "unknown"
-        item_id = getattr(item_type, "id", None)
+        item_id = getattr(item_type, "id", None) or getattr(item_type, "name", None)
         if item_id:
             amount = getattr(stack, "amount", 1)
             try:
@@ -1802,6 +1897,153 @@ class ARCCorePlugin(Plugin):
             return f"{item_id}x{amount}"
         text = str(item_type).strip()
         return text if text else "unknown"
+
+    def _sky_eye_format_main_hand(self, player: Player) -> str:
+        inv = getattr(player, "inventory", None)
+        if inv is None:
+            return "-"
+        stack = getattr(inv, "item_in_main_hand", None)
+        return self._sky_eye_format_item_stack(stack)
+
+    def _sky_eye_player_location(self, player: Player) -> tuple[str, float, float, float]:
+        loc = getattr(player, "location", None)
+        if loc is None:
+            return "-", 0.0, 0.0, 0.0
+        dimension = (
+            get_dimension_id(getattr(loc, "dimension", None))
+            if getattr(loc, "dimension", None) is not None
+            else "-"
+        )
+        return dimension, float(loc.x), float(loc.y), float(loc.z)
+
+    def _sky_eye_log_economy(
+        self,
+        *,
+        player: Optional[Player] = None,
+        player_name: str = "",
+        player_xuid: str = "",
+        delta: float = 0.0,
+        balance: float = 0.0,
+        reason: str = "",
+    ) -> None:
+        detail = f"delta={delta:+.2f};balance={balance:.2f}"
+        if reason:
+            detail += f";reason={reason}"
+        if player is not None:
+            dim, x, y, z = self._sky_eye_player_location(player)
+            self._sky_eye_append("EconomyChange", player, dim, x, y, z, detail=detail)
+            return
+        self.api_sky_eye_log(
+            "EconomyChange",
+            player_name=player_name,
+            player_xuid=player_xuid,
+            detail=detail,
+        )
+
+    def _sky_eye_log_land(
+        self,
+        action: str,
+        actor: Optional[Player],
+        land_id: int,
+        land_name: str = "",
+        detail: str = "",
+    ) -> None:
+        extra = f"land_id={land_id}"
+        if land_name:
+            extra += f";name={land_name}"
+        if detail:
+            extra += f";{detail}"
+        if actor is not None:
+            dim, x, y, z = self._sky_eye_player_location(actor)
+            self._sky_eye_append(action, actor, dim, x, y, z, detail=extra)
+        else:
+            self.api_sky_eye_log(action, detail=extra)
+
+    def _sky_eye_log_teleport(
+        self,
+        player: Player,
+        destination: str,
+        teleport_type: str = "",
+        dimension: str = "",
+        position: tuple | None = None,
+    ) -> None:
+        detail = f"dest={destination}"
+        if teleport_type:
+            detail += f";type={teleport_type}"
+        if dimension:
+            detail += f";dimension={dimension}"
+        if position is not None:
+            detail += f";pos={position[0]:.1f},{position[1]:.1f},{position[2]:.1f}"
+        dim, x, y, z = self._sky_eye_player_location(player)
+        self._sky_eye_append("TeleportUse", player, dim, x, y, z, detail=detail)
+
+    def api_sky_eye_log(
+        self,
+        action: str,
+        *,
+        player: Optional[Player] = None,
+        player_name: str = "",
+        player_xuid: str = "",
+        dimension: str = "",
+        x: float = 0.0,
+        y: float = 0.0,
+        z: float = 0.0,
+        detail: str = "",
+        target_name: str = "",
+        target_xuid: str = "",
+        target_type: str = "",
+    ) -> bool:
+        """供其他插件或离线场景写入天眼记录。"""
+        if not self._sky_eye_setting_bool("ENABLE_SKY_EYE", True):
+            return False
+        try:
+            subject = player
+            if subject is None and (player_name or player_xuid):
+                if player_name:
+                    subject = self.server.get_player(player_name)
+                if subject is None and player_xuid:
+                    subject = self._find_online_player_by_xuid(str(player_xuid))
+            if subject is not None:
+                dim, px, py, pz = self._sky_eye_player_location(subject)
+                if not dimension:
+                    dimension = dim
+                    x, y, z = px, py, pz
+                try:
+                    hand = self._sky_eye_format_main_hand(subject)
+                except Exception:
+                    hand = "-"
+                land = self._sky_eye_land_snapshot(dimension or "-", x, y, z)
+                pname = getattr(subject, "name", "") or player_name or "?"
+                pxuid = str(getattr(subject, "xuid", "") or player_xuid or "")
+            else:
+                dim = dimension or "-"
+                hand = "-"
+                land = self._sky_eye_land_snapshot(dim, x, y, z)
+                pname = str(player_name or "?")
+                pxuid = str(player_xuid or "")
+            store_dim = dimension or (dim if subject is not None else dim) or "-"
+            self.sky_eye_store.append(
+                self._sky_eye_retention_days(),
+                action,
+                pname,
+                pxuid,
+                store_dim,
+                float(x),
+                float(y),
+                float(z),
+                hand,
+                detail,
+                in_land=bool(land.get("in_land")),
+                land_id=land.get("land_id"),
+                land_name=str(land.get("land_name") or ""),
+                land_owner=str(land.get("land_owner") or ""),
+                target_name=target_name,
+                target_xuid=target_xuid,
+                target_type=target_type,
+            )
+            return True
+        except Exception:
+            return False
 
     def _sky_eye_identity(self, actor) -> tuple[str, str, str]:
         if actor is None:
@@ -4218,6 +4460,18 @@ class ARCCorePlugin(Plugin):
                 self._update_richest_title_if_needed()
             except Exception:
                 pass
+            try:
+                online_player = self.server.get_player(player_name)
+                new_money = self.economy.get_player_money_by_xuid(player_xuid)
+                self._sky_eye_log_economy(
+                    player=online_player,
+                    player_xuid=player_xuid,
+                    delta=amount,
+                    balance=new_money,
+                    reason="increase",
+                )
+            except Exception:
+                pass
         return success
 
     def increase_player_money_by_xuid(self, xuid: str, amount: float, notify: bool = True) -> bool:
@@ -4245,6 +4499,18 @@ class ARCCorePlugin(Plugin):
         if success:
             try:
                 self._update_richest_title_if_needed()
+            except Exception:
+                pass
+            try:
+                target = self._find_online_player_by_xuid(xuid_s)
+                new_money = self.economy.get_player_money_by_xuid(xuid_s)
+                self._sky_eye_log_economy(
+                    player=target,
+                    player_xuid=xuid_s,
+                    delta=amount,
+                    balance=new_money,
+                    reason="increase",
+                )
             except Exception:
                 pass
         return success
@@ -4280,6 +4546,18 @@ class ARCCorePlugin(Plugin):
         if success:
             try:
                 self._update_richest_title_if_needed()
+            except Exception:
+                pass
+            try:
+                online_player = self.server.get_player(player_name)
+                new_money = self.economy.get_player_money_by_xuid(player_xuid)
+                self._sky_eye_log_economy(
+                    player=online_player,
+                    player_xuid=player_xuid,
+                    delta=-amount,
+                    balance=new_money,
+                    reason="decrease",
+                )
             except Exception:
                 pass
         return success
@@ -7554,7 +7832,7 @@ class ARCCorePlugin(Plugin):
         player.perform_command('us')
 
     def show_button_shop_menu(self, player: Player):
-        player.perform_command('shop')
+        player.perform_command('bs')
 
     def show_arc_achievement_menu(self, player: Player):
         """委托弧光成就插件打开玩家成就菜单。"""
@@ -8015,6 +8293,16 @@ class ARCCorePlugin(Plugin):
             message = self.language_manager.GetText('TELEPORT_SUCCESS').format(destination_name)
         player.send_message(message)
         self.teleport_system.execute_teleport_to_position(player.name, position, dimension)
+        try:
+            self._sky_eye_log_teleport(
+                player,
+                destination_name,
+                teleport_type=teleport_type,
+                dimension=dimension,
+                position=position,
+            )
+        except Exception:
+            pass
     
     def execute_teleport_to_player(self, player: Player, target_player: Player):
         """执行传送"""
@@ -8022,6 +8310,15 @@ class ARCCorePlugin(Plugin):
         player.send_message(message)
         target_dimension = get_dimension_id(target_player.location.dimension)
         self.teleport_system.execute_teleport_to_player(player.name, target_player.name, target_dimension)
+        try:
+            self._sky_eye_log_teleport(
+                player,
+                target_player.name,
+                teleport_type="TPA",
+                dimension=target_dimension,
+            )
+        except Exception:
+            pass
 
     # Death Location Teleport
     def teleport_to_death_location(self, player: Player):
@@ -8906,18 +9203,43 @@ class ARCCorePlugin(Plugin):
     def create_land(self, owner_xuid: str, land_name: str, dimension: str,
                     min_x: int, max_x: int, min_y: int, max_y: int, min_z: int, max_z: int,
                     tp_x: float, tp_y: float, tp_z: float, owner_paid_money: float = 0.0,
-                    public_priority: int = LandSystem.PUBLIC_PRIORITY_DEFAULT) -> Optional[int]:
-        return self.land_system.create_land(
+                    public_priority: int = LandSystem.PUBLIC_PRIORITY_DEFAULT,
+                    actor: Optional[Player] = None) -> Optional[int]:
+        land_id = self.land_system.create_land(
             owner_xuid, land_name, dimension,
             min_x, max_x, min_y, max_y, min_z, max_z,
             tp_x, tp_y, tp_z, owner_paid_money, public_priority=public_priority
         )
+        if land_id:
+            try:
+                subject = actor or self._find_online_player_by_xuid(str(owner_xuid))
+                detail = f"paid={owner_paid_money:.2f};dim={dimension}"
+                self._sky_eye_log_land("LandCreate", subject, int(land_id), land_name, detail)
+            except Exception:
+                pass
+        return land_id
 
     def get_land_at_pos(self, dimension: str, x: int, z: int, y: int = None) -> Optional[int]:
         return self.land_system.get_land_at_pos(dimension, x, z, y)
 
-    def delete_land(self, land_id: int) -> bool:
-        return self.land_system.delete_land(land_id)
+    def delete_land(self, land_id: int, actor: Optional[Player] = None) -> bool:
+        land_name = ""
+        owner_xuid = ""
+        try:
+            info = self.get_land_info(land_id)
+            if info:
+                land_name = str(info.get("name") or info.get("land_name") or "")
+                owner_xuid = str(info.get("owner_xuid") or "")
+        except Exception:
+            pass
+        ok = self.land_system.delete_land(land_id)
+        if ok:
+            try:
+                subject = actor or self._find_online_player_by_xuid(owner_xuid)
+                self._sky_eye_log_land("LandDelete", subject, int(land_id), land_name)
+            except Exception:
+                pass
+        return ok
 
     def check_land_availability(
         self,
@@ -9575,7 +9897,7 @@ class ARCCorePlugin(Plugin):
         player.send_form(confirm_panel)
 
     def try_delete_land(self, player: Player, land_id: int, return_money: int):
-        r = self.delete_land(land_id)
+        r = self.delete_land(land_id, actor=player)
         if r:
             if return_money and return_money > 0:
                 if not self.increase_player_money(player, return_money):
@@ -10831,7 +11153,8 @@ class ARCCorePlugin(Plugin):
                 self.language_manager.GetText('DEFAULT_LAND_NAME').format(player.name, self.get_player_land_count(str(player.xuid)) + 1),
                 dimension, min_x, max_x, min_y, max_y, min_z, max_z,
                 player.location.x, player.location.y, player.location.z,
-                owner_paid_money=paid_money
+                owner_paid_money=paid_money,
+                actor=player,
             )
             if land_id is not None:
                 if not player.is_op:
@@ -11022,6 +11345,7 @@ class ARCCorePlugin(Plugin):
             player.location.z,
             owner_paid_money=0.0,
             public_priority=priority,
+            actor=player,
         )
         if land_id is not None:
             self.set_land_as_public(land_id, public_priority=priority)
@@ -11133,6 +11457,7 @@ class ARCCorePlugin(Plugin):
             player.location.y,
             player.location.z,
             owner_paid_money=0.0,
+            actor=player,
         )
         if land_id is None:
             if not self.guild_system.refund_guild_contribution_pool(gid, cost):
@@ -12677,7 +13002,7 @@ class ARCCorePlugin(Plugin):
         refund_xuid = (
             self._op_force_delete_land_refund_xuid(owner_key) if land_info else None
         )
-        if self.delete_land(land_id):
+        if self.delete_land(land_id, actor=player):
             if refund > 0 and refund_xuid:
                 self.increase_player_money_by_xuid(refund_xuid, refund, notify=True)
             if refund > 0:

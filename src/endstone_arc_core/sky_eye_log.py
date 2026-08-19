@@ -22,6 +22,17 @@ ACTION_LABELS = {
     "ActorInteract": "实体交互",
     "ActorDamage": "攻击",
     "PlayerDeath": "死亡",
+    "EconomyChange": "银行变动",
+    "LandCreate": "创建领地",
+    "LandDelete": "删除领地",
+    "LandUpdate": "领地设置",
+    "TeleportUse": "传送",
+    "ShopTrade": "按钮商店",
+    "ItemDrop": "丢弃物品",
+    "ItemPickup": "拾取物品",
+    "ItemHeldChange": "切换主手",
+    "ItemConsume": "消耗物品",
+    "PlayerTeleport": "玩家传送",
 }
 
 
