@@ -3,7 +3,7 @@
 # EndStone ARC Core Plugin / EndStone弧光核心
 
 [![Codacy Grade](https://app.codacy.com/project/badge/Grade/2f830615baf347258558dcc2a5ab85a1)](https://app.codacy.com/gh/DEVILENMO/EndstoneMC-ARC-Core-Plugin/dashboard?utm_source=gh&utm_medium=referral&utm_content=&utm_campaign=Badge_grade)
-[![Version](https://img.shields.io/badge/version-v0.8.12-blue)](https://github.com/ARC-Minecraft/EndstoneMC-ARC-Core-Plugin)
+[![Version](https://img.shields.io/badge/version-v0.8.13-blue)](https://github.com/ARC-Minecraft/EndstoneMC-ARC-Core-Plugin)
 [![Python](https://img.shields.io/badge/python-3.13+-blue?logo=python&logoColor=white)](https://www.python.org/)
 [![EndStone API](https://img.shields.io/badge/EndStone_API-0.7+-black)](https://github.com/EndstoneMC/endstone)
 [![License](https://img.shields.io/github/license/ARC-Minecraft/EndstoneMC-ARC-Core-Plugin)](LICENSE)
@@ -19,7 +19,7 @@ EndStone ARC Core 是一个功能完整的 EndStone (Minecraft 基岩版服务�
 
 - **作者**: DEVILENMO
 - **邮箱**: DEVILENMO@gmail.com
-- **版本**: 0.8.12
+- **版本**: 0.8.13
 - **API 版本**: 0.7+
 - **推荐 Python 版本**: 3.13
 
@@ -679,6 +679,9 @@ class MyPlugin(Plugin):
 | `api_teleport_player_to_warp` | `warp_name`，`player_name=""`，`xuid=""` | `dict`：`ok`，`error`。另含 `WARP_NOT_FOUND` |
 | `api_list_player_homes` | `player_name=""`，`xuid=""` | `list[dict]`：`home_name`，`dimension`，`x`，`y`，`z` |
 | `api_list_public_warps` | 无 | `list[dict]`：`warp_name`，`dimension`，`x`，`y`，`z` |
+| `api_list_spawn_locations` | 无 | `list[dict]`：`dimension`，`display`，`x`，`y`，`z` |
+| `api_list_public_lands` | `limit=50` | `list[dict]`：公共领地摘要（`land_id`，`land_name`，`dimension`，传送点） |
+| `api_get_server_landmarks_text` | 无 | `str`：出生点 + Warp + 公共领地，供 AI 指路 |
 
 #### 公会
 
@@ -711,7 +714,11 @@ class MyPlugin(Plugin):
 
 ## 📋 近期更新日志
 
-### v0.8.12（当前版本）
+### v0.8.13（当前版本）
+
+- ✅ **地标 API**：`api_list_spawn_locations` / `api_list_public_lands` / `api_get_server_landmarks_text`，供弧光 Agent 回答出生点、公共传送点、功能区
+
+### v0.8.12
 
 - ✅ **天眼扩展**：银行变动、领地创建/删除、弧光传送、按钮商店（由 arc_button_shop 调用）、丢弃/拾取/切换主手/消耗物品、玩家传送事件
 - ✅ **公开 API**：`api_sky_eye_log()` 供其他插件写入天眼

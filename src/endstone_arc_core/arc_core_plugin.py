@@ -4064,6 +4064,119 @@ class ARCCorePlugin(Plugin):
             pass
         return ""
 
+    def _landmark_dim_label(self, dimension: str) -> str:
+        dim = str(dimension or "").strip() or "-"
+        try:
+            label = translate_dimension_display(dim, self.language_manager)
+        except Exception:
+            label = dim
+        return str(label or dim)
+
+    @staticmethod
+    def _landmark_xyz(x, y, z) -> str:
+        try:
+            return f"{float(x):.0f}, {float(y):.0f}, {float(z):.0f}"
+        except (TypeError, ValueError):
+            return "?, ?, ?"
+
+    def api_list_spawn_locations(self) -> list:
+        """各维度出生点。每项 dimension / display / x / y / z。"""
+        out = []
+        try:
+            mapping = self.get_all_spawn_locations() or {}
+        except Exception:
+            mapping = dict(getattr(self, "spawn_pos_dict", None) or {})
+        for dim, coords in mapping.items():
+            if not coords or len(coords) < 3:
+                continue
+            out.append(
+                {
+                    "dimension": str(dim),
+                    "display": self._landmark_dim_label(str(dim)),
+                    "x": coords[0],
+                    "y": coords[1],
+                    "z": coords[2],
+                }
+            )
+        return out
+
+    def api_list_public_lands(self, limit: int = 50) -> list:
+        """公共领地/功能区摘要（名称与传送点），供 AI 指路。"""
+        cap = max(1, min(int(limit or 50), 80))
+        out = []
+        try:
+            lands = self.get_all_lands() or {}
+        except Exception:
+            return []
+        for land_id, info in lands.items():
+            if not isinstance(info, dict):
+                continue
+            owner = str(info.get("owner_xuid") or "")
+            if not self.land_system.is_public_land_owner(owner):
+                continue
+            out.append(
+                {
+                    "land_id": int(land_id),
+                    "land_name": str(info.get("land_name") or f"#{land_id}"),
+                    "dimension": str(info.get("dimension") or ""),
+                    "display": self._landmark_dim_label(str(info.get("dimension") or "")),
+                    "x": info.get("tp_x"),
+                    "y": info.get("tp_y"),
+                    "z": info.get("tp_z"),
+                }
+            )
+            if len(out) >= cap:
+                break
+        return out
+
+    def api_get_server_landmarks_text(self) -> str:
+        """给 AI 的本服地标说明：出生点、公共传送点、公共领地。"""
+        lines = ["本服公开地标（以服务器当前数据为准，不要编造清单外的地点）："]
+        spawns = self.api_list_spawn_locations()
+        if spawns:
+            lines.append("【出生点】玩家可用 /spawn 传送到当前维度出生点。")
+            for item in spawns:
+                lines.append(
+                    f"• {item.get('display') or item.get('dimension')} "
+                    f"({self._landmark_xyz(item.get('x'), item.get('y'), item.get('z'))})"
+                )
+        else:
+            lines.append("【出生点】尚未用 /updatespawnpos 设置自定义出生点。")
+
+        warps = []
+        try:
+            warps = self.api_list_public_warps() or []
+        except Exception:
+            warps = []
+        warp_cost = 0
+        try:
+            warp_cost = int(getattr(self.teleport_system, "teleport_cost_public_warp", 0) or 0)
+        except (TypeError, ValueError):
+            warp_cost = 0
+        cost_hint = f"（传送费用 {warp_cost}）" if warp_cost > 0 else "（免费）"
+        if warps:
+            lines.append(f"【公共传送点 / Warp】游戏内 /arc tp 打开传送菜单{cost_hint}。")
+            for item in warps:
+                name = item.get("warp_name") or "?"
+                dim = item.get("dimension") or ""
+                lines.append(
+                    f"• {name} — {self._landmark_dim_label(str(dim))} "
+                    f"({self._landmark_xyz(item.get('x'), item.get('y'), item.get('z'))})"
+                )
+        else:
+            lines.append("【公共传送点 / Warp】当前没有公共传送点。")
+
+        public_lands = self.api_list_public_lands(50)
+        if public_lands:
+            lines.append("【公共领地 / 功能区】名称即常见地标或功能建筑。")
+            for item in public_lands:
+                name = item.get("land_name") or f"#{item.get('land_id')}"
+                lines.append(
+                    f"• {name} — {item.get('display') or item.get('dimension')} "
+                    f"传送点 ({self._landmark_xyz(item.get('x'), item.get('y'), item.get('z'))})"
+                )
+        return "\n".join(lines)
+
     def _grant_title_unlock_reward(self, player: Player, title: str) -> None:
         """若头衔定义中有解锁奖励，则给该玩家发放金钱与物品（仅当玩家在线时）。"""
         defn = self.title_system.get_title_definition(title)
