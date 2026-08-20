@@ -182,6 +182,8 @@ class ARCCorePlugin(Plugin):
         self.player_sensitive_password_verified: Dict[str, bool] = {}
         # 尚未设置密码的玩家：完成注册后需继续的敏感操作（关闭注册窗时走 on_cancel）
         self._pending_sensitive_action_by_player: Dict[str, Dict[str, Callable[[Player], None]]] = {}
+        # 天眼：仅 PlayerJoin 完成后才追踪（进服加载期 GameModeChange 等会崩）
+        self._sky_eye_ready_xuids: Set[str] = set()
 
         # 玩家圈地
         self.land_min_distance = self.setting_manager.GetSetting('MIN_LAND_DISTANCE')
@@ -923,6 +925,30 @@ class ARCCorePlugin(Plugin):
                 )
         except Exception:
             pass
+        # Join 完成后再开始追踪；此前 GameModeChange 等加载事件一律忽略
+        self._sky_eye_mark_ready(event.player)
+
+    def _sky_eye_player_key(self, player: Optional[Player]) -> str:
+        if player is None:
+            return ""
+        xuid = str(getattr(player, "xuid", "") or "").strip()
+        if xuid:
+            return xuid
+        return str(getattr(player, "name", "") or "").strip()
+
+    def _sky_eye_mark_ready(self, player: Optional[Player]) -> None:
+        key = self._sky_eye_player_key(player)
+        if key:
+            self._sky_eye_ready_xuids.add(key)
+
+    def _sky_eye_clear_ready(self, player: Optional[Player]) -> None:
+        key = self._sky_eye_player_key(player)
+        if key:
+            self._sky_eye_ready_xuids.discard(key)
+
+    def _sky_eye_is_ready(self, player: Optional[Player]) -> bool:
+        key = self._sky_eye_player_key(player)
+        return bool(key) and key in self._sky_eye_ready_xuids
 
     def _show_join_arc_main_menu_with_delay(self, player: Player):
         """进服后延迟弹出主菜单一次（与配置无关）；玩家可关闭表单，随时可用 /arc 再次打开。"""
@@ -954,6 +980,8 @@ class ARCCorePlugin(Plugin):
             event.is_cancelled = True
             self.server.broadcast_message(formatted)
             try:
+                if not self._sky_eye_is_ready(event.player):
+                    return
                 chat_loc = getattr(event.player, "location", None)
                 if chat_loc is not None and getattr(chat_loc, "dimension", None) is not None:
                     self._sky_eye_append(
@@ -976,6 +1004,8 @@ class ARCCorePlugin(Plugin):
     def on_player_command(self, event: PlayerCommandEvent):
         try:
             player = event.player
+            if not self._sky_eye_is_ready(player):
+                return
             cmd = str(getattr(event, "command", "") or "").strip()
             loc = getattr(player, "location", None)
             if loc is not None and getattr(loc, "dimension", None) is not None:
@@ -1007,20 +1037,24 @@ class ARCCorePlugin(Plugin):
                 "ConsoleCommand",
                 player_name=sender_name,
                 detail=cmd[:300],
+                resolve_online=False,
             )
         except Exception:
             pass
 
     @event_handler
     def on_player_gamemode_change(self, event: PlayerGameModeChangeEvent):
+        """仅 PlayerJoin 完成后记录；进服加载期触发则直接忽略（读 location 会崩服）。"""
         try:
             player = event.player
+            if not self._sky_eye_is_ready(player):
+                return
             new_mode = getattr(event, "new_game_mode", None)
             if new_mode is None:
                 new_mode = getattr(event, "game_mode", None)
             mode_text = str(getattr(new_mode, "name", None) or new_mode or "?")
-            loc = getattr(player, "location", None)
             detail = f"gamemode={mode_text}"
+            loc = getattr(player, "location", None)
             if loc is not None and getattr(loc, "dimension", None) is not None:
                 self._sky_eye_append(
                     "GameModeChange",
@@ -1034,8 +1068,10 @@ class ARCCorePlugin(Plugin):
             else:
                 self.api_sky_eye_log(
                     "GameModeChange",
-                    player=player,
+                    player_name=str(getattr(player, "name", "") or "").strip() or "?",
+                    player_xuid=str(getattr(player, "xuid", "") or "").strip(),
                     detail=detail,
+                    resolve_online=False,
                 )
         except Exception:
             pass
@@ -1056,6 +1092,7 @@ class ARCCorePlugin(Plugin):
                 )
         except Exception:
             pass
+        self._sky_eye_clear_ready(event.player)
         self._record_player_quit_playtime(event.player)
         self._broadcast_text(
             self.language_manager.GetText('PLAYER_QUIT_MESSAGE').format(event.player.name)
@@ -2074,13 +2111,17 @@ class ARCCorePlugin(Plugin):
         target_name: str = "",
         target_xuid: str = "",
         target_type: str = "",
+        resolve_online: bool = True,
     ) -> bool:
-        """供其他插件或离线场景写入天眼记录。"""
+        """供其他插件或离线场景写入天眼记录。
+
+        ``resolve_online=False``：不查找在线玩家、不读 location（进服早期事件用）。
+        """
         if not self._sky_eye_setting_bool("ENABLE_SKY_EYE", True):
             return False
         try:
-            subject = player
-            if subject is None and (player_name or player_xuid):
+            subject = player if resolve_online else None
+            if subject is None and resolve_online and (player_name or player_xuid):
                 if player_name:
                     subject = self.server.get_player(player_name)
                 if subject is None and player_xuid:
