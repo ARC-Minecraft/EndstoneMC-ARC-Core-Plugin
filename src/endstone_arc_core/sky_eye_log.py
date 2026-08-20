@@ -32,7 +32,12 @@ ACTION_LABELS = {
     "ItemPickup": "拾取物品",
     "ItemHeldChange": "切换主手",
     "ItemConsume": "消耗物品",
+    "AiAgent": "弧光天星",
     "PlayerTeleport": "玩家传送",
+    "PlayerChat": "聊天",
+    "PlayerCommand": "玩家指令",
+    "ConsoleCommand": "控制台指令",
+    "GameModeChange": "游戏模式",
 }
 
 

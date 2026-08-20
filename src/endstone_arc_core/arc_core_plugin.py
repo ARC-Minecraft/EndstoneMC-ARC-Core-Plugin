@@ -12,7 +12,7 @@ from typing import Any, Callable, Dict, List, Optional, Set
 from endstone import ColorFormat, Player, GameMode
 from endstone.form import ActionForm, TextInput, ModalForm, Label, Dropdown
 from endstone.command import Command, CommandSender
-from endstone.event import event_handler, PlayerJoinEvent, PlayerQuitEvent, PlayerRespawnEvent, BlockBreakEvent, BlockPlaceEvent, PlayerDeathEvent, PlayerInteractEvent, ActorExplodeEvent, PlayerInteractActorEvent, ActorDamageEvent, ActorDeathEvent, ActorSpawnEvent, PlayerChatEvent, PlayerDropItemEvent, PlayerPickupItemEvent, PlayerItemHeldEvent, PlayerItemConsumeEvent, PlayerTeleportEvent
+from endstone.event import event_handler, PlayerJoinEvent, PlayerQuitEvent, PlayerRespawnEvent, BlockBreakEvent, BlockPlaceEvent, PlayerDeathEvent, PlayerInteractEvent, ActorExplodeEvent, PlayerInteractActorEvent, ActorDamageEvent, ActorDeathEvent, ActorSpawnEvent, PlayerChatEvent, PlayerDropItemEvent, PlayerPickupItemEvent, PlayerItemHeldEvent, PlayerItemConsumeEvent, PlayerTeleportEvent, PlayerCommandEvent, ServerCommandEvent, PlayerGameModeChangeEvent
 from endstone.plugin import Plugin
 
 from endstone_arc_core.DatabaseManager import DatabaseManager
@@ -953,10 +953,92 @@ class ARCCorePlugin(Plugin):
             formatted = line1 + "\n" + raw_message
             event.is_cancelled = True
             self.server.broadcast_message(formatted)
+            try:
+                chat_loc = getattr(event.player, "location", None)
+                if chat_loc is not None and getattr(chat_loc, "dimension", None) is not None:
+                    self._sky_eye_append(
+                        "PlayerChat",
+                        event.player,
+                        get_dimension_id(chat_loc.dimension),
+                        float(chat_loc.x),
+                        float(chat_loc.y),
+                        float(chat_loc.z),
+                        detail=str(raw_message or "")[:300],
+                    )
+            except Exception:
+                pass
 
         except Exception as e:
             if self.logger:
                 self.logger.error(f"[ARC Core]Chat title format error: {e}")
+
+    @event_handler
+    def on_player_command(self, event: PlayerCommandEvent):
+        try:
+            player = event.player
+            cmd = str(getattr(event, "command", "") or "").strip()
+            loc = getattr(player, "location", None)
+            if loc is not None and getattr(loc, "dimension", None) is not None:
+                self._sky_eye_append(
+                    "PlayerCommand",
+                    player,
+                    get_dimension_id(loc.dimension),
+                    float(loc.x),
+                    float(loc.y),
+                    float(loc.z),
+                    detail=cmd[:300],
+                )
+            else:
+                self.api_sky_eye_log(
+                    "PlayerCommand",
+                    player=player,
+                    detail=cmd[:300],
+                )
+        except Exception:
+            pass
+
+    @event_handler
+    def on_server_command(self, event: ServerCommandEvent):
+        try:
+            cmd = str(getattr(event, "command", "") or "").strip()
+            sender = getattr(event, "sender", None)
+            sender_name = str(getattr(sender, "name", "") or "Console").strip() or "Console"
+            self.api_sky_eye_log(
+                "ConsoleCommand",
+                player_name=sender_name,
+                detail=cmd[:300],
+            )
+        except Exception:
+            pass
+
+    @event_handler
+    def on_player_gamemode_change(self, event: PlayerGameModeChangeEvent):
+        try:
+            player = event.player
+            new_mode = getattr(event, "new_game_mode", None)
+            if new_mode is None:
+                new_mode = getattr(event, "game_mode", None)
+            mode_text = str(getattr(new_mode, "name", None) or new_mode or "?")
+            loc = getattr(player, "location", None)
+            detail = f"gamemode={mode_text}"
+            if loc is not None and getattr(loc, "dimension", None) is not None:
+                self._sky_eye_append(
+                    "GameModeChange",
+                    player,
+                    get_dimension_id(loc.dimension),
+                    float(loc.x),
+                    float(loc.y),
+                    float(loc.z),
+                    detail=detail,
+                )
+            else:
+                self.api_sky_eye_log(
+                    "GameModeChange",
+                    player=player,
+                    detail=detail,
+                )
+        except Exception:
+            pass
 
     @event_handler
     def on_player_quit(self, event: PlayerQuitEvent):
