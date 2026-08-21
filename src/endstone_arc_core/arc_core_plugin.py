@@ -3755,7 +3755,9 @@ class ARCCorePlugin(Plugin):
         arc_menu.add_button(self.language_manager.GetText('MAIN_MENU_TOOLS_BUTTON'), on_click=self.show_arc_tools_menu)
         if self.server.plugin_manager.get_plugin('ushop'):
             arc_menu.add_button(self.language_manager.GetText('SHOP_MENU_NAME'), on_click=self.show_shop_menu)
-        if self.server.plugin_manager.get_plugin('arc_button_shop'):
+        if self.server.plugin_manager.get_plugin('arc_sign_shop'):
+            arc_menu.add_button(self.language_manager.GetText('BUTTON_SHOP_MENU_NAME'), on_click=self.show_button_shop_menu)
+        elif self.server.plugin_manager.get_plugin('arc_button_shop'):
             arc_menu.add_button(self.language_manager.GetText('BUTTON_SHOP_MENU_NAME'), on_click=self.show_button_shop_menu)
         if self.server.plugin_manager.get_plugin('arc_dtwt'):
             arc_menu.add_button(self.language_manager.GetText('DTWT_MENU_NAME'), on_click=self.show_dtwt_panel)
@@ -8082,7 +8084,10 @@ class ARCCorePlugin(Plugin):
         player.perform_command('us')
 
     def show_button_shop_menu(self, player: Player):
-        player.perform_command('bs')
+        if self.server.plugin_manager.get_plugin('arc_sign_shop'):
+            player.perform_command('ss')
+        else:
+            player.perform_command('bs')
 
     def show_arc_achievement_menu(self, player: Player):
         """委托弧光成就插件打开玩家成就菜单。"""
