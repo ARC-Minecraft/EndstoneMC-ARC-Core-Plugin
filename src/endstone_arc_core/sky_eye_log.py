@@ -33,6 +33,7 @@ ACTION_LABELS = {
     "ItemHeldChange": "切换主手",
     "ItemConsume": "消耗物品",
     "AiAgent": "弧光天星",
+    "AgentCommand": "天星指令",
     "PlayerTeleport": "玩家传送",
     "PlayerChat": "聊天",
     "PlayerCommand": "玩家指令",
@@ -324,12 +325,20 @@ class SkyEyeStore:
                 clauses.append("(" + " OR ".join(person_bits) + ")")
             clauses.append("action IN ('ActorDamage', 'PlayerDeath')")
         else:
+            # 查玩家时同时匹配「本人操作」与「天星代其执行」（target_name=请求者）
+            person_bits: List[str] = []
             if xuid:
-                clauses.append("player_xuid = ?")
+                person_bits.append("player_xuid = ?")
                 params.append(xuid)
-            elif name:
-                clauses.append("player_name = ? COLLATE NOCASE")
+                person_bits.append("target_xuid = ?")
+                params.append(xuid)
+            if name:
+                person_bits.append("player_name = ? COLLATE NOCASE")
                 params.append(name)
+                person_bits.append("target_name = ? COLLATE NOCASE")
+                params.append(name)
+            if person_bits:
+                clauses.append("(" + " OR ".join(person_bits) + ")")
             if tname:
                 clauses.append("target_name = ? COLLATE NOCASE")
                 params.append(tname)

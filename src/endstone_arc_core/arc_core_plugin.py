@@ -463,6 +463,12 @@ class ARCCorePlugin(Plugin):
                 )
             except Exception:
                 pass
+            # 热重载后已在线玩家补标可追踪，避免指令漏记
+            try:
+                for online in list(self.server.online_players or []):
+                    self._sky_eye_mark_ready(online)
+            except Exception:
+                pass
 
     def _init_sync_service(self) -> None:
         """初始化跨服数据同步：同步中心（可选）与远程客户端（与文件路径互斥）。"""
@@ -1006,7 +1012,10 @@ class ARCCorePlugin(Plugin):
             player = event.player
             if not self._sky_eye_is_ready(player):
                 return
-            cmd = str(getattr(event, "command", "") or "").strip()
+            raw = str(getattr(event, "command", "") or "").strip()
+            if not raw:
+                return
+            cmd = raw if raw.startswith("/") else f"/{raw}"
             loc = getattr(player, "location", None)
             if loc is not None and getattr(loc, "dimension", None) is not None:
                 self._sky_eye_append(
@@ -1030,15 +1039,20 @@ class ARCCorePlugin(Plugin):
     @event_handler
     def on_server_command(self, event: ServerCommandEvent):
         try:
-            cmd = str(getattr(event, "command", "") or "").strip()
+            raw = str(getattr(event, "command", "") or "").strip()
+            if not raw:
+                return
+            cmd = raw if raw.startswith("/") else f"/{raw}"
             sender = getattr(event, "sender", None)
             sender_name = str(getattr(sender, "name", "") or "Console").strip() or "Console"
-            self.api_sky_eye_log(
-                "ConsoleCommand",
-                player_name=sender_name,
-                detail=cmd[:300],
-                resolve_online=False,
-            )
+            # 天星/插件 dispatch 的指令由 AI Helper 另行记 AgentCommand，这里只记控制台真人输入
+            if sender_name.lower() in {"server", "console", "rcon"}:
+                self.api_sky_eye_log(
+                    "ConsoleCommand",
+                    player_name=sender_name,
+                    detail=cmd[:300],
+                    resolve_online=False,
+                )
         except Exception:
             pass
 
