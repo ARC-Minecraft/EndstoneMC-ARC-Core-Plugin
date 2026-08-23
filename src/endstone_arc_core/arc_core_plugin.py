@@ -1678,7 +1678,7 @@ class ARCCorePlugin(Plugin):
 
     @event_handler
     def on_actor_spawn(self, event: ActorSpawnEvent):
-        """公共领地按全局黑/白名单模式与该领地开关取消除玩家外的实体生成。"""
+        """公共领地开启拦截后，按全局黑/白名单取消除玩家外的实体生成。"""
         try:
             actor = event.actor
             if actor is None or isinstance(actor, Player):
@@ -14189,15 +14189,11 @@ class ARCCorePlugin(Plugin):
         status_lines.append('开放生物互动: ' + (self.language_manager.GetText('LAND_ACTOR_INTERACTION_STATUS_ENABLED') if land_info.get('allow_actor_interaction') else self.language_manager.GetText('LAND_ACTOR_INTERACTION_STATUS_DISABLED')))
         status_lines.append('展示框: ' + (self.language_manager.GetText('LAND_FRAME_STATUS_ENABLED') if land_info.get('allow_frame') else self.language_manager.GetText('LAND_FRAME_STATUS_DISABLED')))
         status_lines.append('开放生物伤害: ' + (self.language_manager.GetText('LAND_ACTOR_DAMAGE_STATUS_ENABLED') if land_info.get('allow_actor_damage') else self.language_manager.GetText('LAND_ACTOR_DAMAGE_STATUS_DISABLED')))
-        global_spawn_mode_on = self.land_system.is_block_actor_spawn_mode_enabled()
-        if global_spawn_mode_on:
-            spawn_status = (
-                self.language_manager.GetText('BLOCK_ACTOR_SPAWN_STATUS_ENABLED')
-                if land_info.get('block_actor_spawn')
-                else self.language_manager.GetText('BLOCK_ACTOR_SPAWN_STATUS_DISABLED')
-            )
-        else:
-            spawn_status = self.language_manager.GetText('BLOCK_ACTOR_SPAWN_STATUS_DISABLED')
+        spawn_status = (
+            self.language_manager.GetText('BLOCK_ACTOR_SPAWN_STATUS_ENABLED')
+            if land_info.get('block_actor_spawn')
+            else self.language_manager.GetText('BLOCK_ACTOR_SPAWN_STATUS_DISABLED')
+        )
         status_lines.append(
             self.language_manager.GetText('BLOCK_ACTOR_SPAWN_CURRENT_STATUS').format(spawn_status)
         )
@@ -14237,11 +14233,10 @@ class ARCCorePlugin(Plugin):
             self.language_manager.GetText('LAND_ACTOR_DAMAGE_SETTING_BUTTON_TEXT'),
             on_click=lambda p=player, l_id=land_id, pg=from_page: self.show_op_public_land_toggle_panel(p, l_id, 'allow_actor_damage', pg)
         )
-        if global_spawn_mode_on:
-            settings_panel.add_button(
-                self.language_manager.GetText('BLOCK_ACTOR_SPAWN_SETTING_BUTTON_TEXT'),
-                on_click=lambda p=player, l_id=land_id, pg=from_page: self.show_op_public_land_toggle_panel(p, l_id, 'block_actor_spawn', pg)
-            )
+        settings_panel.add_button(
+            self.language_manager.GetText('BLOCK_ACTOR_SPAWN_SETTING_BUTTON_TEXT'),
+            on_click=lambda p=player, l_id=land_id, pg=from_page: self.show_op_public_land_toggle_panel(p, l_id, 'block_actor_spawn', pg)
+        )
         settings_panel.add_button(
             self.language_manager.GetText('ALLOW_NON_PUBLIC_LAND_SETTING_BUTTON_TEXT'),
             on_click=lambda p=player, l_id=land_id, pg=from_page: self.show_op_public_land_toggle_panel(p, l_id, 'allow_non_public_land', pg)
@@ -14380,9 +14375,6 @@ class ARCCorePlugin(Plugin):
             status_text = self.language_manager.GetText('ALLOW_NON_PUBLIC_LAND_STATUS_ENABLED') if current else self.language_manager.GetText('ALLOW_NON_PUBLIC_LAND_STATUS_DISABLED')
             title = self.language_manager.GetText('ALLOW_NON_PUBLIC_LAND_SETTING_BUTTON_TEXT')
         elif setting_key == 'block_actor_spawn':
-            if not self.land_system.is_block_actor_spawn_mode_enabled():
-                self.show_op_public_land_settings_panel(player, land_id, from_page)
-                return
             status_text = self.language_manager.GetText('BLOCK_ACTOR_SPAWN_STATUS_ENABLED') if current else self.language_manager.GetText('BLOCK_ACTOR_SPAWN_STATUS_DISABLED')
             title = self.language_manager.GetText('BLOCK_ACTOR_SPAWN_SETTING_TITLE')
         else:  # allow_actor_damage
@@ -14412,9 +14404,6 @@ class ARCCorePlugin(Plugin):
     
     def op_toggle_land_setting(self, player: Player, land_id: int, setting_key: str, enable: bool, from_page: int):
         """OP 切换公共领地某项设置并返回设置面板"""
-        if setting_key == 'block_actor_spawn' and not self.land_system.is_block_actor_spawn_mode_enabled():
-            self.show_op_public_land_settings_panel(player, land_id, from_page)
-            return
         setter_map = {
             'allow_public_interact': self.land_system.set_land_allow_public_interact,
             'allow_guild_member_interact': self.land_system.set_land_allow_guild_member_interact,
@@ -15147,7 +15136,7 @@ class ARCCorePlugin(Plugin):
             'for_sale': 是否上架出售（bool，私人领地）,
             'sale_price': 上架价格（float，未上架为 0）,
             'public_priority': 公共领地优先级 1/2/3（3 最高；非公共亦可能有默认值）,
-            'block_actor_spawn': 该公共领地是否开启拦截生物生成（bool；全局模式为 False 时不生效）,
+            'block_actor_spawn': 该公共领地是否开启拦截生物生成（bool；开启后按全局黑/白名单生效）,
             ... 其它 allow_* 开关
         } 不存在则返回空字典
         """

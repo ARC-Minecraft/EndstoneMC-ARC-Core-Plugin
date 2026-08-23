@@ -35,9 +35,8 @@ def _s(
 BOOL_CHOICES: List[Tuple[str, str]] = [(BOOL_FALSE, "False"), (BOOL_TRUE, "True")]
 
 SPAWN_MODE_CHOICES: List[Tuple[str, str]] = [
-    (BOOL_FALSE, "False（关闭）"),
-    ("blacklist", "blacklist（黑名单）"),
     ("whitelist", "whitelist（白名单）"),
+    ("blacklist", "blacklist（黑名单）"),
 ]
 
 SETTING_GROUPS: List[Dict[str, object]] = [

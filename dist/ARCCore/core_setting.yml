@@ -68,8 +68,9 @@ LAND_ONLY_PLACE_BLOCKS=minecraft:beacon,minecraft:spawner,lfg_ff:structure_place
 DISABLED_BLOCKS=minecraft:hopper,minecraft:observer
 # 公共领地内白名单保护生物（逗号分隔，在此列表中的生物在公共领地内不可被伤害）
 PUBLIC_LAND_PROTECTED_ENTITIES=minecraft:villager_v2,minecraft:iron_golem,minecraft:snow_golem
-# 公共领地拦截生物生成模式：False=关闭（各领地显示不开启拦截，不可开关）；blacklist=黑名单；whitelist=白名单
-PUBLIC_LAND_BLOCK_ACTOR_SPAWN_MODE=False
+# 公共领地拦截生物生成模式：whitelist=白名单（名单上的不拦截，空名单则拦截全部）；blacklist=黑名单（只拦截名单上的）
+# 各公共领地在 OP 公共领地设置中单独开关拦截；旧配置 False/off 视为 whitelist
+PUBLIC_LAND_BLOCK_ACTOR_SPAWN_MODE=whitelist
 # 公共领地拦截生物生成名单（逗号分隔实体 ID）。白名单时名单上的不拦截；黑名单时只拦截名单上的
 # 支持命名空间前缀：oreville_wb: 或 oreville_wb:* 可匹配该命名空间下全部实体
 PUBLIC_LAND_BLOCK_ACTOR_SPAWN_LIST=

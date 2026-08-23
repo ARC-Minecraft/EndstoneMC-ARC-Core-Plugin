@@ -22,13 +22,12 @@ class LandSystem:
     PUBLIC_PRIORITY_MAX = 3
     PUBLIC_PRIORITY_DEFAULT = 1
 
-    # 公共领地拦截生物生成模式：off / blacklist / whitelist（默认 off）
-    BLOCK_ACTOR_SPAWN_MODE_OFF = "off"
+    # 公共领地拦截生物生成模式：blacklist / whitelist（默认 whitelist）
+    # 各公共领地用 block_actor_spawn 自行开关；开启后按该全局模式拦截
     BLOCK_ACTOR_SPAWN_MODE_BLACKLIST = "blacklist"
     BLOCK_ACTOR_SPAWN_MODE_WHITELIST = "whitelist"
     BLOCK_ACTOR_SPAWN_MODES = frozenset(
         {
-            BLOCK_ACTOR_SPAWN_MODE_OFF,
             BLOCK_ACTOR_SPAWN_MODE_BLACKLIST,
             BLOCK_ACTOR_SPAWN_MODE_WHITELIST,
         }
@@ -74,17 +73,15 @@ class LandSystem:
 
     @staticmethod
     def clamp_block_actor_spawn_mode(value: Any) -> str:
-        """拦截生物生成模式：off / blacklist / whitelist；非法值按 off。"""
+        """拦截生物生成模式：blacklist / whitelist；旧值 off/False 与非法值按 whitelist。"""
         s = str(value or "").strip().lower()
         if s in LandSystem.BLOCK_ACTOR_SPAWN_MODES:
             return s
-        if s in ("0", "false", "disabled", "no"):
-            return LandSystem.BLOCK_ACTOR_SPAWN_MODE_OFF
         if s in ("black", "blocklist"):
             return LandSystem.BLOCK_ACTOR_SPAWN_MODE_BLACKLIST
         if s in ("white", "allowlist"):
             return LandSystem.BLOCK_ACTOR_SPAWN_MODE_WHITELIST
-        return LandSystem.BLOCK_ACTOR_SPAWN_MODE_OFF
+        return LandSystem.BLOCK_ACTOR_SPAWN_MODE_WHITELIST
 
     @staticmethod
     def normalize_actor_type_id(raw: Any) -> str:
@@ -151,7 +148,7 @@ class LandSystem:
             Callable[[str, str, Optional[BaseException]], None]
         ] = None
         self._block_actor_spawn_list: frozenset = frozenset()
-        self._block_actor_spawn_mode: str = LandSystem.BLOCK_ACTOR_SPAWN_MODE_OFF
+        self._block_actor_spawn_mode: str = LandSystem.BLOCK_ACTOR_SPAWN_MODE_WHITELIST
         self._load_config()
 
     def set_persistent_error_callback(
@@ -1257,9 +1254,6 @@ class LandSystem:
     def get_block_actor_spawn_mode(self) -> str:
         return self._block_actor_spawn_mode
 
-    def is_block_actor_spawn_mode_enabled(self) -> bool:
-        return self._block_actor_spawn_mode != self.BLOCK_ACTOR_SPAWN_MODE_OFF
-
     def get_block_actor_spawn_list(self) -> Set[str]:
         return set(self._block_actor_spawn_list)
 
@@ -1283,15 +1277,12 @@ class LandSystem:
         return False
 
     def should_block_public_land_actor_spawn(self, land_enabled: Any, actor_type_id: Any) -> bool:
-        """全局模式为 Off 或该领地未开启拦截时不拦；否则按黑/白名单判断。玩家应在调用前排除。"""
-        mode = self._block_actor_spawn_mode
-        if mode == self.BLOCK_ACTOR_SPAWN_MODE_OFF:
-            return False
+        """该领地未开启拦截时不拦；开启后按全局黑/白名单判断。玩家应在调用前排除。"""
         if not land_enabled:
             return False
         actor_id = self.normalize_actor_type_id(actor_type_id)
         listed = self._is_actor_id_in_spawn_list(actor_id)
-        if mode == self.BLOCK_ACTOR_SPAWN_MODE_WHITELIST:
+        if self._block_actor_spawn_mode == self.BLOCK_ACTOR_SPAWN_MODE_WHITELIST:
             return not listed
         return listed
 
