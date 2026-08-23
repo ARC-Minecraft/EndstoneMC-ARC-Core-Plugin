@@ -3,7 +3,7 @@
 # EndStone ARC Core Plugin / EndStone弧光核心
 
 [![Codacy Grade](https://app.codacy.com/project/badge/Grade/2f830615baf347258558dcc2a5ab85a1)](https://app.codacy.com/gh/DEVILENMO/EndstoneMC-ARC-Core-Plugin/dashboard?utm_source=gh&utm_medium=referral&utm_content=&utm_campaign=Badge_grade)
-[![Version](https://img.shields.io/badge/version-v0.8.18-blue)](https://github.com/ARC-Minecraft/EndstoneMC-ARC-Core-Plugin)
+[![Version](https://img.shields.io/badge/version-v0.8.19-blue)](https://github.com/ARC-Minecraft/EndstoneMC-ARC-Core-Plugin)
 [![Python](https://img.shields.io/badge/python-3.13+-blue?logo=python&logoColor=white)](https://www.python.org/)
 [![EndStone API](https://img.shields.io/badge/EndStone_API-0.7+-black)](https://github.com/EndstoneMC/endstone)
 [![License](https://img.shields.io/github/license/ARC-Minecraft/EndstoneMC-ARC-Core-Plugin)](LICENSE)
@@ -19,7 +19,7 @@ EndStone ARC Core 是一个功能完整的 EndStone (Minecraft 基岩版服务�
 
 - **作者**: DEVILENMO
 - **邮箱**: DEVILENMO@gmail.com
-- **版本**: 0.8.18
+- **版本**: 0.8.19
 - **API 版本**: 0.7+
 - **推荐 Python 版本**: 3.13
 
@@ -131,10 +131,11 @@ EndStone ARC Core 是一个功能完整的 EndStone (Minecraft 基岩版服务�
 - **击杀 → 公会贡献点（v0.7.5）**：`KILL_REWARD_GUILD_CONTRIB_RATIO`（默认 `0`）— 玩家在已加入公会时，每次成功扣发击杀金钱奖励后按 `floor(reward * ratio)` 额外获得公会贡献点；同步累加 **私人贡献点** 与 **公会公共贡献点**。例如 `kill_reward.txt` 配置 `minecraft:creeper=10` 且比例为 `0.5`，则击杀苦力怕在获得 10 元的同时获得 5 公会贡献点。比例 `0` 或 `floor(reward*ratio) <= 0` 或玩家未加入公会时静默跳过
 
 ### 📍 传送系统
+- **功能开关（v0.8.19）** - 传送面板每项可单独开关，默认全开：`ENABLE_TELEPORT_PUBLIC_WARP`、`ENABLE_TELEPORT_HOME`、`ENABLE_RANDOM_TELEPORT`、`ENABLE_TELEPORT_DEATH_LOCATION`、`ENABLE_TELEPORT_PLAYER`、`ENABLE_TELEPORT_CROSS_SERVER`。关闭后传送系统面板不显示对应按钮（`/connecttoserver` 在跨服关闭时也不可用）。可在 **OP 面板 → 配置文件设置 → 传送** 中修改
 - **私人传送点 (Home)** - 玩家可设置多个传送点
 - **公共传送点 (Warp)** - 管理员可创建公共传送点
 - **跨服传送（v0.6.0）** - 数据库维护跨服目标；`/connecttoserver` **无参数**时打开跨服目标 **选择面板**，有参数时按名称执行传送；控制台/命令方块执行时可通过发送者名称解析在线玩家（与下列命令解析方式一致）
-- **玩家传送请求 (TPA/TPHERE)** - 玩家间传送请求；**被请求方收到请求时自动弹出表单**（v0.4.2），可直接同意或拒绝，不再仅依赖聊天提示
+- **玩家传送请求 (TPA/TPHERE)** - 玩家间传送请求；发送时用 **下拉框** 选择请求类型与目标玩家；**被请求方收到请求时自动弹出表单**（v0.4.2），可直接同意或拒绝，不再仅依赖聊天提示
 - **死亡回归系统** - 玩家死亡后可传送回死亡地点；**死亡坐标在同一次服务器运行期间保持**（退出游戏不再清空；实际传送成功后仍会清除记录）
 - **随机传送系统 (v0.1.12新增)** - 随机传送到指定范围内，自动附加缓降（羽落）效果（**30 秒**，v0.4.1 起；此前为 10 秒）
 - **传送付费系统 (v0.1.12新增)** - 每种传送类型可独立配置收费，支持余额检查
@@ -195,7 +196,7 @@ EndStone ARC Core 是一个功能完整的 EndStone (Minecraft 基岩版服务�
 - **工具**：切换游戏模式、清除掉落物、记录坐标 1/2、调试模式、执行命令（`@p1`/`@p2`、留空重复上次命令）
 - **经济管理**（原「金钱管理」）：**增减在线玩家存款**；**经济参数配置** 写入 `PLAYER_INIT_MONEY_NUM`、`HIDE_OP_IN_MONEY_RANKING`、`RICHEST_TITLE_NAME`（与 `core_setting.yml` 玩家经济段一致）
 - **领地管理**：管理所有领地、管理脚下领地、重建领地区块映射；**公共领地** 详情内可 **重设公共领地范围**（与玩家重设流程一致，不扣款）（返回统一回到领地管理子菜单）
-- **传送管理**：**管理公共传送点**（创建/删除 Warp）；**传送参数配置**（`MAX_PLAYER_HOME_NUM`、随机传送开关/中心/半径、各类传送费用等，与 `core_setting.yml` 传送段一致）
+- **传送管理**：**管理公共传送点**（创建/删除 Warp）；**传送参数配置**（`MAX_PLAYER_HOME_NUM`、随机传送中心/半径、各类传送费用等）；各项传送开关见 **配置文件设置 → 传送**
 - 邀请奖励配置、**签到配置**（v0.4.2：总览展示当前存款/随机条数区间/奖励条目数；**配置存款与随机条数** 弹窗表单，v0.7.3 起含 **每日签到公会贡献点**；**配置物品奖励列表** 支持按条目进入编辑/删除与新增）、头衔管理、成就管理
 - **重载配置** - 重载 `core_setting`、广播、语言、**entity_display_name.txt**、**kill_reward.txt** 等
 - **调试模式**（v0.3.0）：开启后，在方块破坏/放置、方块交互、生物攻击、生物交互时向该 OP 发送聊天调试消息（事件类型、目标、维度、位置）
@@ -323,8 +324,15 @@ LAND_SALE_VAT_RATE=0.1               # 私人领地上架成交增值税：对 (
 # 传送系统
 MAX_PLAYER_HOME_NUM=5                # 玩家最大家园数量
 
-# 随机传送配置 (v0.1.12新增)
-ENABLE_RANDOM_TELEPORT=True          # 是否启用随机传送功能
+# 传送系统面板各项开关（v0.8.19，默认全开；关闭后传送面板不显示对应按钮）
+ENABLE_TELEPORT_PUBLIC_WARP=True     # 公共传送点
+ENABLE_TELEPORT_HOME=True            # 私人传送点
+ENABLE_RANDOM_TELEPORT=True          # 随机传送
+ENABLE_TELEPORT_DEATH_LOCATION=True  # 死亡点传送
+ENABLE_TELEPORT_PLAYER=True          # 玩家互传（TPA/TPHERE）
+ENABLE_TELEPORT_CROSS_SERVER=True    # 跨服传送
+
+# 随机传送范围 (v0.1.12新增)
 RANDOM_TELEPORT_CENTER_X=0           # 随机传送中心点X坐标
 RANDOM_TELEPORT_CENTER_Z=0           # 随机传送中心点Z坐标
 RANDOM_TELEPORT_RADIUS=5000          # 随机传送半径 (格)
@@ -715,7 +723,12 @@ class MyPlugin(Plugin):
 
 ## 📋 近期更新日志
 
-### v0.8.18（当前版本）
+### v0.8.19（当前版本）
+
+- ✅ **传送功能独立开关**：公共传送点 / Home / 随机传送 / 死亡点 / 玩家互传 / 跨服传送均可单独关闭（默认全开）；关闭后传送系统面板不显示对应按钮
+- ✅ **玩家互传改为下拉框**：发送 TPA/TPHERE 时用下拉框选择请求类型与目标玩家
+
+### v0.8.18
 
 - ✅ **公共领地拦截生物生成去掉全局 Off**：`PUBLIC_LAND_BLOCK_ACTOR_SPAWN_MODE` 仅保留 **whitelist / blacklist**（默认 whitelist；旧值 False/off 视为白名单）。每个公共领地可单独开启/关闭拦截，开启后按全局名单模式生效
 

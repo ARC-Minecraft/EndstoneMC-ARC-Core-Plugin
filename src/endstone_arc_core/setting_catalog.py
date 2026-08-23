@@ -135,7 +135,22 @@ SETTING_GROUPS: List[Dict[str, object]] = [
         "title": "传送",
         "items": [
             _s("MAX_PLAYER_HOME_NUM", "玩家 Home 上限", "int", placeholder="10"),
+            _s("ENABLE_TELEPORT_PUBLIC_WARP", "启用公共传送点", "bool", choices=BOOL_CHOICES),
+            _s("ENABLE_TELEPORT_HOME", "启用私人传送点", "bool", choices=BOOL_CHOICES),
             _s("ENABLE_RANDOM_TELEPORT", "启用随机传送", "bool", choices=BOOL_CHOICES),
+            _s(
+                "ENABLE_TELEPORT_DEATH_LOCATION",
+                "启用死亡点传送",
+                "bool",
+                choices=BOOL_CHOICES,
+            ),
+            _s("ENABLE_TELEPORT_PLAYER", "启用玩家互传", "bool", choices=BOOL_CHOICES),
+            _s(
+                "ENABLE_TELEPORT_CROSS_SERVER",
+                "启用跨服传送",
+                "bool",
+                choices=BOOL_CHOICES,
+            ),
             _s("RANDOM_TELEPORT_CENTER_X", "随机传送中心 X", "int", placeholder="0"),
             _s("RANDOM_TELEPORT_CENTER_Z", "随机传送中心 Z", "int", placeholder="0"),
             _s("RANDOM_TELEPORT_RADIUS", "随机传送半径", "int", placeholder="4096"),

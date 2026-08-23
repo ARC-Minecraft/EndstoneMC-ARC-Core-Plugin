@@ -55,16 +55,18 @@ class TeleportSystem:
         except (ValueError, TypeError):
             self.max_player_home_num = 3
 
-        raw = self.setting_manager.GetSetting("ENABLE_RANDOM_TELEPORT")
-        if raw is None:
-            self.enable_random_teleport = True
-        else:
-            try:
-                self.enable_random_teleport = (
-                    str(raw).lower() in ["true", "1", "yes"]
-                )
-            except (ValueError, AttributeError):
-                self.enable_random_teleport = True
+        self.enable_teleport_public_warp = self._parse_bool(
+            "ENABLE_TELEPORT_PUBLIC_WARP", True
+        )
+        self.enable_teleport_home = self._parse_bool("ENABLE_TELEPORT_HOME", True)
+        self.enable_random_teleport = self._parse_bool("ENABLE_RANDOM_TELEPORT", True)
+        self.enable_teleport_death_location = self._parse_bool(
+            "ENABLE_TELEPORT_DEATH_LOCATION", True
+        )
+        self.enable_teleport_player = self._parse_bool("ENABLE_TELEPORT_PLAYER", True)
+        self.enable_teleport_cross_server = self._parse_bool(
+            "ENABLE_TELEPORT_CROSS_SERVER", True
+        )
 
         for key, default in [
             ("RANDOM_TELEPORT_CENTER_X", 0),
@@ -87,6 +89,17 @@ class TeleportSystem:
         )
         self.teleport_cost_random = self._parse_cost("TELEPORT_COST_RANDOM", 100)
         self.teleport_cost_player = self._parse_cost("TELEPORT_COST_PLAYER", 50)
+
+    def _parse_bool(self, key: str, default: bool = True) -> bool:
+        raw = self.setting_manager.GetSetting(key)
+        if raw is None:
+            return default
+        s = str(raw).strip().lower()
+        if s in ("true", "1", "yes", "on"):
+            return True
+        if s in ("false", "0", "no", "off"):
+            return False
+        return default
 
     def _parse_cost(self, key: str, default: int) -> int:
         raw = self.setting_manager.GetSetting(key)

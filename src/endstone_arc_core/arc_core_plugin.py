@@ -739,6 +739,9 @@ class ARCCorePlugin(Plugin):
                     f"name={sender.name}, xuid={sender.xuid}, args={args_text or '-'}"
                 ),
             )
+            if not self.teleport_system.enable_teleport_cross_server:
+                self._notify_teleport_feature_disabled(sender)
+                return True
             if not args or not str(" ".join(args)).strip():
                 self.show_cross_server_menu(sender, on_close=self.show_main_menu)
                 return True
@@ -8098,50 +8101,61 @@ class ARCCorePlugin(Plugin):
         player.perform_command('achop')
 
     # Teleport menu
+    def _notify_teleport_feature_disabled(self, player: Player) -> None:
+        msg = self.language_manager.GetText("TELEPORT_FEATURE_DISABLED")
+        if not msg or not str(msg).strip():
+            msg = "[弧光核心]该传送功能已被管理员关闭"
+        player.send_message(msg)
+
     def show_teleport_menu(self, player: Player):
         teleport_main_menu = ActionForm(
             title=self.language_manager.GetText('TELEPORT_MAIN_MENU_TITLE'),
             content=self.language_manager.GetText('TELEPORT_MAIN_MENU_CONTENT')
         )
+        ts = self.teleport_system
         
         # 公共传送点按钮
-        public_warp_text = self.language_manager.GetText('TELEPORT_MAIN_MENU_PUBLIC_WARP_BUTTON')
-        if self.teleport_system.teleport_cost_public_warp > 0:
-            public_warp_text = self.language_manager.GetText('TELEPORT_BUTTON_WITH_COST').format(public_warp_text, self.teleport_system.teleport_cost_public_warp)
-        teleport_main_menu.add_button(public_warp_text, on_click=self.show_public_warp_menu)
+        if ts.enable_teleport_public_warp:
+            public_warp_text = self.language_manager.GetText('TELEPORT_MAIN_MENU_PUBLIC_WARP_BUTTON')
+            if ts.teleport_cost_public_warp > 0:
+                public_warp_text = self.language_manager.GetText('TELEPORT_BUTTON_WITH_COST').format(public_warp_text, ts.teleport_cost_public_warp)
+            teleport_main_menu.add_button(public_warp_text, on_click=self.show_public_warp_menu)
         
         # 私人传送点按钮
-        home_text = self.language_manager.GetText('TELEPORT_MAIN_MENU_HOME_BUTTON')
-        if self.teleport_system.teleport_cost_home > 0:
-            home_text = self.language_manager.GetText('TELEPORT_BUTTON_WITH_COST').format(home_text, self.teleport_system.teleport_cost_home)
-        teleport_main_menu.add_button(home_text, on_click=self.show_home_menu)
+        if ts.enable_teleport_home:
+            home_text = self.language_manager.GetText('TELEPORT_MAIN_MENU_HOME_BUTTON')
+            if ts.teleport_cost_home > 0:
+                home_text = self.language_manager.GetText('TELEPORT_BUTTON_WITH_COST').format(home_text, ts.teleport_cost_home)
+            teleport_main_menu.add_button(home_text, on_click=self.show_home_menu)
         
         # 随机传送按钮
-        if self.teleport_system.enable_random_teleport:
+        if ts.enable_random_teleport:
             random_text = self.language_manager.GetText('TELEPORT_MAIN_MENU_RANDOM_BUTTON')
-            if self.teleport_system.teleport_cost_random > 0:
-                random_text = self.language_manager.GetText('TELEPORT_BUTTON_WITH_COST').format(random_text, self.teleport_system.teleport_cost_random)
+            if ts.teleport_cost_random > 0:
+                random_text = self.language_manager.GetText('TELEPORT_BUTTON_WITH_COST').format(random_text, ts.teleport_cost_random)
             teleport_main_menu.add_button(random_text, on_click=self.start_random_teleport)
         
         # 如果玩家有死亡位置记录，显示返回死亡地点的按钮
-        if self.teleport_system.has_death_location(player.name):
-            death_location = self.teleport_system.get_death_location(player.name)
+        if ts.enable_teleport_death_location and ts.has_death_location(player.name):
+            death_location = ts.get_death_location(player.name)
             death_text = self.language_manager.GetText('TELEPORT_MAIN_MENU_DEATH_LOCATION_BUTTON').format(death_location['dimension'])
-            if self.teleport_system.teleport_cost_death_location > 0:
-                death_text = self.language_manager.GetText('TELEPORT_BUTTON_WITH_COST').format(death_text, self.teleport_system.teleport_cost_death_location)
+            if ts.teleport_cost_death_location > 0:
+                death_text = self.language_manager.GetText('TELEPORT_BUTTON_WITH_COST').format(death_text, ts.teleport_cost_death_location)
             teleport_main_menu.add_button(death_text, on_click=self.teleport_to_death_location)
         
         # 玩家传送请求按钮
-        player_request_text = self.language_manager.GetText('TELEPORT_MAIN_MENU_PLAYER_REQUEST_BUTTON')
-        if self.teleport_system.teleport_cost_player > 0:
-            player_request_text = self.language_manager.GetText('TELEPORT_BUTTON_WITH_COST').format(player_request_text, self.teleport_system.teleport_cost_player)
-        teleport_main_menu.add_button(player_request_text, on_click=self.show_player_teleport_request_menu)
+        if ts.enable_teleport_player:
+            player_request_text = self.language_manager.GetText('TELEPORT_MAIN_MENU_PLAYER_REQUEST_BUTTON')
+            if ts.teleport_cost_player > 0:
+                player_request_text = self.language_manager.GetText('TELEPORT_BUTTON_WITH_COST').format(player_request_text, ts.teleport_cost_player)
+            teleport_main_menu.add_button(player_request_text, on_click=self.show_player_teleport_request_menu)
 
         # 跨服传送按钮
-        teleport_main_menu.add_button(
-            self.language_manager.GetText('TELEPORT_MAIN_MENU_CROSS_SERVER_BUTTON'),
-            on_click=self.show_cross_server_menu
-        )
+        if ts.enable_teleport_cross_server:
+            teleport_main_menu.add_button(
+                self.language_manager.GetText('TELEPORT_MAIN_MENU_CROSS_SERVER_BUTTON'),
+                on_click=self.show_cross_server_menu
+            )
         
         # 返回
         teleport_main_menu.add_button(self.language_manager.GetText('RETURN_BUTTON_TEXT'),
@@ -8185,6 +8199,9 @@ class ARCCorePlugin(Plugin):
     # Teleport System UI
     def show_public_warp_menu(self, player: Player):
         """显示公共传送点菜单"""
+        if not self.teleport_system.enable_teleport_public_warp:
+            self._notify_teleport_feature_disabled(player)
+            return self.show_teleport_menu(player)
         public_warps = self.get_all_public_warps()
         if not public_warps:
             no_warp_panel = ActionForm(
@@ -8257,6 +8274,10 @@ class ARCCorePlugin(Plugin):
 
     def show_cross_server_menu(self, player: Player, on_close=None):
         """显示跨服传送菜单。back_menu 用于「返回」按钮目标；关闭窗口不会自动跳转。"""
+        if not self.teleport_system.enable_teleport_cross_server:
+            self._notify_teleport_feature_disabled(player)
+            back_menu = on_close if on_close is not None else self.show_teleport_menu
+            return back_menu(player)
         back_menu = on_close if on_close is not None else self.show_teleport_menu
         targets = self._get_all_cross_server_targets()
         if not targets:
@@ -8295,6 +8316,9 @@ class ARCCorePlugin(Plugin):
 
     def transfer_player_to_server(self, player: Player, server_host: str, server_port: int, server_name: str):
         """执行跨服传送。"""
+        if not self.teleport_system.enable_teleport_cross_server:
+            self._notify_teleport_feature_disabled(player)
+            return
         try:
             player.send_message(self.language_manager.GetText('CROSS_SERVER_TRANSFER_START').format(server_name))
             player.transfer(server_host, int(server_port))
@@ -8304,6 +8328,9 @@ class ARCCorePlugin(Plugin):
 
     def show_home_menu(self, player: Player):
         """显示玩家传送点菜单"""
+        if not self.teleport_system.enable_teleport_home:
+            self._notify_teleport_feature_disabled(player)
+            return self.show_teleport_menu(player)
         player_homes = self.get_player_homes(str(player.xuid))
         home_count = len(player_homes)
         
@@ -8455,6 +8482,9 @@ class ARCCorePlugin(Plugin):
     # Teleport Functions
     def teleport_to_public_warp(self, player: Player, warp_name: str, warp_info: Dict[str, Any]):
         """传送到公共传送点"""
+        if not self.teleport_system.enable_teleport_public_warp:
+            self._notify_teleport_feature_disabled(player)
+            return
         # 检查费用
         if self.teleport_system.teleport_cost_public_warp > 0:
             player_money = self.get_player_money(player)
@@ -8483,6 +8513,9 @@ class ARCCorePlugin(Plugin):
 
     def teleport_to_home(self, player: Player, home_name: str, home_info: Dict[str, Any]):
         """传送到玩家传送点"""
+        if not self.teleport_system.enable_teleport_home:
+            self._notify_teleport_feature_disabled(player)
+            return
         # 检查费用
         if self.teleport_system.teleport_cost_home > 0:
             player_money = self.get_player_money(player)
@@ -8578,6 +8611,9 @@ class ARCCorePlugin(Plugin):
     # Death Location Teleport
     def teleport_to_death_location(self, player: Player):
         """传送到死亡地点"""
+        if not self.teleport_system.enable_teleport_death_location:
+            self._notify_teleport_feature_disabled(player)
+            return
         if not self.teleport_system.has_death_location(player.name):
             player.send_message(self.language_manager.GetText('NO_DEATH_LOCATION_RECORDED'))
             return
@@ -8691,20 +8727,21 @@ class ARCCorePlugin(Plugin):
     # Player Teleport Request System
     def show_player_teleport_request_menu(self, player: Player):
         """显示玩家传送请求菜单"""
+        if not self.teleport_system.enable_teleport_player:
+            self._notify_teleport_feature_disabled(player)
+            return self.show_teleport_menu(player)
         request_menu = ActionForm(
             title=self.language_manager.GetText('PLAYER_TELEPORT_REQUEST_MENU_TITLE'),
             content=self.language_manager.GetText('PLAYER_TELEPORT_REQUEST_MENU_CONTENT'),
             on_close=None,
         )
         
+        send_btn = self.language_manager.GetText('SEND_PLAYER_TP_REQUEST_BUTTON')
+        if not send_btn or not str(send_btn).strip():
+            send_btn = "发送传送请求"
         request_menu.add_button(
-            self.language_manager.GetText('SEND_TPA_REQUEST_BUTTON'),
-            on_click=self.show_send_tpa_request_panel
-        )
-        
-        request_menu.add_button(
-            self.language_manager.GetText('SEND_TPHERE_REQUEST_BUTTON'),
-            on_click=self.show_send_tphere_request_panel
+            send_btn,
+            on_click=self.show_send_player_teleport_request_form
         )
         
         # 检查是否有待处理的请求
@@ -8722,12 +8759,15 @@ class ARCCorePlugin(Plugin):
 
         player.send_form(request_menu)
 
-    def show_send_tpa_request_panel(self, player: Player):
-        """显示发送TPA请求面板"""
-        online_players = [p for p in self.server.online_players if p.name != player.name]
-        if not online_players:
+    def show_send_player_teleport_request_form(self, player: Player):
+        """用下拉框选择请求类型与目标玩家。"""
+        if not self.teleport_system.enable_teleport_player:
+            self._notify_teleport_feature_disabled(player)
+            return self.show_teleport_menu(player)
+        target_names = [p.name for p in self.server.online_players if p.name != player.name]
+        if not target_names:
             no_players_panel = ActionForm(
-                title=self.language_manager.GetText('SEND_TPA_REQUEST_TITLE'),
+                title=self.language_manager.GetText('PLAYER_TELEPORT_REQUEST_MENU_TITLE'),
                 content=self.language_manager.GetText('NO_OTHER_PLAYERS_ONLINE'),
                 on_close=None,
             )
@@ -8738,62 +8778,62 @@ class ARCCorePlugin(Plugin):
             player.send_form(no_players_panel)
             return
 
-        tpa_menu = ActionForm(
-            title=self.language_manager.GetText('SEND_TPA_REQUEST_TITLE'),
-            content=self.language_manager.GetText('SEND_TPA_REQUEST_CONTENT'),
+        type_label = self.language_manager.GetText('PLAYER_TP_REQUEST_TYPE_LABEL') or "请求类型"
+        target_label = self.language_manager.GetText('PLAYER_TP_REQUEST_TARGET_LABEL') or "目标玩家"
+        type_dropdown = Dropdown(
+            label=type_label,
+            options=[
+                self.language_manager.GetText('SEND_TPA_REQUEST_BUTTON'),
+                self.language_manager.GetText('SEND_TPHERE_REQUEST_BUTTON'),
+            ],
+            default_index=0,
+        )
+        target_dropdown = Dropdown(
+            label=target_label,
+            options=target_names,
+            default_index=0,
+        )
+
+        def on_submit(p: Player, json_str: str):
+            try:
+                data = json.loads(json_str)
+            except Exception:
+                return self.show_player_teleport_request_menu(p)
+            if self._modal_choice_is_back(data, 0):
+                return self.show_player_teleport_request_menu(p)
+            try:
+                type_idx = int(data[1])
+                name_idx = int(data[2])
+            except (TypeError, ValueError, IndexError):
+                return self.show_player_teleport_request_menu(p)
+            if name_idx < 0 or name_idx >= len(target_names):
+                return self.show_player_teleport_request_menu(p)
+            target = self.server.get_player(target_names[name_idx])
+            if not target:
+                offline_msg = self.language_manager.GetText('TELEPORT_TARGET_OFFLINE')
+                if not offline_msg or not str(offline_msg).strip():
+                    offline_msg = "[弧光核心]目标玩家已下线"
+                p.send_message(offline_msg)
+                return self.show_player_teleport_request_menu(p)
+            if type_idx == 1:
+                self.send_tphere_request(p, target)
+            else:
+                self.send_tpa_request(p, target)
+            self.show_player_teleport_request_menu(p)
+
+        form = ModalForm(
+            title=self.language_manager.GetText('PLAYER_TELEPORT_REQUEST_MENU_TITLE'),
+            controls=[self._modal_nav_dropdown(), type_dropdown, target_dropdown],
             on_close=None,
+            on_submit=on_submit,
         )
-
-        for target_player in online_players:
-            tpa_menu.add_button(
-                self.language_manager.GetText('TPA_TARGET_BUTTON').format(target_player.name),
-                on_click=lambda p=player, t=target_player: self.send_tpa_request(p, t)
-            )
-
-        tpa_menu.add_button(
-            self.language_manager.GetText('RETURN_BUTTON_TEXT'),
-            on_click=self.show_player_teleport_request_menu,
-        )
-
-        player.send_form(tpa_menu)
-
-    def show_send_tphere_request_panel(self, player: Player):
-        """显示发送TPHERE请求面板"""
-        online_players = [p for p in self.server.online_players if p.name != player.name]
-        if not online_players:
-            no_players_panel = ActionForm(
-                title=self.language_manager.GetText('SEND_TPHERE_REQUEST_TITLE'),
-                content=self.language_manager.GetText('NO_OTHER_PLAYERS_ONLINE'),
-                on_close=None,
-            )
-            no_players_panel.add_button(
-                self.language_manager.GetText('RETURN_BUTTON_TEXT'),
-                on_click=self.show_player_teleport_request_menu,
-            )
-            player.send_form(no_players_panel)
-            return
-
-        tphere_menu = ActionForm(
-            title=self.language_manager.GetText('SEND_TPHERE_REQUEST_TITLE'),
-            content=self.language_manager.GetText('SEND_TPHERE_REQUEST_CONTENT'),
-            on_close=None,
-        )
-
-        for target_player in online_players:
-            tphere_menu.add_button(
-                self.language_manager.GetText('TPHERE_TARGET_BUTTON').format(target_player.name),
-                on_click=lambda p=player, t=target_player: self.send_tphere_request(p, t)
-            )
-
-        tphere_menu.add_button(
-            self.language_manager.GetText('RETURN_BUTTON_TEXT'),
-            on_click=self.show_player_teleport_request_menu,
-        )
-
-        player.send_form(tphere_menu)
+        player.send_form(form)
 
     def send_tpa_request(self, sender: Player, target: Player):
         """发送TPA请求（请求传送到目标玩家处）；费用在对方接受时从发起者扣除。"""
+        if not self.teleport_system.enable_teleport_player:
+            self._notify_teleport_feature_disabled(sender)
+            return
         if not self.teleport_system.add_request(target.name, 'tpa', sender.name):
             sender.send_message(self.language_manager.GetText('TELEPORT_REQUEST_ALREADY_EXISTS').format(target.name))
             return
@@ -8803,6 +8843,9 @@ class ARCCorePlugin(Plugin):
 
     def send_tphere_request(self, sender: Player, target: Player):
         """发送TPHERE请求（请求目标玩家传送过来）；费用在对方接受时从发起者扣除。"""
+        if not self.teleport_system.enable_teleport_player:
+            self._notify_teleport_feature_disabled(sender)
+            return
         if not self.teleport_system.add_request(target.name, 'tphere', sender.name):
             sender.send_message(self.language_manager.GetText('TELEPORT_REQUEST_ALREADY_EXISTS').format(target.name))
             return
