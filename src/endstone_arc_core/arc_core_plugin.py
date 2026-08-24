@@ -1489,30 +1489,63 @@ class ARCCorePlugin(Plugin):
             pass
             # self.logger.error(f"[ARC Core] on_player_interact error: {str(e)}")
 
+    def _suppress_explosion_block_break(self, event: ActorExplodeEvent, reason: str) -> None:
+        """禁止爆炸破坏方块，尽量保留实体伤害；无法清空 block_list 时回退为取消整次爆炸。"""
+        try:
+            if not hasattr(event, "block_list"):
+                event.is_cancelled = True
+                return
+            try:
+                event.block_list = []
+            except Exception as assign_err:
+                self.logger.warning(
+                    f"[ARC Core] clear explosion block_list failed ({reason}): {assign_err}; cancel event"
+                )
+                event.is_cancelled = True
+                return
+            # 写回后抽查：若仍非空则视为未生效，回退取消
+            try:
+                remaining = event.block_list
+                if remaining is not None and len(remaining) > 0:
+                    self.logger.warning(
+                        f"[ARC Core] explosion block_list still non-empty after clear ({reason}); cancel event"
+                    )
+                    event.is_cancelled = True
+            except Exception:
+                # 无法验证时保持已清空状态，不二次 cancel
+                pass
+        except Exception as e:
+            self.logger.warning(
+                f"[ARC Core] suppress explosion blocks failed ({reason}): {e}; cancel event"
+            )
+            try:
+                event.is_cancelled = True
+            except Exception:
+                pass
+
     @event_handler
     def on_actor_explode(self, event: ActorExplodeEvent):
-        """处理爆炸事件：全局拦截或按领地保护"""
+        """处理爆炸事件：全局/领地保护优先清空破坏列表（保留伤害），失败则取消整次爆炸。"""
         try:
             # 安全检查：确保 event.location 存在
             if not hasattr(event, 'location') or event.location is None:
                 self.logger.warning("[ARC Core] on_actor_explode: event.location is None, skipping")
                 return
 
-            # 全局拦截一切爆炸（默认开启）
-            if self._sky_eye_setting_bool("BLOCK_ALL_EXPLOSIONS", True):
-                event.is_cancelled = True
-                return
-
             explosion_location = event.location
             dimension = get_dimension_id(explosion_location.dimension)
-            
-            # 检查爆炸位置是否在任何领地内
+
+            # 全局拦截方块破坏（默认开启）：清空 block_list，保留实体伤害
+            if self._sky_eye_setting_bool("BLOCK_ALL_EXPLOSIONS", True):
+                self._suppress_explosion_block_break(event, "BLOCK_ALL_EXPLOSIONS")
+                return
+
+            # 爆炸中心落在禁止爆炸的领地：整片破坏列表清空（与旧 cancel 同级保护，但保留伤害）
             land_id = self.get_land_at_pos(dimension, math.floor(explosion_location.x), math.floor(explosion_location.z))
             if land_id is not None:
                 land_info = self.get_land_info(land_id)
                 if land_info and not land_info.get('allow_explosion', False):
-                    # 如果领地不允许爆炸，则取消爆炸事件
-                    event.is_cancelled = True
+                    self._suppress_explosion_block_break(event, f"land#{land_id}")
                     return
             
             # 安全检查：确保 block_list 存在且可迭代
@@ -1560,6 +1593,11 @@ class ARCCorePlugin(Plugin):
             
         except Exception as e:
             self.logger.error(f"Handle actor explode event error: {str(e)}")
+            # 外层异常时宁可取消爆炸，避免保护失效导致破坏方块
+            try:
+                event.is_cancelled = True
+            except Exception:
+                pass
 
     @event_handler
     def on_player_interact_actor(self, event: PlayerInteractActorEvent):

@@ -3,7 +3,7 @@
 # EndStone ARC Core Plugin / EndStone弧光核心
 
 [![Codacy Grade](https://app.codacy.com/project/badge/Grade/2f830615baf347258558dcc2a5ab85a1)](https://app.codacy.com/gh/DEVILENMO/EndstoneMC-ARC-Core-Plugin/dashboard?utm_source=gh&utm_medium=referral&utm_content=&utm_campaign=Badge_grade)
-[![Version](https://img.shields.io/badge/version-v0.8.19-blue)](https://github.com/ARC-Minecraft/EndstoneMC-ARC-Core-Plugin)
+[![Version](https://img.shields.io/badge/version-v0.8.20-blue)](https://github.com/ARC-Minecraft/EndstoneMC-ARC-Core-Plugin)
 [![Python](https://img.shields.io/badge/python-3.13+-blue?logo=python&logoColor=white)](https://www.python.org/)
 [![EndStone API](https://img.shields.io/badge/EndStone_API-0.7+-black)](https://github.com/EndstoneMC/endstone)
 [![License](https://img.shields.io/github/license/ARC-Minecraft/EndstoneMC-ARC-Core-Plugin)](LICENSE)
@@ -19,7 +19,7 @@ EndStone ARC Core 是一个功能完整的 EndStone (Minecraft 基岩版服务�
 
 - **作者**: DEVILENMO
 - **邮箱**: DEVILENMO@gmail.com
-- **版本**: 0.8.19
+- **版本**: 0.8.20
 - **API 版本**: 0.7+
 - **推荐 Python 版本**: 3.13
 
@@ -86,7 +86,7 @@ EndStone ARC Core 是一个功能完整的 EndStone (Minecraft 基岩版服务�
 - **领地移交功能** - 可将领地转移给其他玩家
 - **私人领地上架出售（v0.7.4）** - 领地详情中 **「出售领地（上架/改价/下架）」**：主人可设置正数标价并上架；其他玩家 **进入** 该私人领地时（非主人）在原有进入提示与边界粒子后，会收到 **购买表单**（领地名、标价、当前主人、购买/关闭）。购买时扣买家款、过户给买家、`owner_paid_money` 记为成交价，**清空授权列表**；卖家在线会收到成交通知。数据库 `lands` 表新增 **`for_sale`**、**`sale_price`**（旧库启动时自动 `ALTER`）。**公共领地 / 公会领地** 不适用此流程；若向卖家入账失败会尝试 **回滚过户并退款**（极端失败会提示联系管理员）
 - **私人领地成交增值税（v0.7.6 文档化）** - 配置 **`LAND_SALE_VAT_RATE`**（`core_setting.yml`，默认 `0.1` 即 10%，取值 **0～1**；**`0` 关闭**）。成交时 **买家按标价全额付款**；**卖家实收** = 成交价 − 增值税额。**税基（溢价）** = `max(0, 成交价 − 过户前 owner_paid_money)`；**增值税额** = 税基 × 税率（金额按分四舍五入）。平价或低于买入价成交不产生增值税。卖家在线提示中含成交价、增值税、实收（语言键 **`LAND_SALE_BUY_SUCCESS_SELLER`** 等，见 `ZH-CN.txt`）。**OP 重载配置** 后刷新税率
-- **爆炸保护设置** - 可单独控制领地内是否允许爆炸；全局开关 **`BLOCK_ALL_EXPLOSIONS`** 关闭时，按领地 **`allow_explosion`** 做 **逐方块** 保护（v0.8 修复拦截流程，见更新日志）
+- **爆炸保护设置** - 可单独控制领地内是否允许爆炸；全局 **`BLOCK_ALL_EXPLOSIONS`**（默认开）与领地禁止爆炸时优先 **清空 `block_list`**（不拆方块、尽量保留实体伤害），写回失败则回退取消整次爆炸；全局关闭时按领地 **`allow_explosion`** 做 **逐方块** 保护
 - **方块互动开放设置** - 可设置领地对所有人开放方块互动（如开箱子、按按钮等）
 - **生物保护系统** - 可控制领地内是否允许与生物交互和攻击生物
 - **展示框权限设置** - 可禁止领地对展示框/发光展示框及各材质展示架的互动与破坏（默认禁止，防止他人取物）；**关闭展示框权限时**，领地主人、授权玩家、子领地权限持有者及（若开启「公会成员可交互」）同公会成员 **仍可** 操作展示框/架，不受此项拦截
@@ -352,7 +352,7 @@ BROADCAST_INTERVAL=180               # 公告发送间隔 (秒)
 ENABLE_CLEANER=True                  # 是否启用清道夫
 CLEANER_INTERVAL=600                 # 清理间隔 (秒)
 
-# 全局爆炸拦截（默认开启）：True=取消一切爆炸事件；False=仅按领地 allow_explosion 保护
+# 全局爆炸拦截（默认开启）：True=禁止破坏方块（清空 block_list，尽量保留伤害；失败则取消事件）；False=仅按领地 allow_explosion 保护
 BLOCK_ALL_EXPLOSIONS=True
 
 # 天眼系统（Sky Eye，v0.8.8）：独立 SQLite plugins/ARCCore/sky_eye/skyeye.db
@@ -723,7 +723,11 @@ class MyPlugin(Plugin):
 
 ## 📋 近期更新日志
 
-### v0.8.19（当前版本）
+### v0.8.20（当前版本）
+
+- ✅ **爆炸保护保留伤害**：`BLOCK_ALL_EXPLOSIONS` 与领地禁止爆炸时，优先清空 `block_list`（不拆方块、保留实体伤害）；写回失败或仍非空则回退 `is_cancelled`，外层异常同样取消，避免保护失效
+
+### v0.8.19
 
 - ✅ **传送功能独立开关**：公共传送点 / Home / 随机传送 / 死亡点 / 玩家互传 / 跨服传送均可单独关闭（默认全开）；关闭后传送系统面板不显示对应按钮
 - ✅ **玩家互传改为下拉框**：发送 TPA/TPHERE 时用下拉框选择请求类型与目标玩家
