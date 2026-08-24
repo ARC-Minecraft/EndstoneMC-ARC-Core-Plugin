@@ -32,6 +32,15 @@ class LandSystem:
             BLOCK_ACTOR_SPAWN_MODE_WHITELIST,
         }
     )
+    # 拦截作用范围：public=仅公共领地（看各领地开关）；all=任意领地（按全局名单拦截）
+    BLOCK_ACTOR_SPAWN_SCOPE_PUBLIC = "public"
+    BLOCK_ACTOR_SPAWN_SCOPE_ALL = "all"
+    BLOCK_ACTOR_SPAWN_SCOPES = frozenset(
+        {
+            BLOCK_ACTOR_SPAWN_SCOPE_PUBLIC,
+            BLOCK_ACTOR_SPAWN_SCOPE_ALL,
+        }
+    )
 
     # 未开放展示框（allow_frame）时禁止交互/破坏的方块；配置项留空则使用此集合
     _DEFAULT_PUBLIC_LAND_INTERACT_BLOCK_BLACKLIST = frozenset({
@@ -82,6 +91,16 @@ class LandSystem:
         if s in ("white", "allowlist"):
             return LandSystem.BLOCK_ACTOR_SPAWN_MODE_WHITELIST
         return LandSystem.BLOCK_ACTOR_SPAWN_MODE_WHITELIST
+
+    @staticmethod
+    def clamp_block_actor_spawn_scope(value: Any) -> str:
+        """拦截作用范围：public / all；非法值按 public。"""
+        s = str(value or "").strip().lower()
+        if s in LandSystem.BLOCK_ACTOR_SPAWN_SCOPES:
+            return s
+        if s in ("any", "all_lands", "private"):
+            return LandSystem.BLOCK_ACTOR_SPAWN_SCOPE_ALL
+        return LandSystem.BLOCK_ACTOR_SPAWN_SCOPE_PUBLIC
 
     @staticmethod
     def normalize_actor_type_id(raw: Any) -> str:
@@ -149,6 +168,7 @@ class LandSystem:
         ] = None
         self._block_actor_spawn_list: frozenset = frozenset()
         self._block_actor_spawn_mode: str = LandSystem.BLOCK_ACTOR_SPAWN_MODE_WHITELIST
+        self._block_actor_spawn_scope: str = LandSystem.BLOCK_ACTOR_SPAWN_SCOPE_PUBLIC
         self._load_config()
 
     def set_persistent_error_callback(
@@ -172,6 +192,9 @@ class LandSystem:
         self.land_min_size = self._parse_int("LAND_MIN_SIZE", 5)
         self._block_actor_spawn_mode = self.clamp_block_actor_spawn_mode(
             self.setting_manager.GetSetting("PUBLIC_LAND_BLOCK_ACTOR_SPAWN_MODE")
+        )
+        self._block_actor_spawn_scope = self.clamp_block_actor_spawn_scope(
+            self.setting_manager.GetSetting("LAND_BLOCK_ACTOR_SPAWN_SCOPE")
         )
         self._block_actor_spawn_list = self._parse_actor_id_set(
             "PUBLIC_LAND_BLOCK_ACTOR_SPAWN_LIST"
@@ -1253,6 +1276,12 @@ class LandSystem:
 
     def get_block_actor_spawn_mode(self) -> str:
         return self._block_actor_spawn_mode
+
+    def get_block_actor_spawn_scope(self) -> str:
+        return self._block_actor_spawn_scope
+
+    def is_block_actor_spawn_all_lands(self) -> bool:
+        return self._block_actor_spawn_scope == self.BLOCK_ACTOR_SPAWN_SCOPE_ALL
 
     def get_block_actor_spawn_list(self) -> Set[str]:
         return set(self._block_actor_spawn_list)

@@ -1719,7 +1719,7 @@ class ARCCorePlugin(Plugin):
 
     @event_handler
     def on_actor_spawn(self, event: ActorSpawnEvent):
-        """公共领地开启拦截后，按全局黑/白名单取消除玩家外的实体生成。"""
+        """领地内按全局黑/白名单拦截生物生成（默认仅公共领地且看开关；scope=all 时任意领地）。"""
         try:
             actor = event.actor
             if actor is None or isinstance(actor, Player):
@@ -1732,14 +1732,19 @@ class ARCCorePlugin(Plugin):
             ay = math.floor(loc.y)
             az = math.floor(loc.z)
             land_id = self.get_land_at_pos(dimension, ax, az, ay)
-            if land_id is None or not self.is_public_land(land_id):
+            if land_id is None:
                 return
             land_info = self.get_land_info(land_id)
             if not land_info:
                 return
+            scope_all = self.land_system.is_block_actor_spawn_all_lands()
+            if not scope_all and not self.is_public_land(land_id):
+                return
+            # public：尊重各公共领地 block_actor_spawn；all：任意领地直接按名单拦截
+            land_enabled = True if scope_all else bool(land_info.get("block_actor_spawn", False))
             actor_type = getattr(actor, "type", None) or getattr(actor, "identifier", None) or ""
             if self.land_system.should_block_public_land_actor_spawn(
-                land_info.get("block_actor_spawn", False),
+                land_enabled,
                 actor_type,
             ):
                 event.is_cancelled = True

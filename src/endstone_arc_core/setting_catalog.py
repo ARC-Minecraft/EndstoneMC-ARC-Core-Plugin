@@ -39,6 +39,11 @@ SPAWN_MODE_CHOICES: List[Tuple[str, str]] = [
     ("blacklist", "blacklist（黑名单）"),
 ]
 
+SPAWN_SCOPE_CHOICES: List[Tuple[str, str]] = [
+    ("public", "public（仅公共领地）"),
+    ("all", "all（全部领地）"),
+]
+
 SETTING_GROUPS: List[Dict[str, object]] = [
     {
         "id": "general",
@@ -115,6 +120,12 @@ SETTING_GROUPS: List[Dict[str, object]] = [
                 "公共领地拦截生物生成模式",
                 "choice",
                 choices=SPAWN_MODE_CHOICES,
+            ),
+            _s(
+                "LAND_BLOCK_ACTOR_SPAWN_SCOPE",
+                "拦截生物生成作用范围",
+                "choice",
+                choices=SPAWN_SCOPE_CHOICES,
             ),
             _s(
                 "PUBLIC_LAND_BLOCK_ACTOR_SPAWN_LIST",

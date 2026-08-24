@@ -71,6 +71,8 @@ PUBLIC_LAND_PROTECTED_ENTITIES=minecraft:villager_v2,minecraft:iron_golem,minecr
 # 公共领地拦截生物生成模式：whitelist=白名单（名单上的不拦截，空名单则拦截全部）；blacklist=黑名单（只拦截名单上的）
 # 各公共领地在 OP 公共领地设置中单独开关拦截；旧配置 False/off 视为 whitelist
 PUBLIC_LAND_BLOCK_ACTOR_SPAWN_MODE=whitelist
+# 拦截生物生成作用范围：public=仅公共领地（看各领地开关，默认）；all=任意领地（私人/公会/公共均按名单拦截，不看各领地开关）
+LAND_BLOCK_ACTOR_SPAWN_SCOPE=public
 # 公共领地拦截生物生成名单（逗号分隔实体 ID）。白名单时名单上的不拦截；黑名单时只拦截名单上的
 # 支持命名空间前缀：oreville_wb: 或 oreville_wb:* 可匹配该命名空间下全部实体
 PUBLIC_LAND_BLOCK_ACTOR_SPAWN_LIST=

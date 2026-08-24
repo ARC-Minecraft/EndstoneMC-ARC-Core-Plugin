@@ -3,7 +3,7 @@
 # EndStone ARC Core Plugin / EndStone弧光核心
 
 [![Codacy Grade](https://app.codacy.com/project/badge/Grade/2f830615baf347258558dcc2a5ab85a1)](https://app.codacy.com/gh/DEVILENMO/EndstoneMC-ARC-Core-Plugin/dashboard?utm_source=gh&utm_medium=referral&utm_content=&utm_campaign=Badge_grade)
-[![Version](https://img.shields.io/badge/version-v0.8.20-blue)](https://github.com/ARC-Minecraft/EndstoneMC-ARC-Core-Plugin)
+[![Version](https://img.shields.io/badge/version-v0.8.21-blue)](https://github.com/ARC-Minecraft/EndstoneMC-ARC-Core-Plugin)
 [![Python](https://img.shields.io/badge/python-3.13+-blue?logo=python&logoColor=white)](https://www.python.org/)
 [![EndStone API](https://img.shields.io/badge/EndStone_API-0.7+-black)](https://github.com/EndstoneMC/endstone)
 [![License](https://img.shields.io/github/license/ARC-Minecraft/EndstoneMC-ARC-Core-Plugin)](LICENSE)
@@ -19,7 +19,7 @@ EndStone ARC Core 是一个功能完整的 EndStone (Minecraft 基岩版服务�
 
 - **作者**: DEVILENMO
 - **邮箱**: DEVILENMO@gmail.com
-- **版本**: 0.8.20
+- **版本**: 0.8.21
 - **API 版本**: 0.7+
 - **推荐 Python 版本**: 3.13
 
@@ -82,7 +82,7 @@ EndStone ARC Core 是一个功能完整的 EndStone (Minecraft 基岩版服务�
 - **子领地系统** - 领地主人可在领地内创建子领地并授权他人；子领地为三维、不可重叠、不可超出父领地；交互时先判子领地权限再判父领地
 - **公共领地「允许圈私人领地」** - 公共领地可开启后，玩家可在其内购买私人领地；同一位置优先按私人领地权限判定
 - **公共领地三级优先级** - 字段 `public_priority`（1/2/3，**3 最高**，默认 1）。高优先级公共可覆盖低优先级公共；同级不可重叠。生效顺序：**私人/公会 > 公共(3>2>1)**；私人子领地权限仍先于父私人领地。创建公共领地时 OP 选择等级；OP 公共领地设置中可修改（若与同级/更高公共冲突则拒绝）
-- **公共领地「拦截生物生成」** - 每个公共领地可单独开关（数据库字段 `block_actor_spawn`）。全局配置 **`PUBLIC_LAND_BLOCK_ACTOR_SPAWN_MODE`** 仅决定拦截规则：**whitelist**（默认）= 名单上的不拦截、其余拦截（名单为空则拦截全部）；**blacklist** = 只拦截名单上的。名单见 **`PUBLIC_LAND_BLOCK_ACTOR_SPAWN_LIST`**（逗号分隔实体 ID）。领地开关开启后通过 `ActorSpawnEvent` 取消该公共领地内**除玩家外**的匹配实体生成（含模组生物）
+- **公共领地「拦截生物生成」** - 每个公共领地可单独开关（数据库字段 `block_actor_spawn`）。全局配置 **`PUBLIC_LAND_BLOCK_ACTOR_SPAWN_MODE`** 仅决定拦截规则：**whitelist**（默认）= 名单上的不拦截、其余拦截（名单为空则拦截全部）；**blacklist** = 只拦截名单上的。名单见 **`PUBLIC_LAND_BLOCK_ACTOR_SPAWN_LIST`**（逗号分隔实体 ID）。**`LAND_BLOCK_ACTOR_SPAWN_SCOPE`**：`public`（默认）= 仅公共领地且看各领地开关；`all` = 任意领地（私人/公会/公共）均按全局名单拦截、不看各领地开关。通过 `ActorSpawnEvent` 取消匹配实体生成（含模组生物，不含玩家）
 - **领地移交功能** - 可将领地转移给其他玩家
 - **私人领地上架出售（v0.7.4）** - 领地详情中 **「出售领地（上架/改价/下架）」**：主人可设置正数标价并上架；其他玩家 **进入** 该私人领地时（非主人）在原有进入提示与边界粒子后，会收到 **购买表单**（领地名、标价、当前主人、购买/关闭）。购买时扣买家款、过户给买家、`owner_paid_money` 记为成交价，**清空授权列表**；卖家在线会收到成交通知。数据库 `lands` 表新增 **`for_sale`**、**`sale_price`**（旧库启动时自动 `ALTER`）。**公共领地 / 公会领地** 不适用此流程；若向卖家入账失败会尝试 **回滚过户并退款**（极端失败会提示联系管理员）
 - **私人领地成交增值税（v0.7.6 文档化）** - 配置 **`LAND_SALE_VAT_RATE`**（`core_setting.yml`，默认 `0.1` 即 10%，取值 **0～1**；**`0` 关闭**）。成交时 **买家按标价全额付款**；**卖家实收** = 成交价 − 增值税额。**税基（溢价）** = `max(0, 成交价 − 过户前 owner_paid_money)`；**增值税额** = 税基 × 税率（金额按分四舍五入）。平价或低于买入价成交不产生增值税。卖家在线提示中含成交价、增值税、实收（语言键 **`LAND_SALE_BUY_SUCCESS_SELLER`** 等，见 `ZH-CN.txt`）。**OP 重载配置** 后刷新税率
@@ -371,10 +371,12 @@ DEFAULT_FREE_LAND_BLOCKS=100         # 新玩家默认免费领地格子数
 # 公共领地白名单保护生物 (v0.2.1，逗号分隔)
 PUBLIC_LAND_PROTECTED_ENTITIES=minecraft:villager,minecraft:iron_golem,minecraft:snow_golem
 
-# 公共领地拦截生物生成 (v0.8.18)
+# 公共领地拦截生物生成 (v0.8.18 / v0.8.21)
 # 模式：whitelist=白名单（名单上的不拦截，空名单则拦截全部）；blacklist=黑名单（只拦截名单上的）
 # 各公共领地在 OP 公共领地设置中单独开关拦截；旧配置 False/off 视为 whitelist
 PUBLIC_LAND_BLOCK_ACTOR_SPAWN_MODE=whitelist
+# 作用范围：public=仅公共领地且看各领地开关（默认）；all=任意领地均按名单拦截（不看各领地开关）
+LAND_BLOCK_ACTOR_SPAWN_SCOPE=public
 # 拦截名单（逗号分隔实体 ID）：白名单=名单上的不拦截；黑名单=只拦截名单上的
 PUBLIC_LAND_BLOCK_ACTOR_SPAWN_LIST=
 
@@ -723,7 +725,11 @@ class MyPlugin(Plugin):
 
 ## 📋 近期更新日志
 
-### v0.8.20（当前版本）
+### v0.8.21（当前版本）
+
+- ✅ **拦截生物生成作用范围**：新增 **`LAND_BLOCK_ACTOR_SPAWN_SCOPE`**（`public` 默认 / `all`）。`public` 仅公共领地且看各领地开关；`all` 时任意领地按全局黑/白名单拦截
+
+### v0.8.20
 
 - ✅ **爆炸保护保留伤害**：`BLOCK_ALL_EXPLOSIONS` 与领地禁止爆炸时，优先清空 `block_list`（不拆方块、保留实体伤害）；写回失败或仍非空则回退 `is_cancelled`，外层异常同样取消，避免保护失效
 
