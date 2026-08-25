@@ -171,3 +171,18 @@ GUILD_LAND_TELEPORT_CONTRIB_COST=10
 # 计算公式：贡献点 = floor(击杀金钱奖励 * 比例)；例如击杀奖励 10 元，比例 0.5，则获得 5 公会贡献点
 # 仅当玩家已加入公会时生效；未加入公会则静默跳过；设为 0 关闭该功能
 KILL_REWARD_GUILD_CONTRIB_RATIO=0.5
+
+# =============================================================================
+# 侧边栏（原生计分板 SIDE_BAR，多页面定时翻页）
+# =============================================================================
+SIDEBAR_ENABLE=True
+SIDEBAR_DEFAULT_ON=True
+SIDEBAR_TITLE=§l§b弧 光 服 务 器
+# 可见页面数 >= 2 时自动翻页间隔（秒）
+SIDEBAR_SWITCH_INTERVAL=10
+# 刷新周期（tick，20=1秒）；影响时间/生命等内置变量的更新频率
+SIDEBAR_REFRESH_TICKS=20
+SIDEBAR_MAX_LINES=15
+# 主页面行模板，用 \n 分隔；留空则使用内置默认（时间/金钱/生命/饱食/在线）
+# 可用占位符：{time}{date}{player}{money}{hp}{max_hp}{food}{online}{mc_time}{title}{guild}{page}{page_total}
+SIDEBAR_MAIN_LINES=

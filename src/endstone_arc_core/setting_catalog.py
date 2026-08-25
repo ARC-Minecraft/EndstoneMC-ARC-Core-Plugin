@@ -229,6 +229,24 @@ SETTING_GROUPS: List[Dict[str, object]] = [
             _s("KILL_REWARD_GUILD_CONTRIB_RATIO", "击杀金钱转贡献比例", "float", placeholder="0.5"),
         ],
     },
+    {
+        "id": "sidebar",
+        "title": "侧边栏",
+        "items": [
+            _s("SIDEBAR_ENABLE", "启用侧边栏", "bool", choices=BOOL_CHOICES),
+            _s("SIDEBAR_DEFAULT_ON", "新玩家默认开启", "bool", choices=BOOL_CHOICES),
+            _s("SIDEBAR_TITLE", "侧边栏标题", "string", placeholder="§l§b弧 光 服 务 器"),
+            _s("SIDEBAR_SWITCH_INTERVAL", "翻页间隔（秒）", "int", placeholder="10"),
+            _s("SIDEBAR_REFRESH_TICKS", "刷新周期（tick）", "int", placeholder="20"),
+            _s("SIDEBAR_MAX_LINES", "最大行数", "int", placeholder="15"),
+            _s(
+                "SIDEBAR_MAIN_LINES",
+                "主页面行模板（\\n 分隔）",
+                "string",
+                placeholder="留空=内置默认",
+            ),
+        ],
+    },
 ]
 
 

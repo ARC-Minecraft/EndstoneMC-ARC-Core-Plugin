@@ -47,6 +47,7 @@ from endstone_arc_core.sky_eye_log import SkyEyeStore, format_sky_eye_records, p
 from endstone_arc_core.sync_server import SyncServer
 from endstone_arc_core.sync_client import SyncClient
 from endstone_arc_core.sync_config import ALL_SHARED_SETTING_KEYS, resolve_sync_consumer_mode
+from endstone_arc_core.SidebarSystem import SidebarSystem
 
 MAIN_PATH = 'plugins/ARCCore'
 # 天眼系统：独立 SQLite + 兼容清理旧按日 txt
@@ -103,11 +104,41 @@ class ARCCorePlugin(Plugin):
             "description": "Cross-server: no args opens picker; else transfer by server name.",
             "usages": ["/connecttoserver", "/connecttoserver <server_name: str>"],
             "permissions": ["arc_core.command.common"],
-        }
+        },
+        "sidebar": {
+            "description": "Sidebar: on/off, next/prev, lock/unlock, list.",
+            "usages": [
+                "/sidebar",
+                "/sidebar on",
+                "/sidebar off",
+                "/sidebar next",
+                "/sidebar prev",
+                "/sidebar lock",
+                "/sidebar lock <page: str>",
+                "/sidebar unlock",
+                "/sidebar list",
+            ],
+            "permissions": ["arc_core.command.common"],
+        },
+        "sb": {
+            "description": "Alias of /sidebar.",
+            "usages": [
+                "/sb",
+                "/sb on",
+                "/sb off",
+                "/sb next",
+                "/sb prev",
+                "/sb lock",
+                "/sb lock <page: str>",
+                "/sb unlock",
+                "/sb list",
+            ],
+            "permissions": ["arc_core.command.common"],
+        },
     }
     permissions = {
         "arc_core.command.common": {
-            "description": "Commands for all players (arc, suicide, spawn, land, connecttoserver, /arc guild).",
+            "description": "Commands for all players (arc, suicide, spawn, land, connecttoserver, sidebar, /arc guild).",
             "default": True,
         },
         "arc_core.command.op": {
@@ -165,6 +196,7 @@ class ARCCorePlugin(Plugin):
             self.economy,
             on_money_changed=self._update_richest_title_if_needed,
         )
+        self.sidebar_system = SidebarSystem(self)
         self.init_database()
         self._arc_error_log_path = str(Path(MAIN_PATH) / "error_log.txt")
 
@@ -490,6 +522,27 @@ class ARCCorePlugin(Plugin):
             except Exception:
                 pass
 
+        # 侧边栏总控：定时刷新 + 多页轮播
+        try:
+            self.sidebar_system.reload_config()
+            if self.sidebar_system.enabled:
+                period = max(1, int(self.sidebar_system.refresh_ticks))
+                self.server.scheduler.run_task(
+                    self, self.sidebar_system.tick, delay=period, period=period
+                )
+                self.logger.info(
+                    f"[ARC Core]Sidebar system started, refresh={period} ticks, "
+                    f"switch={self.sidebar_system.switch_interval}s"
+                )
+                # 热重载时给已在线玩家补建侧边栏
+                for online in list(self.server.online_players or []):
+                    try:
+                        self.sidebar_system.on_player_join(online)
+                    except Exception:
+                        pass
+        except Exception as e:
+            self.logger.error(f"[ARC Core]Sidebar system start error: {e}")
+
     def _init_sync_service(self) -> None:
         """初始化跨服数据同步：同步中心（可选）与远程客户端（与文件路径互斥）。"""
         enable_sync_server = self.setting_manager.GetSetting('ENABLE_SYNC_SERVER')
@@ -580,6 +633,11 @@ class ARCCorePlugin(Plugin):
         try:
             if getattr(self, "sky_eye_store", None) is not None:
                 self.sky_eye_store.close()
+        except Exception:
+            pass
+        try:
+            if getattr(self, "sidebar_system", None) is not None:
+                self.sidebar_system.shutdown()
         except Exception:
             pass
         self.logger.info(f"{ColorFormat.YELLOW}[ARC Core]Plugin disabled!")
@@ -778,7 +836,97 @@ class ARCCorePlugin(Plugin):
                 str(target.get('server_name') or server_name),
             )
             return True
+        if command.name in ("sidebar", "sb"):
+            return self._handle_sidebar_command(sender, args)
         return False
+
+    def _handle_sidebar_command(self, sender: CommandSender, args: list[str]) -> bool:
+        player = self._resolve_player_for_command_sender(sender)
+        if player is None:
+            if not isinstance(sender, Player):
+                sender.send_message("[ARC Core]This command only works for players.")
+            return True
+        if not getattr(self, "sidebar_system", None) or not self.sidebar_system.enabled:
+            msg = self.language_manager.GetText("SIDEBAR_DISABLED") or "[弧光核心]侧边栏功能未启用。"
+            player.send_message(msg)
+            return True
+
+        def _t(key: str, fallback: str) -> str:
+            text = self.language_manager.GetText(key)
+            return text if text and str(text).strip() else fallback
+
+        sub = (args[0].lower() if args else "").strip()
+        rest = args[1:] if len(args) > 1 else []
+
+        if not sub or sub in ("toggle", "switch"):
+            was_on = self.sidebar_system.is_enabled_for(player)
+            self.sidebar_system.toggle_enabled(player)
+            if was_on:
+                player.send_message(_t("SIDEBAR_OFF", "[弧光核心]侧边栏已关闭。"))
+            else:
+                player.send_message(_t("SIDEBAR_ON", "[弧光核心]侧边栏已开启。"))
+            return True
+        if sub == "on":
+            self.sidebar_system.set_enabled(player, True)
+            player.send_message(_t("SIDEBAR_ON", "[弧光核心]侧边栏已开启。"))
+            return True
+        if sub == "off":
+            self.sidebar_system.set_enabled(player, False)
+            player.send_message(_t("SIDEBAR_OFF", "[弧光核心]侧边栏已关闭。"))
+            return True
+        if sub == "next":
+            page = self.sidebar_system.flip_page(player, 1)
+            if page is None:
+                player.send_message(_t("SIDEBAR_NO_PAGE", "[弧光核心]当前没有可显示的侧边栏页面。"))
+            else:
+                player.send_message(
+                    _t("SIDEBAR_FLIPPED", "[弧光核心]已切换到：{0}").format(page.title)
+                )
+            return True
+        if sub == "prev":
+            page = self.sidebar_system.flip_page(player, -1)
+            if page is None:
+                player.send_message(_t("SIDEBAR_NO_PAGE", "[弧光核心]当前没有可显示的侧边栏页面。"))
+            else:
+                player.send_message(
+                    _t("SIDEBAR_FLIPPED", "[弧光核心]已切换到：{0}").format(page.title)
+                )
+            return True
+        if sub == "lock":
+            ref = " ".join(rest).strip() if rest else ""
+            page = self.sidebar_system.lock_page(player, ref)
+            if page is None:
+                player.send_message(_t("SIDEBAR_NO_PAGE", "[弧光核心]当前没有可显示的侧边栏页面。"))
+            else:
+                player.send_message(
+                    _t("SIDEBAR_LOCKED", "[弧光核心]已锁定页面：{0}").format(page.title)
+                )
+            return True
+        if sub == "unlock":
+            self.sidebar_system.unlock_page(player)
+            player.send_message(_t("SIDEBAR_UNLOCKED", "[弧光核心]已解除页面锁定，恢复自动翻页。"))
+            return True
+        if sub == "list":
+            pages = self.sidebar_system.get_visible_pages_for_player(player)
+            if not pages:
+                player.send_message(_t("SIDEBAR_NO_PAGE", "[弧光核心]当前没有可显示的侧边栏页面。"))
+                return True
+            cur = self.sidebar_system.get_current_page(player)
+            lines = []
+            for i, p in enumerate(pages, start=1):
+                mark = " §a◀" if cur is not None and p.page_id == cur.page_id else ""
+                lines.append(f"§e{i}. §f{p.title} §7({p.page_id}){mark}")
+            header = _t("SIDEBAR_PAGE_LIST", "[弧光核心]侧边栏页面列表：")
+            player.send_message(header + "\n" + "\n".join(lines))
+            return True
+
+        player.send_message(
+            _t(
+                "SIDEBAR_USAGE",
+                "[弧光核心]用法：/sidebar [on|off|next|prev|lock|unlock|list]",
+            )
+        )
+        return True
 
     @staticmethod
     def _strip_minecraft_format_codes(text: str) -> str:
@@ -957,6 +1105,12 @@ class ARCCorePlugin(Plugin):
             pass
         # Join 完成后再开始追踪；此前 GameModeChange 等加载事件一律忽略
         self._sky_eye_mark_ready(event.player)
+
+        try:
+            if getattr(self, "sidebar_system", None) is not None:
+                self.sidebar_system.on_player_join(event.player)
+        except Exception:
+            pass
 
     def _sky_eye_player_key(self, player: Optional[Player]) -> str:
         if player is None:
@@ -1145,6 +1299,11 @@ class ARCCorePlugin(Plugin):
                 del self.player_in_land_id_dict[event.player.name]
         self.player_land_creation_pick.pop(event.player.name, None)
         self.player_land_pick_last_event_ts.pop(event.player.name, None)
+        try:
+            if getattr(self, "sidebar_system", None) is not None:
+                self.sidebar_system.on_player_quit(event.player)
+        except Exception:
+            pass
 
     @event_handler
     def on_block_break(self, event: BlockBreakEvent):
@@ -2651,6 +2810,7 @@ class ARCCorePlugin(Plugin):
         self.title_system.ensure_tables()
         self.guild_system.ensure_tables()
         self.conditional_titles.ensure_tables()
+        self.sidebar_system.init_pref_table()
 
     def _can_compute_conditional_titles(self) -> bool:
         """跨服从服不计算条件头衔；主服与单机计算。"""
@@ -13439,6 +13599,11 @@ class ARCCorePlugin(Plugin):
             self._init_cleaner_system()
             self._init_mspt_emergency_shutdown_settings()
             self.kill_reward_guild_contrib_ratio = self._load_kill_reward_guild_contrib_ratio()
+            try:
+                if getattr(self, "sidebar_system", None) is not None:
+                    self.sidebar_system.reload_config()
+            except Exception:
+                pass
         except Exception as e:
             self.logger.error(f"[ARC Core]Reapply cached settings error: {str(e)}")
 
@@ -14569,6 +14734,175 @@ class ARCCorePlugin(Plugin):
         if not resolved:
             return 0.0
         return self.economy.get_player_money_by_xuid(resolved)
+
+    # ------------------------------------------------------------------ 侧边栏 API
+    def api_sidebar_register_page(
+        self,
+        page_id: str,
+        title: str,
+        lines,
+        owner: str = "",
+        priority: int = 0,
+        hide_line_if_missing: bool = True,
+    ) -> bool:
+        """注册侧边栏页面。lines 为行模板列表，可用 {key} 占位符。"""
+        try:
+            return bool(
+                self.sidebar_system.register_page(
+                    page_id,
+                    title,
+                    list(lines or []),
+                    owner=owner,
+                    priority=priority,
+                    hide_line_if_missing=hide_line_if_missing,
+                )
+            )
+        except Exception as e:
+            try:
+                if self.logger:
+                    self.logger.error(f"[ARC Core]api_sidebar_register_page error: {e}")
+            except Exception:
+                pass
+            return False
+
+    def api_sidebar_unregister_page(self, page_id: str) -> bool:
+        """注销侧边栏页面（不可注销核心主页面 arc_core_main）。"""
+        try:
+            return bool(self.sidebar_system.unregister_page(page_id))
+        except Exception:
+            return False
+
+    def api_sidebar_set_page_lines(self, page_id: str, lines) -> bool:
+        """更换已注册页面的行模板。"""
+        try:
+            return bool(self.sidebar_system.set_page_lines(page_id, list(lines or [])))
+        except Exception:
+            return False
+
+    def api_sidebar_set_page_title(self, page_id: str, title: str) -> bool:
+        """更换已注册页面的标题。"""
+        try:
+            return bool(self.sidebar_system.set_page_title(page_id, title))
+        except Exception:
+            return False
+
+    def api_sidebar_set_value(
+        self,
+        page_id: str,
+        key: str,
+        value,
+        player_name: str = "",
+        xuid: str = "",
+    ) -> bool:
+        """设置页面键值。传 xuid/player_name 则为该玩家私有值，否则为全服全局值。"""
+        try:
+            resolved = ""
+            if xuid or player_name:
+                resolved = self._api_resolve_player_xuid(player_name, xuid) or ""
+                if not resolved:
+                    return False
+            return bool(
+                self.sidebar_system.set_value(page_id, key, value, xuid=resolved)
+            )
+        except Exception:
+            return False
+
+    def api_sidebar_set_values(
+        self,
+        page_id: str,
+        values: dict,
+        player_name: str = "",
+        xuid: str = "",
+    ) -> bool:
+        """批量设置页面键值。传 xuid/player_name 则为该玩家私有值。"""
+        try:
+            resolved = ""
+            if xuid or player_name:
+                resolved = self._api_resolve_player_xuid(player_name, xuid) or ""
+                if not resolved:
+                    return False
+            return bool(
+                self.sidebar_system.set_values(page_id, dict(values or {}), xuid=resolved)
+            )
+        except Exception:
+            return False
+
+    def api_sidebar_get_value(
+        self,
+        page_id: str,
+        key: str,
+        player_name: str = "",
+        xuid: str = "",
+        default=None,
+    ):
+        """读取页面键值（玩家私有优先，其次全局）。"""
+        try:
+            resolved = ""
+            if xuid or player_name:
+                resolved = self._api_resolve_player_xuid(player_name, xuid) or ""
+            return self.sidebar_system.get_value(
+                page_id, key, xuid=resolved, default=default
+            )
+        except Exception:
+            return default
+
+    def api_sidebar_clear_values(
+        self, page_id: str, player_name: str = "", xuid: str = ""
+    ) -> bool:
+        """清除页面键值。传玩家则只清该玩家私有值。"""
+        try:
+            resolved = ""
+            if xuid or player_name:
+                resolved = self._api_resolve_player_xuid(player_name, xuid) or ""
+                if not resolved:
+                    return False
+            return bool(self.sidebar_system.clear_values(page_id, xuid=resolved))
+        except Exception:
+            return False
+
+    def api_sidebar_set_global_value(self, page_id: str, key: str, value) -> bool:
+        """设置页面对全服生效的全局键值。"""
+        try:
+            return bool(self.sidebar_system.set_global_value(page_id, key, value))
+        except Exception:
+            return False
+
+    def api_sidebar_set_page_visible(
+        self,
+        page_id: str,
+        visible: bool,
+        player_name: str = "",
+        xuid: str = "",
+    ) -> bool:
+        """按玩家显隐某个已注册页面（主页面不可隐藏）。"""
+        try:
+            resolved = self._api_resolve_player_xuid(player_name, xuid)
+            if not resolved:
+                return False
+            return bool(
+                self.sidebar_system.set_page_visible(page_id, visible, resolved)
+            )
+        except Exception:
+            return False
+
+    def api_sidebar_refresh(self, player_name: str = "", xuid: str = "") -> None:
+        """立即重绘侧边栏。不传玩家则刷新所有在线玩家。"""
+        try:
+            resolved = ""
+            if xuid or player_name:
+                resolved = self._api_resolve_player_xuid(player_name, xuid) or ""
+                if not resolved:
+                    return
+            self.sidebar_system.refresh(xuid=resolved)
+        except Exception:
+            pass
+
+    def api_sidebar_list_pages(self) -> list:
+        """列出已注册侧边栏页面。"""
+        try:
+            return list(self.sidebar_system.list_pages())
+        except Exception:
+            return []
 
     def api_get_richest_player_money_data(self) -> list:
         result = self.economy.get_richest_one()

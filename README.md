@@ -3,7 +3,7 @@
 # EndStone ARC Core Plugin / EndStone弧光核心
 
 [![Codacy Grade](https://app.codacy.com/project/badge/Grade/2f830615baf347258558dcc2a5ab85a1)](https://app.codacy.com/gh/DEVILENMO/EndstoneMC-ARC-Core-Plugin/dashboard?utm_source=gh&utm_medium=referral&utm_content=&utm_campaign=Badge_grade)
-[![Version](https://img.shields.io/badge/version-v0.8.22-blue)](https://github.com/ARC-Minecraft/EndstoneMC-ARC-Core-Plugin)
+[![Version](https://img.shields.io/badge/version-v0.9.0-blue)](https://github.com/ARC-Minecraft/EndstoneMC-ARC-Core-Plugin)
 [![Python](https://img.shields.io/badge/python-3.13+-blue?logo=python&logoColor=white)](https://www.python.org/)
 [![EndStone API](https://img.shields.io/badge/EndStone_API-0.7+-black)](https://github.com/EndstoneMC/endstone)
 [![License](https://img.shields.io/github/license/ARC-Minecraft/EndstoneMC-ARC-Core-Plugin)](LICENSE)
@@ -13,13 +13,13 @@
 
 ## 概述
 
-EndStone ARC Core 是一个功能完整的 EndStone (Minecraft 基岩版服务器) 插件，为服务器提供全方位的核心功能模块。该插件包含玩家管理、经济系统、领地管理、传送系统、公告系统、清道夫系统、天眼行为审计等丰富功能，是构建现代化 Minecraft 服务器的理想选择。插件体验服：IP：arcclub.top，端口：19132，你可以在这个服务器试用体验本插件。
+EndStone ARC Core 是一个功能完整的 EndStone (Minecraft 基岩版服务器) 插件，为服务器提供全方位的核心功能模块。该插件包含玩家管理、经济系统、领地管理、传送系统、公告系统、清道夫系统、天眼行为审计、**侧边栏总控**等丰富功能，是构建现代化 Minecraft 服务器的理想选择。插件体验服：IP：arcclub.top，端口：19132，你可以在这个服务器试用体验本插件。
 
 ## 作者信息
 
 - **作者**: DEVILENMO
 - **邮箱**: DEVILENMO@gmail.com
-- **版本**: 0.8.22
+- **版本**: 0.9.0
 - **API 版本**: 0.7+
 - **推荐 Python 版本**: 3.13
 
@@ -71,6 +71,14 @@ EndStone ARC Core 是一个功能完整的 EndStone (Minecraft 基岩版服务�
 - 管理员金钱操作命令
 - 实时余额变动提醒
 - **财富榜首富头衔（v0.4.0 / v0.8.22）** - 配置 `RICHEST_TITLE_NAME`（默认「首富」）、传奇稀有度；金钱变动后自动刷新财富榜第一；若首富易主则撤销旧头衔并授予新首富；同分按 xuid 稳定排序；跨服仅主服计算、从服只消费同步头衔；可在 **OP 面板 → 经济管理 → 经济参数配置** 中修改
+
+### 📊 侧边栏总控（v0.9.0）
+- **原生计分板 SIDE_BAR**：每玩家独立 `Scoreboard`，双缓冲刷新减少闪烁
+- **多页面 + 定时翻页**：可见页 ≥ 2 时默认每 **10 秒**自动切换；可用 `/sidebar lock` 锁定
+- **核心主页面 `arc_core_main`**：现实时间、金钱、生命、饱食度、在线人数等（模板可配）
+- **其它插件注册页面**：`api_sidebar_register_page` + 行模板 `{key}`，数值变更用 `api_sidebar_set_value(s)` 推送
+- **玩家命令**：`/sidebar`（别名 `/sb`）支持 `on` / `off` / `next` / `prev` / `lock` / `unlock` / `list`；开关与锁定偏好持久化到 SQLite
+- **配置**：`SIDEBAR_ENABLE`、`SIDEBAR_DEFAULT_ON`、`SIDEBAR_TITLE`、`SIDEBAR_SWITCH_INTERVAL`、`SIDEBAR_REFRESH_TICKS`、`SIDEBAR_MAIN_LINES`、`SIDEBAR_MAX_LINES`（亦可在 OP 面板「侧边栏」分组修改）
 
 ### 🏠 领地管理系统
 - **三维领地** - 按 min/max X/Y/Z 圈地，按体积计价；粒子显示立方体边界（与「进入领地」时边界粒子一致）
@@ -543,6 +551,7 @@ EndStone-ARC-CORE/
 │   ├── setting_catalog.py       # OP 配置文件设置目录（v0.8.11）
 │   ├── op_settings_ui.py        # OP 配置文件设置 UI（v0.8.11）
 │   ├── sky_eye_log.py           # 天眼独立 SQLite 与滚动清理（v0.8.8）
+│   ├── SidebarSystem.py         # 侧边栏总控（v0.9.0）
 │   ├── TitleSystem.py           # 头衔系统
 │   ├── LandSystem.py            # 领地系统
 │   ├── KillRewardConfig.py      # 击杀奖励配置（v0.4.0+）
@@ -641,6 +650,44 @@ class MyPlugin(Plugin):
 | `api_get_richest_player_money_data` | 无 | `list`：`[玩家名, 金钱]`；无数据为 `["", 0]` |
 | `api_get_poorest_player_money_data` | 无 | `list`：`[玩家名, 金钱]`；无数据为 `["", 0]` |
 
+#### 侧边栏（v0.9.0）
+
+其它插件通过 `get_plugin("arc_core")` 注册页面并推送键值。行模板里的 `{key}` 按 **玩家私有值 → 页面全局值 → 核心内置变量** 解析；缺失键且 `hide_line_if_missing=True` 时整行隐藏。
+
+内置变量：`{time}` `{date}` `{player}` `{money}` `{hp}` `{max_hp}` `{food}` `{online}` `{mc_time}` `{title}` `{guild}` `{page}` `{page_total}`。
+
+```python
+arc = self.server.get_plugin("arc_core")
+arc.api_sidebar_register_page(
+    "ars_health",
+    "§a健康状态",
+    ["§b口渴 §f{thirst}", "§c感染 §f{infection}%", "§e营养 §f{nutrition}"],
+    owner="arc_realistic_survival",
+    priority=10,
+)
+# 数值变化时
+arc.api_sidebar_set_values(
+    "ars_health",
+    {"thirst": 78, "infection": 0, "nutrition": "良好"},
+    xuid=player.xuid,
+)
+```
+
+| 函数 | 参数 | 返回值 |
+|------|------|--------|
+| `api_sidebar_register_page` | `page_id`，`title`，`lines`，`owner=""`，`priority=0`，`hide_line_if_missing=True` | `bool` |
+| `api_sidebar_unregister_page` | `page_id` | `bool`（不可注销 `arc_core_main`） |
+| `api_sidebar_set_page_lines` | `page_id`，`lines` | `bool` |
+| `api_sidebar_set_page_title` | `page_id`，`title` | `bool` |
+| `api_sidebar_set_value` | `page_id`，`key`，`value`，`player_name=""`，`xuid=""` | `bool`：有玩家参数则写私有值，否则写全局值 |
+| `api_sidebar_set_values` | `page_id`，`values: dict`，`player_name=""`，`xuid=""` | `bool` |
+| `api_sidebar_get_value` | `page_id`，`key`，`player_name=""`，`xuid=""`，`default=None` | 任意 |
+| `api_sidebar_clear_values` | `page_id`，`player_name=""`，`xuid=""` | `bool` |
+| `api_sidebar_set_global_value` | `page_id`，`key`，`value` | `bool` |
+| `api_sidebar_set_page_visible` | `page_id`，`visible`，`player_name=""`，`xuid=""` | `bool`：按玩家显隐（主页不可隐） |
+| `api_sidebar_refresh` | `player_name=""`，`xuid=""` | `None`：立即重绘；不传玩家则刷新全部在线 |
+| `api_sidebar_list_pages` | 无 | `list[dict]`：`page_id` / `title` / `owner` / `priority` / … |
+
 #### 头衔 / 发奖
 
 | 函数 | 参数 | 返回值 |
@@ -725,7 +772,14 @@ class MyPlugin(Plugin):
 
 ## 📋 近期更新日志
 
-### v0.8.22（当前版本）
+### v0.9.0（当前版本）
+
+- ✅ **侧边栏总控系统**：原生计分板多页面、默认 10 秒翻页、每玩家独立数据与开关偏好
+- ✅ **核心主页面**：现实时间、金钱、生命、饱食度、在线人数等；模板与标题可配置
+- ✅ **对外 API**：`api_sidebar_register_page` / `api_sidebar_set_value(s)` 等，供真实生存等插件注册页面并推送键值
+- ✅ **玩家命令**：`/sidebar`（`/sb`）开关、翻页、锁定、列表；OP 面板新增「侧边栏」配置分组
+
+### v0.8.22
 
 - ✅ **条件头衔（首富）**：抽出可复用迁移层；同分 `ORDER BY money DESC, xuid ASC` 防抖动；持有者不变绝不 revoke；易主时曾戴则回退其它最高稀有度头衔，新持有者无佩戴则自动戴上
 - ✅ **跨服仅主服计算首富**：同步从服 `refresh` no-op；主服在收到从服 `player_economy` 写入后刷新；解锁/佩戴仍走现有头衔同步
