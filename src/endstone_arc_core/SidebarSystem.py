@@ -25,7 +25,7 @@ PLACEHOLDER_RE = re.compile(r"\{(\w+)\}")
 DEFAULT_MAIN_LINES = [
     "§8----------",
     "§7当前时间：§f{time}",
-    "§7性能：§fTPS {tps}",
+    "§7性能：§6TPS §f{tps}",
     "§7在线：§f{online}§8/§f{max_players}",
     "§7延迟：§f{ping}§8ms",
     "§7生命：§f{hp}§8/§f{max_hp}",
@@ -98,7 +98,7 @@ class SidebarSystem:
         self._player_state: Dict[str, PlayerSidebarState] = {}
         self.enabled = True
         self.default_on = True
-        self.sidebar_title = "§b弧光服务器"
+        self.sidebar_title = "§6弧光服务器"
         self.switch_interval = 10.0
         self.refresh_ticks = 20
         self.max_lines = 15
@@ -112,19 +112,21 @@ class SidebarSystem:
         self.enabled = _setting_bool(sm.GetSetting("SIDEBAR_ENABLE"), True)
         self.default_on = _setting_bool(sm.GetSetting("SIDEBAR_DEFAULT_ON"), True)
         title = sm.GetSetting("SIDEBAR_TITLE")
-        # 旧默认标题（加粗+空格）迁移到新风格
+        # 旧默认标题迁移到灰橙配色
         if title is not None and str(title).strip() in (
             "§l§b弧 光 服 务 器",
             "§l§b弧光服务器",
             "§b弧 光 服 务 器",
+            "§b弧光服务器",
+            "§6弧 光 服 务 器",
         ):
-            title = "§b弧光服务器"
+            title = "§6弧光服务器"
             try:
                 sm.SetSetting("SIDEBAR_TITLE", title)
             except Exception:
                 pass
         self.sidebar_title = (
-            str(title).replace("\\n", "\n") if title else "§b弧光服务器"
+            str(title).replace("\\n", "\n") if title else "§6弧光服务器"
         )
         self.switch_interval = float(
             max(1, _setting_int(sm.GetSetting("SIDEBAR_SWITCH_INTERVAL"), 10))

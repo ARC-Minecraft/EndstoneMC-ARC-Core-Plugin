@@ -177,13 +177,13 @@ KILL_REWARD_GUILD_CONTRIB_RATIO=0.5
 # =============================================================================
 SIDEBAR_ENABLE=True
 SIDEBAR_DEFAULT_ON=True
-SIDEBAR_TITLE=§b弧光服务器
+SIDEBAR_TITLE=§6弧光服务器
 # 可见页面数 >= 2 时自动翻页间隔（秒）
 SIDEBAR_SWITCH_INTERVAL=10
 # 刷新周期（tick，20=1秒）；影响时间/生命等内置变量的更新频率
 SIDEBAR_REFRESH_TICKS=20
 SIDEBAR_MAX_LINES=15
 # 主页面行模板，用 \n 分隔；留空则使用内置默认
-# 配色约定：§8 分割/弱化，§7 标签，§f 主要数字，§b 标题/重点
+# 配色约定：§8 分割/弱化，§7 标签，§f 主要数字，§6 标题/重点（灰橙）
 # 可用占位符：{time}{date}{player}{money}{hp}{max_hp}{food}{tps}{mspt}{online}{max_players}{ping}{mc_time}{title}{guild}{page}{page_total}
 SIDEBAR_MAIN_LINES=
