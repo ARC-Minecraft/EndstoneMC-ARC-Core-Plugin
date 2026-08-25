@@ -25,7 +25,7 @@ PLACEHOLDER_RE = re.compile(r"\{(\w+)\}")
 DEFAULT_MAIN_LINES = [
     "§8----------",
     "§7当前时间：§f{time}",
-    "§7性能：§fTPS {tps} §8MSPT {mspt}",
+    "§7性能：§fTPS {tps}",
     "§7在线：§f{online}§8/§f{max_players}",
     "§7延迟：§f{ping}§8ms",
     "§7生命：§f{hp}§8/§f{max_hp}",
