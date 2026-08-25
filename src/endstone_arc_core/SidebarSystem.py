@@ -28,7 +28,9 @@ DEFAULT_MAIN_LINES = [
     "§e金钱 §f{money}",
     "§c生命 §f{hp}§7/§f{max_hp}",
     "§6饱食 §f{food}",
-    "§7在线 §f{online}",
+    "§aTPS §f{tps} §7MSPT §f{mspt}",
+    "§7在线 §f{online}§7/§f{max_players}",
+    "§7延迟 §f{ping}ms",
     "§7§m----------------",
 ]
 
@@ -857,10 +859,42 @@ class SidebarSystem:
         food = self._get_food(player)
 
         online = 0
+        max_players = None
         try:
             online = len(list(self.plugin.server.online_players or []))
         except Exception:
             online = 0
+        try:
+            mp = getattr(self.plugin.server, "max_players", None)
+            if mp is not None:
+                max_players = int(mp)
+        except Exception:
+            max_players = None
+
+        tps = None
+        mspt = None
+        try:
+            server = self.plugin.server
+            if hasattr(server, "current_tps"):
+                tps = round(float(server.current_tps), 1)
+            elif hasattr(server, "average_tps"):
+                tps = round(float(server.average_tps), 1)
+        except Exception:
+            tps = None
+        try:
+            server = self.plugin.server
+            if hasattr(server, "current_mspt"):
+                mspt = round(float(server.current_mspt), 1)
+            elif hasattr(server, "average_mspt"):
+                mspt = round(float(server.average_mspt), 1)
+        except Exception:
+            mspt = None
+
+        ping = None
+        try:
+            ping = int(getattr(player, "ping", None))
+        except Exception:
+            ping = None
 
         title = ""
         try:
@@ -918,6 +952,10 @@ class SidebarSystem:
             "max_hp": max_hp,
             "food": food,
             "online": online,
+            "max_players": max_players,
+            "tps": tps,
+            "mspt": mspt,
+            "ping": ping,
             "mc_time": mc_time,
             "title": title,
             "guild": guild,

@@ -3,7 +3,7 @@
 # EndStone ARC Core Plugin / EndStone弧光核心
 
 [![Codacy Grade](https://app.codacy.com/project/badge/Grade/2f830615baf347258558dcc2a5ab85a1)](https://app.codacy.com/gh/DEVILENMO/EndstoneMC-ARC-Core-Plugin/dashboard?utm_source=gh&utm_medium=referral&utm_content=&utm_campaign=Badge_grade)
-[![Version](https://img.shields.io/badge/version-v0.9.0-blue)](https://github.com/ARC-Minecraft/EndstoneMC-ARC-Core-Plugin)
+[![Version](https://img.shields.io/badge/version-v0.9.1-blue)](https://github.com/ARC-Minecraft/EndstoneMC-ARC-Core-Plugin)
 [![Python](https://img.shields.io/badge/python-3.13+-blue?logo=python&logoColor=white)](https://www.python.org/)
 [![EndStone API](https://img.shields.io/badge/EndStone_API-0.7+-black)](https://github.com/EndstoneMC/endstone)
 [![License](https://img.shields.io/github/license/ARC-Minecraft/EndstoneMC-ARC-Core-Plugin)](LICENSE)
@@ -19,7 +19,7 @@ EndStone ARC Core 是一个功能完整的 EndStone (Minecraft 基岩版服务�
 
 - **作者**: DEVILENMO
 - **邮箱**: DEVILENMO@gmail.com
-- **版本**: 0.9.0
+- **版本**: 0.9.1
 - **API 版本**: 0.7+
 - **推荐 Python 版本**: 3.13
 
@@ -75,7 +75,7 @@ EndStone ARC Core 是一个功能完整的 EndStone (Minecraft 基岩版服务�
 ### 📊 侧边栏总控（v0.9.0）
 - **原生计分板 SIDE_BAR**：每玩家独立 `Scoreboard`，双缓冲刷新减少闪烁
 - **多页面 + 定时翻页**：可见页 ≥ 2 时默认每 **10 秒**自动切换；可用 `/sidebar lock` 锁定
-- **核心主页面 `arc_core_main`**：现实时间、金钱、生命、饱食度、在线人数等（模板可配）
+- **核心主页面 `arc_core_main`**：现实时间、金钱、生命、饱食度、**TPS/MSPT**、在线人数、**玩家延迟**等（模板可配）
 - **其它插件注册页面**：`api_sidebar_register_page` + 行模板 `{key}`，数值变更用 `api_sidebar_set_value(s)` 推送
 - **玩家命令**：`/sidebar`（别名 `/sb`）支持 `on` / `off` / `next` / `prev` / `lock` / `unlock` / `list`；开关与锁定偏好持久化到 SQLite
 - **配置**：`SIDEBAR_ENABLE`、`SIDEBAR_DEFAULT_ON`、`SIDEBAR_TITLE`、`SIDEBAR_SWITCH_INTERVAL`、`SIDEBAR_REFRESH_TICKS`、`SIDEBAR_MAIN_LINES`、`SIDEBAR_MAX_LINES`（亦可在 OP 面板「侧边栏」分组修改）
@@ -654,7 +654,7 @@ class MyPlugin(Plugin):
 
 其它插件通过 `get_plugin("arc_core")` 注册页面并推送键值。行模板里的 `{key}` 按 **玩家私有值 → 页面全局值 → 核心内置变量** 解析；缺失键且 `hide_line_if_missing=True` 时整行隐藏。
 
-内置变量：`{time}` `{date}` `{player}` `{money}` `{hp}` `{max_hp}` `{food}` `{online}` `{mc_time}` `{title}` `{guild}` `{page}` `{page_total}`。
+内置变量：`{time}` `{date}` `{player}` `{money}` `{hp}` `{max_hp}` `{food}` `{tps}` `{mspt}` `{online}` `{max_players}` `{ping}` `{mc_time}` `{title}` `{guild}` `{page}` `{page_total}`。
 
 ```python
 arc = self.server.get_plugin("arc_core")
@@ -772,7 +772,11 @@ arc.api_sidebar_set_values(
 
 ## 📋 近期更新日志
 
-### v0.9.0（当前版本）
+### v0.9.1（当前版本）
+
+- ✅ **侧边栏主页面**：新增 TPS / MSPT、在线人数上限、玩家延迟（`{tps}` `{mspt}` `{max_players}` `{ping}`）
+
+### v0.9.0
 
 - ✅ **侧边栏总控系统**：原生计分板多页面、默认 10 秒翻页、每玩家独立数据与开关偏好
 - ✅ **核心主页面**：现实时间、金钱、生命、饱食度、在线人数等；模板与标题可配置
