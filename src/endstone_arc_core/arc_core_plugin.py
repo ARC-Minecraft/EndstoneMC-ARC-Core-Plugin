@@ -11180,9 +11180,10 @@ class ARCCorePlugin(Plugin):
             STEPS = 8  # 每条棱的插值段数（含端点共9个点）
 
             def emit(x, y, z):
-                self.server.dispatch_command(
-                    self.server.command_sender,
-                    f"particle minecraft:crop_growth_emitter {x} {y} {z}"
+                # 用 Player API，避免 /particle 经控制台 dispatch 刷屏
+                # （“创建 … 的请求已发送给所有玩家”）
+                player.spawn_particle(
+                    "minecraft:crop_growth_emitter", float(x), float(y), float(z)
                 )
 
             def draw_edge(p1, p2):

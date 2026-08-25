@@ -235,7 +235,7 @@ SETTING_GROUPS: List[Dict[str, object]] = [
         "items": [
             _s("SIDEBAR_ENABLE", "启用侧边栏", "bool", choices=BOOL_CHOICES),
             _s("SIDEBAR_DEFAULT_ON", "新玩家默认开启", "bool", choices=BOOL_CHOICES),
-            _s("SIDEBAR_TITLE", "侧边栏标题", "string", placeholder="§l§b弧 光 服 务 器"),
+            _s("SIDEBAR_TITLE", "侧边栏标题", "string", placeholder="§b弧光服务器"),
             _s("SIDEBAR_SWITCH_INTERVAL", "翻页间隔（秒）", "int", placeholder="10"),
             _s("SIDEBAR_REFRESH_TICKS", "刷新周期（tick）", "int", placeholder="20"),
             _s("SIDEBAR_MAX_LINES", "最大行数", "int", placeholder="15"),
