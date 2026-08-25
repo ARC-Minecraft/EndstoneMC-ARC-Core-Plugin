@@ -65,6 +65,7 @@ class SyncServer:
         bind_port: int = 19999,
         logger=None,
         setting_manager=None,
+        on_economy_mutated: Optional[Callable[[], None]] = None,
     ):
         """
         初始化同步服务器
@@ -75,6 +76,7 @@ class SyncServer:
         :param bind_port: 绑定端口
         :param logger: 日志记录器
         :param setting_manager: 配置管理器（用于向从服下发玩法配置）
+        :param on_economy_mutated: 从服成功写入 player_economy 后的回调（主服条件头衔刷新）
         """
         self.db = database_manager
         self.settings = setting_manager
@@ -82,6 +84,7 @@ class SyncServer:
         self.bind_host = bind_host
         self.bind_port = bind_port
         self.logger = logger
+        self._on_economy_mutated = on_economy_mutated
         
         self._socket: Optional[socket.socket] = None
         self._running = False
@@ -343,6 +346,17 @@ class SyncServer:
             client.conn.sendall(build_query_response(False, [], str(e)))
             self._log("error", f"Query error: {e}")
 
+    def _notify_economy_mutated(self, table_name: Optional[str]) -> None:
+        if table_name != "player_economy":
+            return
+        cb = self._on_economy_mutated
+        if cb is None:
+            return
+        try:
+            cb()
+        except Exception as e:
+            self._log("error", f"on_economy_mutated error: {e}")
+
     def _apply_client_mutation(
         self,
         client: ConnectedClient,
@@ -366,6 +380,7 @@ class SyncServer:
                 self._broadcast_push(
                     SyncTable(table_enum), push_op, push_data, exclude=client
                 )
+                self._notify_economy_mutated(table_name)
             client.conn.sendall(build_data_response(success, 1 if success else 0))
         except Exception as e:
             client.conn.sendall(build_data_response(False, 0, str(e)))
@@ -449,17 +464,23 @@ class SyncServer:
         try:
             operations = data.get("operations", [])
             results = []
+            economy_touched = False
             for op in operations:
                 table_name = ENUM_TO_TABLE.get(SyncTable(op.get("table", 0)))
                 if table_name not in self._sync_tables:
                     results.append({"success": False, "error": "Table not allowed"})
                     continue
-                results.append(self._run_batch_op(op.get("type"), table_name, op))
+                result = self._run_batch_op(op.get("type"), table_name, op)
+                results.append(result)
+                if result.get("success") and table_name == "player_economy":
+                    economy_touched = True
 
             client.conn.sendall(build_batch_sync_response(True, results))
             for op, result in zip(operations, results):
                 if result.get("success"):
                     self._broadcast_batch_op(client, op)
+            if economy_touched:
+                self._notify_economy_mutated("player_economy")
         except Exception as e:
             client.conn.sendall(build_batch_sync_response(False, [], str(e)))
             self._log("error", f"Batch sync error: {e}")

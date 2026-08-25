@@ -28,6 +28,7 @@ from endstone_arc_core.dimension_utils import (
 )
 from endstone_arc_core.LandSystem import LandSystem
 from endstone_arc_core.TitleSystem import TitleSystem, DEFAULT_RARITY
+from endstone_arc_core.ConditionalTitle import ConditionalTitleManager, RichestTitleProvider
 from endstone_arc_core.GuildSystem import (
     GuildSystem,
     ROLE_OWNER,
@@ -147,11 +148,22 @@ class ARCCorePlugin(Plugin):
         self.teleport_system = TeleportSystem(self.database_manager, self.setting_manager)
         self.land_system = LandSystem(self.database_manager, self.setting_manager)
         self.title_system = TitleSystem(self.database_manager, self.setting_manager)
+        self.conditional_titles = ConditionalTitleManager(
+            self.database_manager,
+            self.title_system,
+            can_compute=self._can_compute_conditional_titles,
+            find_online_by_xuid=self._find_online_player_by_xuid,
+            update_name_tag=self._update_player_name_tag,
+            grant_unlock_reward=self._grant_title_unlock_reward,
+        )
         self.entity_display_name_manager = EntityDisplayNameManager(Path(MAIN_PATH), logger=None)
         self.kill_reward_config = KillRewardConfig(Path(MAIN_PATH), logger=None)
         self.kill_reward_guild_contrib_ratio = self._load_kill_reward_guild_contrib_ratio()
         self.guild_system = GuildSystem(
-            self.database_manager, self.setting_manager, self.economy
+            self.database_manager,
+            self.setting_manager,
+            self.economy,
+            on_money_changed=self._update_richest_title_if_needed,
         )
         self.init_database()
         self._arc_error_log_path = str(Path(MAIN_PATH) / "error_log.txt")
@@ -161,8 +173,17 @@ class ARCCorePlugin(Plugin):
         self._play_session_start: dict = {}
         self.sync_client: Optional[SyncClient] = None
 
-        # 首富头衔：缓存当前首富 xuid，避免每次都重复发放
-        self.current_richest_xuid = None
+        # 注册首富条件头衔（state 已在 init_database 中 ensure）
+        self.conditional_titles.register(
+            RichestTitleProvider(
+                self.database_manager,
+                self.title_system,
+                get_title_name=self._get_richest_title_name,
+                hide_op_in_ranking=lambda: bool(
+                    getattr(self, "hide_op_in_money_ranking", True)
+                ),
+            )
+        )
 
         self.if_protect_spawn = self.setting_manager.GetSetting('IF_PROTECT_SPAWN')
         if self.if_protect_spawn is None:
@@ -445,10 +466,9 @@ class ARCCorePlugin(Plugin):
         self.dtwt_plugin = self.server.plugin_manager.get_plugin('arc_dtwt')
         print('[ARC Core]DTWT plugin loaded:', self.dtwt_plugin is not None)
 
-        # 首富头衔：启动时加载缓存并与财富榜核对（xuid 未变则不撤销，避免清掉已佩戴的首富头衔）
+        # 首富条件头衔：权威服启动时与财富榜核对（从服 no-op）
         try:
             self._ensure_richest_title_definition()
-            self._load_current_richest_xuid_from_db()
             self._update_richest_title_if_needed()
         except Exception:
             pass
@@ -487,6 +507,7 @@ class ARCCorePlugin(Plugin):
                 auth_key=sync_auth_key,
                 bind_port=sync_port,
                 logger=self.logger,
+                on_economy_mutated=self._schedule_richest_title_refresh,
             )
             if self.sync_server.start():
                 self.logger.info(f"[ARC Core] Sync server started on port {sync_port}")
@@ -2629,7 +2650,18 @@ class ARCCorePlugin(Plugin):
         self.teleport_system.init_teleport_tables()
         self.title_system.ensure_tables()
         self.guild_system.ensure_tables()
-        self._init_richest_title_state_table()
+        self.conditional_titles.ensure_tables()
+
+    def _can_compute_conditional_titles(self) -> bool:
+        """跨服从服不计算条件头衔；主服与单机计算。"""
+        return getattr(self, "_sync_consumer_mode", "none") != "client"
+
+    @property
+    def current_richest_xuid(self) -> Optional[str]:
+        try:
+            return self.conditional_titles.get_holder_xuid("richest")
+        except Exception:
+            return None
 
     def _get_richest_title_name(self) -> str:
         name = self.setting_manager.GetSetting("RICHEST_TITLE_NAME")
@@ -2637,8 +2669,14 @@ class ARCCorePlugin(Plugin):
         return name if name else "首富"
 
     def _ensure_richest_title_definition(self) -> None:
+        try:
+            provider = self.conditional_titles.get_provider("richest")
+            if provider is not None:
+                provider.ensure_definition()
+                return
+        except Exception:
+            pass
         richest_title_name = self._get_richest_title_name()
-        # 默认：传奇头衔，描述固定，奖励为空
         self.title_system.set_title_definition(
             richest_title_name,
             "传奇",
@@ -2647,40 +2685,14 @@ class ARCCorePlugin(Plugin):
             [],
         )
 
-    def _init_richest_title_state_table(self) -> None:
-        try:
-            self.database_manager.execute(
-                "CREATE TABLE IF NOT EXISTS richest_title_state (k TEXT PRIMARY KEY, v TEXT)"
-            )
-            self.database_manager.execute(
-                "INSERT OR IGNORE INTO richest_title_state (k, v) VALUES ('current_xuid', '')"
-            )
-        except Exception:
-            pass
-
-    def _load_current_richest_xuid_from_db(self) -> None:
-        try:
-            row = self.database_manager.query_one(
-                "SELECT v FROM richest_title_state WHERE k = 'current_xuid'"
-            )
-            v = (row.get("v") if row else "") or ""
-            v = str(v).strip()
-            self.current_richest_xuid = v if v else None
-        except Exception:
-            self.current_richest_xuid = None
-
-    def _save_current_richest_xuid_to_db(self, xuid: Optional[str]) -> None:
-        try:
-            v = (str(xuid).strip() if xuid else "")
-            self.database_manager.execute(
-                "UPDATE richest_title_state SET v = ? WHERE k = 'current_xuid'",
-                (v,),
-            )
-        except Exception:
-            pass
-
     def _query_current_richest_xuid(self) -> Optional[str]:
-        """按配置决定是否隐藏 OP，然后查询财富榜第一名 xuid。"""
+        """按配置决定是否隐藏 OP，然后查询财富榜第一名 xuid（同分按 xuid 稳定）。"""
+        try:
+            provider = self.conditional_titles.get_provider("richest")
+            if provider is not None:
+                return provider.query_holder_xuid()
+        except Exception:
+            pass
         try:
             if self.hide_op_in_money_ranking:
                 row = self.database_manager.query_one(
@@ -2688,11 +2700,12 @@ class ARCCorePlugin(Plugin):
                     "FROM player_economy e "
                     "LEFT JOIN player_local_info b ON e.xuid = b.xuid "
                     "WHERE (b.is_op IS NULL OR b.is_op = 0) "
-                    "ORDER BY e.money DESC LIMIT 1"
+                    "ORDER BY e.money DESC, e.xuid ASC LIMIT 1"
                 )
             else:
                 row = self.database_manager.query_one(
-                    "SELECT xuid, money FROM player_economy ORDER BY money DESC LIMIT 1"
+                    "SELECT xuid, money FROM player_economy "
+                    "ORDER BY money DESC, xuid ASC LIMIT 1"
                 )
             if not row or not row.get("xuid"):
                 return None
@@ -2701,44 +2714,21 @@ class ARCCorePlugin(Plugin):
             return None
 
     def _update_richest_title_if_needed(self) -> None:
-        """金钱变化后调用：首富变化才迁移头衔；不变化则不做任何事（含插件启动：禁止因 force 重复撤销同一首富）。"""
-        richest_title_name = self._get_richest_title_name()
-        if not richest_title_name:
-            return
+        """金钱变化后调用：仅权威服迁移首富条件头衔。"""
+        try:
+            self.conditional_titles.refresh("richest")
+        except Exception:
+            pass
 
-        self._ensure_richest_title_definition()
-        new_richest_xuid = self._query_current_richest_xuid()
-        old_richest_xuid = self.current_richest_xuid
+    def _schedule_richest_title_refresh(self) -> None:
+        """从服经济上行到主服后调度刷新（尽量落到主线程）。"""
+        def _run():
+            self._update_richest_title_if_needed()
 
-        if new_richest_xuid == old_richest_xuid:
-            return
-
-        # 旧首富移除头衔（并取消佩戴）
-        if old_richest_xuid:
-            try:
-                self.title_system.revoke_title_by_xuid(old_richest_xuid, richest_title_name)
-                old_name = self.get_player_name_by_xuid(old_richest_xuid, return_with_title=False)
-                if old_name:
-                    old_online = self.server.get_player(old_name)
-                    if old_online is not None:
-                        self._update_player_name_tag(old_online)
-            except Exception:
-                pass
-
-        # 新首富发放头衔（在线则走 api_unlock_title 以便自动佩戴逻辑；离线则仅写入解锁记录）
-        if new_richest_xuid:
-            try:
-                new_name = self.get_player_name_by_xuid(new_richest_xuid, return_with_title=False)
-                new_online = self.server.get_player(new_name) if new_name else None
-                if new_online is not None:
-                    self.api_unlock_title(new_online, richest_title_name)
-                else:
-                    _, _ = self.title_system.unlock_title_by_xuid(new_richest_xuid, richest_title_name)
-            except Exception:
-                pass
-
-        self.current_richest_xuid = new_richest_xuid
-        self._save_current_richest_xuid_to_db(new_richest_xuid)
+        try:
+            self.server.scheduler.run_task(self, _run)
+        except Exception:
+            _run()
 
     # Player basic info
     def _column_exists(self, table: str, column: str) -> bool:
@@ -13720,15 +13710,29 @@ class ARCCorePlugin(Plugin):
 
             raw_old_r = self.setting_manager.GetSetting("RICHEST_TITLE_NAME")
             old_richest = (str(raw_old_r).strip() if raw_old_r else "") or "首富"
+            can_compute = self._can_compute_conditional_titles()
+            holder_xuid = self.current_richest_xuid if can_compute else None
 
-            if old_richest != new_richest and self.current_richest_xuid:
+            if can_compute and old_richest != new_richest and holder_xuid:
                 try:
-                    self.title_system.revoke_title_by_xuid(self.current_richest_xuid, old_richest)
-                    old_name = self.get_player_name_by_xuid(self.current_richest_xuid, return_with_title=False)
-                    if old_name:
-                        pl = self.server.get_player(old_name)
-                        if pl is not None:
-                            self._update_player_name_tag(pl)
+                    was_equipped = False
+                    _, was_equipped = self.title_system.revoke_title_by_xuid(
+                        holder_xuid, old_richest
+                    )
+                    if was_equipped:
+                        unlocked = [
+                            t
+                            for t in self.title_system.get_unlocked_titles_by_xuid(holder_xuid)
+                            if t and t != old_richest
+                        ]
+                        fallback = self.title_system.pick_highest_rarity_title(unlocked)
+                        if fallback:
+                            self.title_system.set_equipped_title_by_xuid(
+                                holder_xuid, fallback
+                            )
+                    online = self._find_online_player_by_xuid(holder_xuid)
+                    if online is not None:
+                        self._update_player_name_tag(online)
                 except Exception:
                     pass
 
@@ -13745,18 +13749,20 @@ class ARCCorePlugin(Plugin):
             except Exception:
                 pass
 
-            # 仅修改首富头衔名称时财富榜第一人 xuid 不变，_update 会早退；此处补发新名称下的头衔
-            if old_richest != new_richest and self.current_richest_xuid:
+            # 仅改名时 xuid 不变，refresh 会早退；权威服补发新名称头衔（无佩戴则戴上）
+            if can_compute and old_richest != new_richest and self.current_richest_xuid:
                 try:
                     grant_title = self._get_richest_title_name()
                     rx = self.current_richest_xuid
-                    pname = self.get_player_name_by_xuid(rx, return_with_title=False)
-                    online_player = self.server.get_player(pname) if pname else None
+                    equipped_before = self.title_system.get_equipped_title_by_xuid(rx)
+                    online_player = self._find_online_player_by_xuid(rx)
+                    ok, was_new = self.title_system.unlock_title_by_xuid(rx, grant_title)
+                    if ok and was_new and online_player is not None:
+                        self._grant_title_unlock_reward(online_player, grant_title)
+                    if ok and not equipped_before:
+                        self.title_system.set_equipped_title_by_xuid(rx, grant_title)
                     if online_player is not None:
-                        self.api_unlock_title(online_player, grant_title)
                         self._update_player_name_tag(online_player)
-                    else:
-                        _, _ = self.title_system.unlock_title_by_xuid(rx, grant_title)
                 except Exception:
                     pass
 

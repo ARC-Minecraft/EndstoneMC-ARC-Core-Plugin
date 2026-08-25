@@ -3,7 +3,7 @@
 # EndStone ARC Core Plugin / EndStone弧光核心
 
 [![Codacy Grade](https://app.codacy.com/project/badge/Grade/2f830615baf347258558dcc2a5ab85a1)](https://app.codacy.com/gh/DEVILENMO/EndstoneMC-ARC-Core-Plugin/dashboard?utm_source=gh&utm_medium=referral&utm_content=&utm_campaign=Badge_grade)
-[![Version](https://img.shields.io/badge/version-v0.8.21-blue)](https://github.com/ARC-Minecraft/EndstoneMC-ARC-Core-Plugin)
+[![Version](https://img.shields.io/badge/version-v0.8.22-blue)](https://github.com/ARC-Minecraft/EndstoneMC-ARC-Core-Plugin)
 [![Python](https://img.shields.io/badge/python-3.13+-blue?logo=python&logoColor=white)](https://www.python.org/)
 [![EndStone API](https://img.shields.io/badge/EndStone_API-0.7+-black)](https://github.com/EndstoneMC/endstone)
 [![License](https://img.shields.io/github/license/ARC-Minecraft/EndstoneMC-ARC-Core-Plugin)](LICENSE)
@@ -19,7 +19,7 @@ EndStone ARC Core 是一个功能完整的 EndStone (Minecraft 基岩版服务�
 
 - **作者**: DEVILENMO
 - **邮箱**: DEVILENMO@gmail.com
-- **版本**: 0.8.21
+- **版本**: 0.8.22
 - **API 版本**: 0.7+
 - **推荐 Python 版本**: 3.13
 
@@ -70,7 +70,7 @@ EndStone ARC Core 是一个功能完整的 EndStone (Minecraft 基岩版服务�
 - 富豪榜排行系统
 - 管理员金钱操作命令
 - 实时余额变动提醒
-- **财富榜首富头衔（v0.4.0）** - 配置 `RICHEST_TITLE_NAME`（默认「首富」）、传奇稀有度；金钱变动后自动刷新财富榜第一；若首富易主则撤销旧头衔并授予新首富；可在 **OP 面板 → 经济管理 → 经济参数配置** 中修改
+- **财富榜首富头衔（v0.4.0 / v0.8.22）** - 配置 `RICHEST_TITLE_NAME`（默认「首富」）、传奇稀有度；金钱变动后自动刷新财富榜第一；若首富易主则撤销旧头衔并授予新首富；同分按 xuid 稳定排序；跨服仅主服计算、从服只消费同步头衔；可在 **OP 面板 → 经济管理 → 经济参数配置** 中修改
 
 ### 🏠 领地管理系统
 - **三维领地** - 按 min/max X/Y/Z 圈地，按体积计价；粒子显示立方体边界（与「进入领地」时边界粒子一致）
@@ -725,7 +725,12 @@ class MyPlugin(Plugin):
 
 ## 📋 近期更新日志
 
-### v0.8.21（当前版本）
+### v0.8.22（当前版本）
+
+- ✅ **条件头衔（首富）**：抽出可复用迁移层；同分 `ORDER BY money DESC, xuid ASC` 防抖动；持有者不变绝不 revoke；易主时曾戴则回退其它最高稀有度头衔，新持有者无佩戴则自动戴上
+- ✅ **跨服仅主服计算首富**：同步从服 `refresh` no-op；主服在收到从服 `player_economy` 写入后刷新；解锁/佩戴仍走现有头衔同步
+
+### v0.8.21
 
 - ✅ **拦截生物生成作用范围**：新增 **`LAND_BLOCK_ACTOR_SPAWN_SCOPE`**（`public` 默认 / `all`）。`public` 仅公共领地且看各领地开关；`all` 时任意领地按全局黑/白名单拦截
 

@@ -293,20 +293,29 @@ class TitleSystem:
         color = self.get_title_rarity_color(et)
         return color + "[" + et + "]" + "§r" + name
 
-    def set_equipped_title(self, player: Player, title: Optional[str]) -> bool:
-        """设置佩戴头衔。仅当 title 在解锁列表中或为 None 时才允许。"""
-        xuid = self._xuid(player)
+    def set_equipped_title_by_xuid(self, xuid: str, title: Optional[str]) -> bool:
+        """按 xuid 设置佩戴头衔。仅当 title 在解锁列表中或为 None 时才允许。"""
+        xs = (xuid or "").strip()
+        if not xs:
+            return False
         if title is None or title == "":
             return self.database_manager.execute(
-                "DELETE FROM player_title_equipped WHERE xuid = ?", (xuid,)
+                "DELETE FROM player_title_equipped WHERE xuid = ?", (xs,)
             )
-        unlocked = self.get_unlocked_titles(player)
-        if title not in unlocked:
+        title_s = str(title).strip()
+        if not title_s:
             return False
-        self.database_manager.execute("DELETE FROM player_title_equipped WHERE xuid = ?", (xuid,))
+        unlocked = self.get_unlocked_titles_by_xuid(xs)
+        if title_s not in unlocked:
+            return False
+        self.database_manager.execute("DELETE FROM player_title_equipped WHERE xuid = ?", (xs,))
         return self.database_manager.execute(
-            "INSERT INTO player_title_equipped (xuid, title) VALUES (?, ?)", (xuid, title)
+            "INSERT INTO player_title_equipped (xuid, title) VALUES (?, ?)", (xs, title_s)
         )
+
+    def set_equipped_title(self, player: Player, title: Optional[str]) -> bool:
+        """设置佩戴头衔。仅当 title 在解锁列表中或为 None 时才允许。"""
+        return self.set_equipped_title_by_xuid(self._xuid(player), title)
 
     def unlock_title(self, player: Player, title: str) -> Tuple[bool, bool]:
         """为玩家解锁头衔（API）。返回 (是否成功, 是否本次新解锁)；已拥有该头衔时成功为 True、新解锁为 False。"""
@@ -353,20 +362,24 @@ class TitleSystem:
         )
         return row is not None
 
-    def revoke_title_by_xuid(self, xuid: str, title: str) -> bool:
-        """按 xuid 撤销玩家头衔（从解锁记录移除；若正在佩戴则取消佩戴）。"""
+    def revoke_title_by_xuid(self, xuid: str, title: str) -> Tuple[bool, bool]:
+        """按 xuid 撤销玩家头衔（从解锁记录移除；若正在佩戴则取消佩戴）。
+
+        返回 (是否成功, 撤销前是否正佩戴该头衔)。
+        """
         try:
             xuid = (xuid or "").strip()
             title = (title or "").strip()
             if not xuid or not title:
-                return False
+                return False, False
 
-            # 若正在佩戴该头衔，先取消佩戴
+            was_equipped = False
             row = self.database_manager.query_one(
                 "SELECT title FROM player_title_equipped WHERE xuid = ?",
                 (xuid,),
             )
             if row and row.get("title") == title:
+                was_equipped = True
                 self.database_manager.execute(
                     "DELETE FROM player_title_equipped WHERE xuid = ?",
                     (xuid,),
@@ -376,14 +389,14 @@ class TitleSystem:
                 "DELETE FROM player_title_unlock_time WHERE xuid = ? AND title = ?",
                 (xuid, title),
             )
-            return True
+            return True, was_equipped
         except Exception:
-            return False
+            return False, False
 
-    def revoke_title(self, player: Player, title: str) -> bool:
-        """撤销玩家头衔（在线玩家版）。"""
+    def revoke_title(self, player: Player, title: str) -> Tuple[bool, bool]:
+        """撤销玩家头衔（在线玩家版）。返回 (是否成功, 撤销前是否正佩戴)。"""
         if not player:
-            return False
+            return False, False
         return self.revoke_title_by_xuid(str(player.xuid), title)
 
     def on_player_join(self, player: Player) -> None:

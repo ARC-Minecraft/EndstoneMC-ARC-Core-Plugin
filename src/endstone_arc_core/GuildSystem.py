@@ -4,7 +4,7 @@ from __future__ import annotations
 
 import re
 from datetime import datetime, timezone
-from typing import Any, Dict, List, Optional, Tuple
+from typing import Any, Callable, Dict, List, Optional, Tuple
 
 ROLE_OWNER = "owner"
 ROLE_MANAGER = "manager"
@@ -47,11 +47,28 @@ def strip_mc_color_codes(value: Any) -> str:
 
 
 class GuildSystem:
-    def __init__(self, database_manager, setting_manager, economy, logger=None):
+    def __init__(
+        self,
+        database_manager,
+        setting_manager,
+        economy,
+        logger=None,
+        on_money_changed: Optional[Callable[[], None]] = None,
+    ):
         self.db = database_manager
         self.setting_manager = setting_manager
         self.economy = economy
         self.logger = logger
+        self._on_money_changed = on_money_changed
+
+    def _notify_money_changed(self) -> None:
+        cb = self._on_money_changed
+        if cb is None:
+            return
+        try:
+            cb()
+        except Exception:
+            pass
 
     def _now_iso(self) -> str:
         return datetime.now(timezone.utc).astimezone().isoformat(timespec="seconds")
@@ -921,6 +938,7 @@ class GuildSystem:
     def _refund_create_cost(self, owner_xuid: str, cost: float) -> None:
         try:
             self.economy.increase_player_money_by_xuid(owner_xuid, cost)
+            self._notify_money_changed()
         except Exception:
             pass
 
@@ -944,6 +962,7 @@ class GuildSystem:
                 return False, "GUILD_NOT_ENOUGH_MONEY"
             if not self.economy.decrease_player_money_by_xuid(owner_xuid, cost):
                 return False, "GUILD_NOT_ENOUGH_MONEY"
+            self._notify_money_changed()
 
         ts = self._now_iso()
         motto_s = (str(motto).strip() if motto else "")[:128]
@@ -1210,6 +1229,7 @@ class GuildSystem:
                 return False, "GUILD_NOT_ENOUGH_MONEY", info
             if not self.economy.decrease_player_money_by_xuid(actor, cost):
                 return False, "GUILD_NOT_ENOUGH_MONEY", info
+            self._notify_money_changed()
 
         ok = self.db.update("guilds", {"name": n}, "id = ?", (gid,))
         if not ok:
@@ -1217,6 +1237,7 @@ class GuildSystem:
                 # 回滚扣款
                 try:
                     self.economy.increase_player_money_by_xuid(actor, cost)
+                    self._notify_money_changed()
                 except Exception:
                     pass
             return False, "GUILD_DB_ERROR", info
