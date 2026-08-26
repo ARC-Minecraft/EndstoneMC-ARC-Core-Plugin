@@ -8877,12 +8877,7 @@ class ARCCorePlugin(Plugin):
                 return
             
             # 扣除费用
-            if self.decrease_player_money(player, self.teleport_system.teleport_cost_public_warp):
-                player.send_message(self.language_manager.GetText('TELEPORT_COST_DEDUCTED').format(
-                    self._format_money_display(self.teleport_system.teleport_cost_public_warp),
-                    self._format_money_display(self.get_player_money(player))
-                ))
-            else:
+            if not self.decrease_player_money(player, self.teleport_system.teleport_cost_public_warp):
                 self.report_arc_error(
                     "TP1",
                     f"teleport_to_public_warp decrease failed warp={warp_name!r} cost={self.teleport_system.teleport_cost_public_warp!r}",
@@ -8908,12 +8903,7 @@ class ARCCorePlugin(Plugin):
                 return
             
             # 扣除费用
-            if self.decrease_player_money(player, self.teleport_system.teleport_cost_home):
-                player.send_message(self.language_manager.GetText('TELEPORT_COST_DEDUCTED').format(
-                    self._format_money_display(self.teleport_system.teleport_cost_home),
-                    self._format_money_display(self.get_player_money(player))
-                ))
-            else:
+            if not self.decrease_player_money(player, self.teleport_system.teleport_cost_home):
                 self.report_arc_error(
                     "TP2",
                     f"teleport_to_home decrease failed home={home_name!r} cost={self.teleport_system.teleport_cost_home!r}",
@@ -9010,12 +9000,7 @@ class ARCCorePlugin(Plugin):
                 return
             
             # 扣除费用
-            if self.decrease_player_money(player, self.teleport_system.teleport_cost_death_location):
-                player.send_message(self.language_manager.GetText('TELEPORT_COST_DEDUCTED').format(
-                    self._format_money_display(self.teleport_system.teleport_cost_death_location),
-                    self._format_money_display(self.get_player_money(player))
-                ))
-            else:
+            if not self.decrease_player_money(player, self.teleport_system.teleport_cost_death_location):
                 self.report_arc_error(
                     "TP3",
                     f"teleport_to_death_location decrease failed cost={self.teleport_system.teleport_cost_death_location!r}",
@@ -9065,12 +9050,7 @@ class ARCCorePlugin(Plugin):
                 return
             
             # 扣除费用
-            if self.decrease_player_money(player, self.teleport_system.teleport_cost_random):
-                player.send_message(self.language_manager.GetText('TELEPORT_COST_DEDUCTED').format(
-                    self._format_money_display(self.teleport_system.teleport_cost_random),
-                    self._format_money_display(self.get_player_money(player))
-                ))
-            else:
+            if not self.decrease_player_money(player, self.teleport_system.teleport_cost_random):
                 self.report_arc_error(
                     "TP4",
                     f"start_random_teleport decrease failed cost={self.teleport_system.teleport_cost_random!r}",
@@ -10588,12 +10568,7 @@ class ARCCorePlugin(Plugin):
                 return
             
             # 扣除费用
-            if self.decrease_player_money(player, self.teleport_system.teleport_cost_land):
-                player.send_message(self.language_manager.GetText('TELEPORT_COST_DEDUCTED').format(
-                    self._format_money_display(self.teleport_system.teleport_cost_land),
-                    self._format_money_display(self.get_player_money(player))
-                ))
-            else:
+            if not self.decrease_player_money(player, self.teleport_system.teleport_cost_land):
                 self.report_arc_error(
                     "TP7",
                     f"teleport_to_land decrease failed land_id={land_id!r} cost={self.teleport_system.teleport_cost_land!r}",
