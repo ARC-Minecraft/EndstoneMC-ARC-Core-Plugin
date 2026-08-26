@@ -24,6 +24,21 @@ IMPORT_TABLES = (
     "guild_invites",
 )
 
+PLAYER_BASIC_FIELDS = {
+    "uuid": "TEXT PRIMARY KEY",
+    "xuid": "TEXT NOT NULL",
+    "name": "TEXT NOT NULL",
+    "password": "TEXT",
+    "inviter_xuid": "TEXT",
+    "pending_invite_reward_times": "INTEGER DEFAULT 0",
+    "default_title_auto_equipped": "INTEGER DEFAULT 0",
+    "total_playtime": "INTEGER DEFAULT 0",
+    "session_count": "INTEGER DEFAULT 0",
+    "last_join_time": "TEXT",
+    "last_quit_time": "TEXT",
+    "once_op": "INTEGER DEFAULT 0",
+}
+
 XUID_SOURCES = (
     ("player_local_info", "xuid"),
     ("player_economy", "xuid"),
@@ -83,6 +98,158 @@ def _columns_on(conn: sqlite3.Connection, table: str, schema: str = "main") -> L
     return names
 
 
+def ensure_player_basic_table(db) -> bool:
+    """主库若被误删，先建表再导入。"""
+    ok = True
+    if not db.table_exists("player_basic_info"):
+        ok = bool(db.create_table("player_basic_info", PLAYER_BASIC_FIELDS))
+    cols = db.get_table_columns("player_basic_info")
+    if ok and "once_op" not in cols:
+        ok = bool(
+            db.execute(
+                "ALTER TABLE player_basic_info ADD COLUMN once_op INTEGER DEFAULT 0"
+            )
+        )
+    return ok
+
+
+def _pick_uuid_for_import(db, xuid: str, backup_uuid: str) -> Optional[str]:
+    backup_uuid = str(backup_uuid or "").strip()
+    if backup_uuid:
+        clash = db.query_one(
+            "SELECT xuid FROM player_basic_info WHERE uuid = ?", (backup_uuid,)
+        )
+        if clash is None or str(clash.get("xuid") or "") == xuid:
+            return backup_uuid
+    placeholder = recovered_uuid(xuid)
+    clash = db.query_one(
+        "SELECT xuid FROM player_basic_info WHERE uuid = ?", (placeholder,)
+    )
+    if clash is None or str(clash.get("xuid") or "") == xuid:
+        return placeholder
+    return None
+
+
+def merge_player_basic_info_from_legacy(
+    db, src_path: Path, alias: str, log: LogFn
+) -> Tuple[int, int, str]:
+    """按 xuid 合并备份里的 player_basic_info（密码/uuid 优先补空，不覆盖已有密码）。"""
+    if not ensure_player_basic_table(db):
+        return 0, 0, "dest-create-failed"
+    dest_path = Path(db.path_for_table("player_basic_info"))
+    try:
+        if dest_path.exists() and src_path.resolve() == dest_path.resolve():
+            return 0, 0, "skip-same-file"
+    except Exception:
+        pass
+    conn = db.connection_for_table("player_basic_info")
+    src_sql = src_path.resolve().as_posix().replace("'", "''")
+    inserted = 0
+    updated = 0
+    try:
+        conn.execute(f"ATTACH DATABASE '{src_sql}' AS {alias}")
+        if not _table_exists_on(conn, "player_basic_info", alias):
+            return 0, 0, "src-missing"
+        src_cols = _columns_on(conn, "player_basic_info", alias)
+        if "xuid" not in src_cols:
+            return 0, 0, "src-no-xuid"
+        rows = conn.execute(f"SELECT * FROM {alias}.player_basic_info").fetchall()
+        dest_cols = db.get_table_columns("player_basic_info")
+        for raw in rows:
+            mapping = dict(raw) if not hasattr(raw, "keys") else {k: raw[k] for k in raw.keys()}
+            xuid = str(mapping.get("xuid") or "").strip()
+            if not xuid:
+                continue
+            existing = db.query_one(
+                "SELECT * FROM player_basic_info WHERE xuid = ?", (xuid,)
+            )
+            if existing is None:
+                uuid_v = _pick_uuid_for_import(db, xuid, mapping.get("uuid") or "")
+                if not uuid_v:
+                    continue
+                name = str(mapping.get("name") or "").strip() or placeholder_name(xuid)
+                data = {
+                    "uuid": uuid_v,
+                    "xuid": xuid,
+                    "name": name,
+                    "password": mapping.get("password"),
+                    "inviter_xuid": mapping.get("inviter_xuid"),
+                    "pending_invite_reward_times": _as_int(
+                        mapping.get("pending_invite_reward_times")
+                    ),
+                    "default_title_auto_equipped": _as_int(
+                        mapping.get("default_title_auto_equipped")
+                    ),
+                    "total_playtime": _as_int(mapping.get("total_playtime")),
+                    "session_count": _as_int(mapping.get("session_count")),
+                    "last_join_time": mapping.get("last_join_time"),
+                    "last_quit_time": mapping.get("last_quit_time"),
+                    "once_op": _as_int(mapping.get("once_op")),
+                }
+                data = {k: v for k, v in data.items() if k in dest_cols}
+                if db.insert("player_basic_info", data):
+                    inserted += 1
+                continue
+            patch: Dict[str, Any] = {}
+            dest_uuid = str(existing.get("uuid") or "")
+            backup_uuid = str(mapping.get("uuid") or "").strip()
+            if dest_uuid.startswith(RECOVERED_UUID_PREFIX) or _is_empty_text(dest_uuid):
+                picked = _pick_uuid_for_import(db, xuid, backup_uuid)
+                if picked and picked != dest_uuid:
+                    patch["uuid"] = picked
+            if _is_empty_text(existing.get("password")) and not _is_empty_text(
+                mapping.get("password")
+            ):
+                patch["password"] = mapping.get("password")
+            dest_name = str(existing.get("name") or "")
+            bak_name = str(mapping.get("name") or "").strip()
+            if bak_name and (_is_empty_text(dest_name) or dest_name.startswith("xuid:")):
+                patch["name"] = bak_name
+            bak_pt = _as_int(mapping.get("total_playtime"))
+            if bak_pt > _as_int(existing.get("total_playtime")):
+                patch["total_playtime"] = bak_pt
+            bak_sc = _as_int(mapping.get("session_count"))
+            if bak_sc > _as_int(existing.get("session_count")):
+                patch["session_count"] = bak_sc
+            if _is_empty_text(existing.get("last_join_time")) and mapping.get(
+                "last_join_time"
+            ):
+                patch["last_join_time"] = mapping.get("last_join_time")
+            if _is_empty_text(existing.get("last_quit_time")) and mapping.get(
+                "last_quit_time"
+            ):
+                patch["last_quit_time"] = mapping.get("last_quit_time")
+            if _is_empty_text(existing.get("inviter_xuid")) and mapping.get(
+                "inviter_xuid"
+            ):
+                patch["inviter_xuid"] = mapping.get("inviter_xuid")
+            if _as_int(mapping.get("once_op")) and _as_int(existing.get("once_op")) == 0:
+                patch["once_op"] = 1
+            patch = {k: v for k, v in patch.items() if k in dest_cols}
+            if patch and db.update(
+                table="player_basic_info",
+                data=patch,
+                where="xuid = ?",
+                params=(xuid,),
+            ):
+                updated += 1
+        log(
+            "info",
+            f"[ARC Core]Merged player_basic_info from {src_path.name}: "
+            f"inserted={inserted} updated={updated}",
+        )
+        return inserted, updated, "ok"
+    except Exception as e:
+        with suppress(sqlite3.Error):
+            conn.rollback()
+        return inserted, updated, f"error:{e}"
+    finally:
+        try:
+            conn.execute(f"DETACH DATABASE {alias}")
+        except Exception:
+            pass
+
+
 def _import_table_from_attached(
     db,
     src_path: Path,
@@ -129,15 +296,29 @@ def _import_table_from_attached(
 
 def import_legacy_tables(db, paths: Iterable[Path], log: LogFn) -> Dict[str, Any]:
     stats: Dict[str, Any] = {"files": [], "tables": {}}
+    ensure_player_basic_table(db)
     for i, path in enumerate(paths):
         if not path.exists() or not path.is_file():
             log("warning", f"[ARC Core]Legacy import skip missing file: {path}")
             stats["files"].append({"path": str(path), "ok": False, "reason": "missing"})
             continue
         file_stat = {"path": str(path), "ok": True, "imported": {}}
+        alias = _alias_for_index(i)
         for table in IMPORT_TABLES:
-            n, reason = _import_table_from_attached(db, path, table, _alias_for_index(i))
-            file_stat["imported"][table] = {"rows": n, "reason": reason}
+            if table == "player_basic_info":
+                ins, upd, reason = merge_player_basic_info_from_legacy(
+                    db, path, alias, log
+                )
+                n = ins + upd
+                file_stat["imported"][table] = {
+                    "rows": n,
+                    "inserted": ins,
+                    "updated": upd,
+                    "reason": reason,
+                }
+            else:
+                n, reason = _import_table_from_attached(db, path, table, alias)
+                file_stat["imported"][table] = {"rows": n, "reason": reason}
             prev = stats["tables"].get(table, 0)
             stats["tables"][table] = prev + n
             if reason not in ("ok", "src-missing", "skip-same-file", "dest-missing"):
@@ -311,8 +492,8 @@ def rebuild_player_basic_info(
     sky_eye_db: Path,
     log: LogFn,
 ) -> Dict[str, Any]:
-    if not db.table_exists("player_basic_info"):
-        log("error", "[ARC Core]Legacy rebuild skipped: player_basic_info missing")
+    if not ensure_player_basic_table(db):
+        log("error", "[ARC Core]Legacy rebuild skipped: cannot create player_basic_info")
         return {"inserted": 0, "updated": 0, "players": 0}
 
     xuids = collect_xuids_from_core(db) | collect_xuids_from_sky_eye(sky_eye_db)

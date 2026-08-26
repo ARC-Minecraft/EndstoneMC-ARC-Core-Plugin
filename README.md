@@ -3,7 +3,7 @@
 # EndStone ARC Core Plugin / EndStone弧光核心
 
 [![Codacy Grade](https://app.codacy.com/project/badge/Grade/2f830615baf347258558dcc2a5ab85a1)](https://app.codacy.com/gh/DEVILENMO/EndstoneMC-ARC-Core-Plugin/dashboard?utm_source=gh&utm_medium=referral&utm_content=&utm_campaign=Badge_grade)
-[![Version](https://img.shields.io/badge/version-v0.9.21-blue)](https://github.com/ARC-Minecraft/EndstoneMC-ARC-Core-Plugin)
+[![Version](https://img.shields.io/badge/version-v0.9.22-blue)](https://github.com/ARC-Minecraft/EndstoneMC-ARC-Core-Plugin)
 [![Python](https://img.shields.io/badge/python-3.13+-blue?logo=python&logoColor=white)](https://www.python.org/)
 [![EndStone API](https://img.shields.io/badge/EndStone_API-0.7+-black)](https://github.com/EndstoneMC/endstone)
 [![License](https://img.shields.io/github/license/ARC-Minecraft/EndstoneMC-ARC-Core-Plugin)](LICENSE)
@@ -19,7 +19,7 @@ EndStone ARC Core 是一个功能完整的 EndStone (Minecraft 基岩版服务�
 
 - **作者**: DEVILENMO
 - **邮箱**: DEVILENMO@gmail.com
-- **版本**: 0.9.21
+- **版本**: 0.9.22
 - **API 版本**: 0.7+
 - **推荐 Python 版本**: 3.13
 
@@ -800,10 +800,14 @@ arc.api_sidebar_set_values(
 
 ## 📋 近期更新日志
 
-### v0.9.21（当前版本）
+### v0.9.22（当前版本）
+
+- ✅ **备份库按 xuid 合并 `player_basic_info`**：主库缺表时先建表；按 xuid 插入/补空（密码、真实 uuid、名字），不覆盖已有密码；可从旧 `ARCCore.db` 备份恢复账号
+
+### v0.9.21
 
 - ✅ **修复跨库 DDL 误删 `player_basic_info`**：重建表时临时表不再落到默认库，避免共享库真表被 DROP；不可逆重建前 `VACUUM INTO` 备份，事务内行数校验失败则回滚
-- ✅ **一次性数据恢复**：主服配置 `LEGACY_IMPORT_DATABASE_PATHS` 可把旧共享库里的经济/头衔/公会导回，并用天眼/本服表重建 `player_basic_info`（密码需玩家重设）
+- ✅ **一次性数据恢复**：主服配置 `LEGACY_IMPORT_DATABASE_PATHS` 可把旧共享库里的经济/头衔/公会导回，并用天眼/本服表重建 `player_basic_info`（无备份时密码需玩家重设）
 - ✅ **推荐纯网络同步**：主服开同步中心、子服 `ENABLE_SYNC_CLIENT`，清空四个 `*_DATABASE_PATH`；两种模式同时开时打 WARN
 
 ### v0.9.20

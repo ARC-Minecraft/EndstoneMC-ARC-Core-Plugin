@@ -136,6 +136,74 @@ def test_import_and_rebuild_from_remnants() -> None:
         db.close()
 
 
+def test_merge_player_basic_from_backup_file() -> None:
+    with tempfile.TemporaryDirectory() as td:
+        base = Path(td)
+        main_db = str(base / "ARCCore.db")
+        bak = base / "backup.db"
+        db = DatabaseManager(main_db)
+        src = sqlite3.connect(str(bak))
+        src.execute(
+            "CREATE TABLE player_basic_info ("
+            "uuid TEXT PRIMARY KEY, xuid TEXT NOT NULL, name TEXT NOT NULL, "
+            "password TEXT, total_playtime INTEGER DEFAULT 0, "
+            "session_count INTEGER DEFAULT 0, last_join_time TEXT, last_quit_time TEXT)"
+        )
+        src.execute(
+            "INSERT INTO player_basic_info "
+            "(uuid, xuid, name, password, total_playtime, session_count) "
+            "VALUES ('u-steve', '1001', 'Steve', 'hash-steve', 100, 3)"
+        )
+        src.execute(
+            "INSERT INTO player_basic_info "
+            "(uuid, xuid, name, password, total_playtime, session_count) "
+            "VALUES ('u-alex', '1002', 'Alex', NULL, 10, 1)"
+        )
+        src.commit()
+        src.close()
+
+        logs: list = []
+
+        def log(level, msg):
+            logs.append((level, msg))
+
+        imported = rec.import_legacy_tables(db, [bak], log)
+        assert imported["tables"].get("player_basic_info", 0) == 2
+        steve = db.query_one(
+            "SELECT * FROM player_basic_info WHERE xuid=?", ("1001",)
+        )
+        assert steve is not None
+        assert steve["name"] == "Steve"
+        assert steve["uuid"] == "u-steve"
+        assert steve["password"] == "hash-steve"
+        assert int(steve["total_playtime"]) == 100
+        # stub then merge: password fills, recovered uuid replaced
+        db.update(
+            table="player_basic_info",
+            data={
+                "uuid": "recovered-1001",
+                "password": None,
+                "name": "xuid:001001",
+                "total_playtime": 5,
+            },
+            where="xuid = ?",
+            params=("1001",),
+        )
+        imported2 = rec.import_legacy_tables(db, [bak], log)
+        assert imported2["tables"].get("player_basic_info", 0) >= 1
+        steve2 = db.query_one(
+            "SELECT * FROM player_basic_info WHERE xuid=?", ("1001",)
+        )
+        assert steve2["password"] == "hash-steve"
+        assert steve2["name"] == "Steve"
+        assert steve2["uuid"] == "u-steve"
+        assert int(steve2["total_playtime"]) == 100
+        n = db.query_one("SELECT COUNT(*) AS c FROM player_basic_info")["c"]
+        assert int(n) == 2
+        db.close()
+
+
 if __name__ == "__main__":
     test_import_and_rebuild_from_remnants()
+    test_merge_player_basic_from_backup_file()
     print("ok")
