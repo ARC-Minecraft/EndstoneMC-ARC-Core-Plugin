@@ -4974,12 +4974,16 @@ class ARCCorePlugin(Plugin):
         return self.economy.get_player_money_by_xuid(str(player.xuid))
 
     def _toast_title(self, key: str, fallback: str) -> str:
-        """取 toast 标题；若语言文案未含对应基岩字形，则自动补到最前面。"""
+        """取 toast 标题；按场景套用基岩字形到最前面（会替换旧字形）。"""
         text = self.language_manager.GetText(key)
         title = text if text and str(text).strip() else fallback
         title = str(title or "").strip()
+        for glyph in bedrock_glyphs.KNOWN_TOAST_GLYPHS:
+            if title.startswith(glyph):
+                title = title[len(glyph) :].lstrip()
+                break
         icon = bedrock_glyphs.TOAST_TITLE_ICONS.get(key) or ""
-        if icon and icon not in title:
+        if icon:
             title = f"{icon} {title}".strip()
         return title
 
