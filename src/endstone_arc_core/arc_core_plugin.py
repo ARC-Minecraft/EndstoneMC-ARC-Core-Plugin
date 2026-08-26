@@ -3232,7 +3232,7 @@ class ARCCorePlugin(Plugin):
                     "SELECT e.xuid, e.money "
                     "FROM player_economy e "
                     "LEFT JOIN player_basic_info b ON e.xuid = b.xuid "
-                    "WHERE (b.is_op IS NULL OR b.is_op = 0) "
+                    "WHERE (b.once_op IS NULL OR b.once_op = 0) "
                     "ORDER BY e.money DESC, e.xuid ASC LIMIT 1"
                 )
             else:
@@ -3322,7 +3322,7 @@ class ARCCorePlugin(Plugin):
             return set()
 
     def _upgrade_player_basic_table(self) -> bool:
-        """Upgrade cross-server player_basic_info columns (account + playtime)."""
+        """Upgrade cross-server player_basic_info columns (account + playtime + once_op)."""
         try:
             success = True
             upgrades = [
@@ -3333,16 +3333,54 @@ class ARCCorePlugin(Plugin):
                 ('session_count', 'INTEGER DEFAULT 0'),
                 ('last_join_time', 'TEXT'),
                 ('last_quit_time', 'TEXT'),
-                # 跨服 OP 镜像：供首富榜等权威服排除 OP（player_local_info 不跨服）
-                ('is_op', 'INTEGER DEFAULT 0'),
+                # 跨服粘性标记：任意服以 OP 登录过即置 1，永不回落；排行排除用
+                ('once_op', 'INTEGER DEFAULT 0'),
             ]
             for col, decl in upgrades:
                 if not self._add_column_if_not_exists('player_basic_info', col, decl):
                     success = False
+            # 旧镜像列 is_op → once_op（只升不降）
+            cols = self._player_basic_info_columns()
+            if "is_op" in cols and "once_op" in cols:
+                self.database_manager.execute(
+                    "UPDATE player_basic_info SET once_op = 1 "
+                    "WHERE COALESCE(is_op, 0) = 1 AND COALESCE(once_op, 0) = 0"
+                )
             return success
         except Exception as e:
             print(f"[ARC Core]Upgrade player basic table error: {str(e)}")
             return False
+
+    def _mark_player_once_op(self, xuid: str) -> None:
+        """跨服粘性：任意服确认过 OP 后置 once_op=1，之后不再清零。"""
+        xuid_s = str(xuid or "").strip()
+        if not xuid_s:
+            return
+        try:
+            if "once_op" not in self._player_basic_info_columns():
+                return
+            self.database_manager.execute(
+                "UPDATE player_basic_info SET once_op = 1 "
+                "WHERE xuid = ? AND COALESCE(once_op, 0) = 0",
+                (xuid_s,),
+            )
+        except Exception:
+            pass
+
+    def get_player_once_op_by_xuid(self, player_xuid: str) -> Optional[bool]:
+        """跨服是否曾以 OP 登录（排行排除）；无记录返回 None。"""
+        try:
+            if "once_op" not in self._player_basic_info_columns():
+                return None
+            row = self.database_manager.query_one(
+                "SELECT once_op FROM player_basic_info WHERE xuid = ?",
+                (str(player_xuid),),
+            )
+            if row is None:
+                return None
+            return bool(int(row.get("once_op") or 0))
+        except Exception:
+            return None
 
     def _player_local_info_columns(self) -> set:
         """Return column names of player_local_info (empty if missing)."""
@@ -3383,7 +3421,7 @@ class ARCCorePlugin(Plugin):
     def _migrate_player_basic_info_split(self) -> None:
         """Normalize tables: check-in is local; playtime/session is cross-server.
 
-        - player_basic_info (synced): account + total_playtime / session_count / join-quit
+        - player_basic_info (synced): account + total_playtime / session_count / join-quit / once_op
         - player_local_info (local): is_op / free land / check-in stats
         """
         default_free = int(self.setting_manager.GetSetting('DEFAULT_FREE_LAND_BLOCKS') or '100')
@@ -3448,9 +3486,10 @@ class ARCCorePlugin(Plugin):
                     ) or {}
                     local_by_xuid[xuid] = lrow
 
-                # Local: OP / free land / check-in (from basic if local empty).
+                # Local: OP / free land / check-in（本服权限仍以 local.is_op 为准）
                 local_update = {}
                 if "is_op" in basic_cols:
+                    # 旧镜像列仅用于一次性灌入本服 local
                     local_update["is_op"] = max(_i(lrow, "is_op"), _i(brow, "is_op"))
                 if "remaining_free_land_blocks" in basic_cols:
                     # Prefer whichever is already on local; else take basic.
@@ -3516,19 +3555,14 @@ class ARCCorePlugin(Plugin):
                     where="xuid = ?",
                     params=(xuid,),
                 )
-                # 把本服 local is_op 镜像到跨服 basic（权威服排行用）
+                # 跨服 once_op：本服曾是 OP / 旧 basic.is_op / 已有 once_op → 粘性置 1
                 try:
-                    if "is_op" in self._player_basic_info_columns():
-                        self.database_manager.update(
-                            table="player_basic_info",
-                            data={"is_op": _i(lrow, "is_op", 0)},
-                            where="xuid = ?",
-                            params=(xuid,),
-                        )
+                    if _i(lrow, "is_op") or _i(brow, "is_op") or _i(brow, "once_op"):
+                        self._mark_player_once_op(xuid)
                 except Exception:
                     pass
 
-            # Rebuild basic without check-in / free-land columns（保留 is_op 镜像）。
+            # Rebuild basic without check-in / free-land / legacy is_op（改用 once_op）。
             basic_cols = self._player_basic_info_columns()
             drop_from_basic = {
                 "remaining_free_land_blocks",
@@ -3536,6 +3570,7 @@ class ARCCorePlugin(Plugin):
                 "total_checkin_count",
                 "last_checkin_at",
                 "continuous_checkin_days",
+                "is_op",
             }
             if basic_cols & drop_from_basic:
                 sync_cols = [
@@ -3550,12 +3585,9 @@ class ARCCorePlugin(Plugin):
                     "session_count",
                     "last_join_time",
                     "last_quit_time",
-                    "is_op",
+                    "once_op",
                 ]
-                present = [c for c in sync_cols if c in basic_cols or c in (
-                    "total_playtime", "session_count", "last_join_time", "last_quit_time", "is_op"
-                )]
-                # Ensure playtime / is_op cols exist before rebuild select.
+                # Ensure playtime / once_op cols exist before rebuild select.
                 self._upgrade_player_basic_table()
                 basic_cols = self._player_basic_info_columns()
                 present = [c for c in sync_cols if c in basic_cols]
@@ -3577,7 +3609,7 @@ class ARCCorePlugin(Plugin):
                         "session_count INTEGER DEFAULT 0, "
                         "last_join_time TEXT, "
                         "last_quit_time TEXT, "
-                        "is_op INTEGER DEFAULT 0"
+                        "once_op INTEGER DEFAULT 0"
                         ")"
                     )
                     self.database_manager.execute(
@@ -3590,7 +3622,7 @@ class ARCCorePlugin(Plugin):
                     )
                     print(
                         "[ARC Core]Rebuilt player_basic_info "
-                        "(synced account + playtime + is_op; check-in is local)"
+                        "(synced account + playtime + once_op; check-in is local)"
                     )
 
             # Rebuild local without playtime columns if present.
@@ -3664,7 +3696,7 @@ class ARCCorePlugin(Plugin):
             'session_count': 'INTEGER DEFAULT 0',
             'last_join_time': 'TEXT',
             'last_quit_time': 'TEXT',
-            'is_op': 'INTEGER DEFAULT 0',
+            'once_op': 'INTEGER DEFAULT 0',
         }
         result = self.database_manager.create_table('player_basic_info', fields)
         if result:
@@ -3694,7 +3726,7 @@ class ARCCorePlugin(Plugin):
             )
             if existing:
                 return True
-            return self.database_manager.insert(
+            ok = self.database_manager.insert(
                 "player_local_info",
                 {
                     "xuid": xuid,
@@ -3706,6 +3738,9 @@ class ARCCorePlugin(Plugin):
                     "continuous_checkin_days": 0,
                 },
             )
+            if ok and player.is_op:
+                self._mark_player_once_op(xuid)
+            return ok
         except Exception as e:
             self._safe_log(
                 "error",
@@ -3898,7 +3933,7 @@ class ARCCorePlugin(Plugin):
 
     def update_player_op_status(self, player: Player) -> bool:
         """
-        更新玩家OP状态（本服 local + 跨服 basic 镜像）。
+        更新本服 OP（player_local_info.is_op）；若当前为 OP 则跨服粘性标记 once_op。
         :param player: 玩家对象
         :return: 是否更新成功
         """
@@ -3931,22 +3966,9 @@ class ARCCorePlugin(Plugin):
                     else:
                         return False
 
-            # 跨服镜像列（供首富榜等）
-            try:
-                if "is_op" in self._player_basic_info_columns():
-                    basic = self.database_manager.query_one(
-                        "SELECT is_op FROM player_basic_info WHERE xuid = ?",
-                        (xuid,),
-                    )
-                    if basic is not None and int(basic.get("is_op") or 0) != current_op_status:
-                        self.database_manager.update(
-                            table="player_basic_info",
-                            data={"is_op": current_op_status},
-                            where="xuid = ?",
-                            params=(xuid,),
-                        )
-            except Exception:
-                pass
+            # 任意服以 OP 身份在线过 → 跨服 once_op=1（卸任不回落）
+            if current_op_status:
+                self._mark_player_once_op(xuid)
             return True
         except Exception as e:
             self._safe_log(
@@ -6598,7 +6620,7 @@ class ARCCorePlugin(Plugin):
             "xuid": str,
             "display_name": str,  # 可能带有头衔/颜色的展示名
             "money": float,
-            "is_op": bool or None,  # None 表示未知
+            "once_op": bool or None,  # None 表示未知；曾以 OP 登录过则 True
         }
         """
         rich_list = []
@@ -6613,13 +6635,13 @@ class ARCCorePlugin(Plugin):
                     or self.get_player_name_by_xuid(player_xuid, return_with_title=False)
                     or str(player_xuid)
                 )
-                is_op = self.get_offline_player_op_status_by_xuid(player_xuid)
+                once_op = self.get_player_once_op_by_xuid(player_xuid)
                 rich_list.append(
                     {
                         "xuid": player_xuid,
                         "display_name": display_name,
                         "money": money_value,
-                        "is_op": is_op,
+                        "once_op": once_op,
                     }
                 )
             except Exception:
@@ -8819,8 +8841,8 @@ class ARCCorePlugin(Plugin):
 
         filtered_entries = []
         for entry in rich_entries:
-            if self.hide_op_in_money_ranking and entry.get("is_op") is True:
-                # 隐藏 OP 玩家
+            if self.hide_op_in_money_ranking and entry.get("once_op") is True:
+                # 隐藏曾以 OP 登录过的玩家
                 continue
             filtered_entries.append(entry)
             if len(filtered_entries) >= 10:

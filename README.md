@@ -3,7 +3,7 @@
 # EndStone ARC Core Plugin / EndStone弧光核心
 
 [![Codacy Grade](https://app.codacy.com/project/badge/Grade/2f830615baf347258558dcc2a5ab85a1)](https://app.codacy.com/gh/DEVILENMO/EndstoneMC-ARC-Core-Plugin/dashboard?utm_source=gh&utm_medium=referral&utm_content=&utm_campaign=Badge_grade)
-[![Version](https://img.shields.io/badge/version-v0.9.18-blue)](https://github.com/ARC-Minecraft/EndstoneMC-ARC-Core-Plugin)
+[![Version](https://img.shields.io/badge/version-v0.9.19-blue)](https://github.com/ARC-Minecraft/EndstoneMC-ARC-Core-Plugin)
 [![Python](https://img.shields.io/badge/python-3.13+-blue?logo=python&logoColor=white)](https://www.python.org/)
 [![EndStone API](https://img.shields.io/badge/EndStone_API-0.7+-black)](https://github.com/EndstoneMC/endstone)
 [![License](https://img.shields.io/github/license/ARC-Minecraft/EndstoneMC-ARC-Core-Plugin)](LICENSE)
@@ -19,7 +19,7 @@ EndStone ARC Core 是一个功能完整的 EndStone (Minecraft 基岩版服务�
 
 - **作者**: DEVILENMO
 - **邮箱**: DEVILENMO@gmail.com
-- **版本**: 0.9.18
+- **版本**: 0.9.19
 - **API 版本**: 0.7+
 - **推荐 Python 版本**: 3.13
 
@@ -200,7 +200,7 @@ EndStone ARC Core 是一个功能完整的 EndStone (Minecraft 基岩版服务�
 - **错误处理机制** - 文件读取失败不影响插件正常运行
 
 ### 🔐 OP状态追踪系统 (v0.1.4新增)
-- **OP状态持久化** - 记录在本服表 **`player_local_info.is_op`**（**不跨服同步**，每服独立）
+- **OP状态持久化** - 本服权限记在 **`player_local_info.is_op`**（**不跨服同步**，每服独立）；跨服排行排除用 **`player_basic_info.once_op`**（任意服以 OP 登录过即永久标记）
 - **离线状态查询** - 即使玩家离线也能查询其本服 OP 状态
 - **自动状态同步** - 玩家加入时自动检查并更新本服 OP 状态
 - **金钱排行榜隐藏** - 可配置在金钱排行榜中隐藏 OP 玩家
@@ -263,8 +263,8 @@ EndStone ARC Core 是一个功能完整的 EndStone (Minecraft 基岩版服务�
 - **条件头衔权威服（v0.9.14）**：**`CONDITIONAL_TITLE_AUTHORITY`** 显式指定是否由本机计算首富等条件头衔；留空则自动推断（远程客户端 / 仅文件共享的子服不计算，避免双算）
 - **玩法配置以同步中心为准（v0.8.5，仅方式 A）**：开启对应分项后，从服连接同步中心时会拉取并覆盖该类别的玩法配置（写入本机 `core_setting.yml`）。例如同步经济则统一 **初始金钱 / 签到存款 / 传送与圈地价格**；同步公会则统一 **创建费用 / 规模上限 / 升级贡献点**。主服 OP 改配置或重载后会推送给已连接从服。本机路径、端口、`SYNC_CLIENT_*`、清道夫、出生点保护等仍各服独立。**方式 B（共享文件）不会自动同步配置文件**，需自行保证各服一致，或改用远程客户端
 - **模块**：`sync_protocol.py`、`sync_server.py`、`sync_client.py`、`sync_config.py`、`sync_outbox.py`
-- **可同步数据表**：跨服玩家账号信息（`player_basic_info`，含 **`is_op` 镜像列**）、经济（`player_economy`）、头衔（`title_definitions` / `player_title_unlock_time` / `player_title_equipped`）、公会（`guilds` / `guild_members` / `guild_invites`）
-- **本服本地表（不同步）**：**`player_local_info`** — 本服 `is_op`、剩余免费领地格、**签到**（每服独立）。始终写在本服 **`DATABASE_PATH`**，即使配置了 `PLAYER_DATABASE_PATH` 也不会进共享库；跨服排行用的 OP 排除读 **`player_basic_info.is_op`**
+- **可同步数据表**：跨服玩家账号信息（`player_basic_info`，含 **`once_op` 粘性列**：任意服以 OP 登录过即永久排除排行）、经济（`player_economy`）、头衔（`title_definitions` / `player_title_unlock_time` / `player_title_equipped`）、公会（`guilds` / `guild_members` / `guild_invites`）
+- **本服本地表（不同步）**：**`player_local_info`** — 本服 `is_op`、剩余免费领地格、**签到**（每服独立）。始终写在本服 **`DATABASE_PATH`**，即使配置了 `PLAYER_DATABASE_PATH` 也不会进共享库；跨服排行 OP 排除读 **`player_basic_info.once_op`**（不再用本服 `is_op` 镜像）
 - **OP 面板**：点「跨服同步」即发起全面对账并显示运行状态；每次连上同步中心也会自动拉全量并上行本地已启用表
 - **QQ 群消息**：跨服 QQ 互通由 **AstrBot 弧光 EndStone 消息中枢** + **endstone-arc-qq-sync-astrbot** 负责；ARCCore **不再**经 SyncServer 做 QQ 事件中继。死亡播报调用本机 QQ Sync 的 `api_send_event("death", …)`；成就等可用 `custom`
 - **群聊死亡播报模式（v0.9.12）**：`QQ_DEATH_BROADCAST_MODE` = `off`（不播报）/ `pvp`（仅 PvP）/ `all`（全部，默认）；仅影响群聊，游戏内死亡播报仍始终发送
@@ -796,7 +796,12 @@ arc.api_sidebar_set_values(
 
 ## 📋 近期更新日志
 
-### v0.9.18（当前版本）
+### v0.9.19（当前版本）
+
+- ✅ **跨服排行改用 `once_op`**：`player_basic_info` 去掉镜像 `is_op`，改为粘性 `once_op`——任意服以 OP 登录过即置 1、卸任不回落；首富/金钱榜排除读此列。本服权限仍只看 `player_local_info.is_op`
+- ✅ **启动迁移**：旧 `basic.is_op=1` 与本服 `local.is_op=1` 自动写入 `once_op`，并重建表去掉旧列
+
+### v0.9.18
 
 - ✅ **修复全量同步超时**：连接阶段 TCP 粘包缓冲保留半包；等待 `FULL_SYNC_RESPONSE` 时消化穿插的 PUSH/心跳，避免帧错位后 `title_definitions` 等表 `timed out`
 - ✅ **全量同步期间不推送**：从服首心跳前 `accepts_push=False`，避免认证后立刻广播打断 request/response

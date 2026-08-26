@@ -287,7 +287,7 @@ class RichestTitleProvider:
     def query_holder_xuid(self) -> Optional[str]:
         """按金钱降序、xuid 升序取唯一榜一（同分稳定）。
 
-        隐藏 OP 时 JOIN 跨服表 player_basic_info.is_op（镜像列），
+        隐藏 OP 时 JOIN 跨服表 player_basic_info.once_op（曾以 OP 登录过即排除），
         不依赖本服独有的 player_local_info。
         """
         try:
@@ -296,7 +296,7 @@ class RichestTitleProvider:
                     "SELECT e.xuid, e.money "
                     "FROM player_economy e "
                     "LEFT JOIN player_basic_info b ON e.xuid = b.xuid "
-                    "WHERE (b.is_op IS NULL OR b.is_op = 0) "
+                    "WHERE (b.once_op IS NULL OR b.once_op = 0) "
                     "ORDER BY e.money DESC, e.xuid ASC LIMIT 1"
                 )
             else:
