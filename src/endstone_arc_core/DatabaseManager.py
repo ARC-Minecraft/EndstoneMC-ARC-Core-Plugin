@@ -245,6 +245,22 @@ class DatabaseManager:
             self._local.default_connection.close()
             delattr(self._local, 'default_connection')
 
+    def _warn_if_drop_routed_table(self, sql: str) -> None:
+        """DROP 命中已路由到非默认库的表时打 warning，便于追溯误删。"""
+        s = (sql or "").lstrip()
+        if not s.upper().startswith("DROP TABLE"):
+            return
+        table = self._extract_table_name(sql)
+        if not table or table not in self._table_routes:
+            return
+        routed = self._table_routes[table]
+        if self._norm_db_path(routed) == self._norm_db_path(self.db_path):
+            return
+        print(
+            f"[ARC Core]WARNING DROP routed table {table} "
+            f"on shared db: {routed}"
+        )
+
     def execute(self, sql: str, params: tuple = ()) -> bool:
         """
         执行SQL语句
@@ -253,6 +269,7 @@ class DatabaseManager:
         :return: 是否执行成功
         """
         try:
+            self._warn_if_drop_routed_table(sql)
             self._assert_sql_tables_same_db(sql)
             conn = self._resolve_connection(sql)
             cursor = conn.cursor()

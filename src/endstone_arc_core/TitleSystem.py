@@ -49,36 +49,50 @@ class TitleSystem:
         self._table_unlock_time = "player_title_unlock_time"
         self._table_equipped = "player_title_equipped"
 
+    def _create_title_tables(self) -> None:
+        """CREATE IF NOT EXISTS 三张头衔表（走表路由，落在正确库文件）。"""
+        self.database_manager.execute(
+            "CREATE TABLE IF NOT EXISTS title_definitions ("
+            "title TEXT NOT NULL, "
+            "rarity TEXT NOT NULL DEFAULT '普通', "
+            "description TEXT, "
+            "reward_money REAL DEFAULT 0, "
+            "reward_items TEXT DEFAULT '[]', "
+            "PRIMARY KEY (title, rarity)"
+            ")"
+        )
+        self.database_manager.execute(
+            "CREATE TABLE IF NOT EXISTS player_title_unlock_time ("
+            "xuid TEXT NOT NULL, "
+            "title TEXT NOT NULL, "
+            "rarity TEXT NOT NULL DEFAULT '普通', "
+            "unlocked_at TEXT, "
+            "UNIQUE(xuid, title, rarity)"
+            ")"
+        )
+        self.database_manager.execute(
+            "CREATE TABLE IF NOT EXISTS player_title_equipped ("
+            "xuid TEXT PRIMARY KEY, "
+            "title TEXT, "
+            "rarity TEXT DEFAULT '普通'"
+            ")"
+        )
+
     def ensure_tables(self) -> bool:
         """创建头衔相关表，并迁移到 (title, rarity) 复合标识。"""
         try:
-            self.database_manager.execute(
-                "CREATE TABLE IF NOT EXISTS title_definitions ("
-                "title TEXT NOT NULL, "
-                "rarity TEXT NOT NULL DEFAULT '普通', "
-                "description TEXT, "
-                "reward_money REAL DEFAULT 0, "
-                "reward_items TEXT DEFAULT '[]', "
-                "PRIMARY KEY (title, rarity)"
-                ")"
-            )
-            self.database_manager.execute(
-                "CREATE TABLE IF NOT EXISTS player_title_unlock_time ("
-                "xuid TEXT NOT NULL, "
-                "title TEXT NOT NULL, "
-                "rarity TEXT NOT NULL DEFAULT '普通', "
-                "unlocked_at TEXT, "
-                "UNIQUE(xuid, title, rarity)"
-                ")"
-            )
-            self.database_manager.execute(
-                "CREATE TABLE IF NOT EXISTS player_title_equipped ("
-                "xuid TEXT PRIMARY KEY, "
-                "title TEXT, "
-                "rarity TEXT DEFAULT '普通'"
-                ")"
-            )
+            self._create_title_tables()
+            if not self.database_manager.table_exists(self._table_def):
+                print(
+                    "[ARC Core]ERROR title_definitions missing before migrate; recreating"
+                )
+                self._create_title_tables()
             self._migrate_title_identity_schema()
+            if not self.database_manager.table_exists(self._table_def):
+                print(
+                    "[ARC Core]ERROR title_definitions missing after migrate; recreating"
+                )
+                self._create_title_tables()
             self._seed_default_title_definitions()
             # v0.7.1 起解锁时间只走 player_title_unlock_time；空壳兼容表直接删掉
             try:
@@ -96,43 +110,46 @@ class TitleSystem:
         except Exception:
             return []
 
-    def _migrate_title_identity_schema(self) -> None:
-        """将旧版「仅 title」主键迁移为 (title, rarity)。可重复执行。"""
-        # 已是复合主键则跳过定义表重建
-        already_nr = False
+    def _table_create_sql(self, table: str) -> str:
+        """读 CREATE SQL；表名写进字面量以便 DatabaseManager 按路由命中正确库。"""
         try:
+            # 仅允许标识符，防止注入
+            if not table or not all(c.isalnum() or c == "_" for c in table):
+                return ""
             row = self.database_manager.query_one(
-                "SELECT sql FROM sqlite_master WHERE type='table' AND name='title_definitions'",
+                "SELECT sql FROM sqlite_master WHERE type='table' AND name='"
+                + table
+                + "'",
                 (),
             )
-            sql = str((row or {}).get("sql") or "").replace(" ", "").lower()
-            if "primarykey(title,rarity)" in sql or "primarykey(title,rarity)" in sql.replace("\n", ""):
-                already_nr = True
+            return str((row or {}).get("sql") or "")
         except Exception:
-            already_nr = False
+            return ""
 
+    @staticmethod
+    def _sql_has_title_rarity_pk(create_sql: str) -> bool:
+        compact = str(create_sql or "").replace(" ", "").replace("\n", "").lower()
+        return "primarykey(title,rarity)" in compact
+
+    def _migrate_title_identity_schema(self) -> None:
+        """将旧版「仅 title」主键迁移为 (title, rarity)。
+
+        一律走 DatabaseManager.rebuild_table_copy（同连接事务 + VACUUM 备份），
+        避免临时表落默认库、DROP 却打到路由共享库的跨库误删。
+        """
         def_cols = self._table_columns(self._table_def)
         unlock_cols = self._table_columns(self._table_unlock_time)
         equipped_cols = self._table_columns(self._table_equipped)
+        def_sql = self._table_create_sql(self._table_def)
+        already_nr = self._sql_has_title_rarity_pk(def_sql)
 
         # --- title_definitions ---
         if def_cols and "rarity" in def_cols and not already_nr:
-            # 检测是否仍是旧版单列主键：SQLite 无法直接读 PK，若存在同名多行不可能；
-            # 用重建保证 PRIMARY KEY(title, rarity)。若已是复合主键则重建也安全。
-            try:
-                rows = self.database_manager.query_all(
-                    "SELECT title, rarity, description, reward_money, reward_items FROM title_definitions",
-                    (),
-                ) or []
-            except Exception:
-                rows = []
-            # 若能查出数据，检查是否需要因旧 PK 导致无法插入同名不同稀有度：
-            # 重建为明确复合主键。
-            needs_rebuild = True
-            try:
-                # 新表若已正确，重复迁移应幂等
-                self.database_manager.execute(
-                    "CREATE TABLE IF NOT EXISTS title_definitions__nr ("
+            ok = self.database_manager.rebuild_table_copy(
+                logical_table=self._table_def,
+                temp_table="title_definitions__nr",
+                create_sql=(
+                    "CREATE TABLE title_definitions__nr ("
                     "title TEXT NOT NULL, "
                     "rarity TEXT NOT NULL DEFAULT '普通', "
                     "description TEXT, "
@@ -140,204 +157,136 @@ class TitleSystem:
                     "reward_items TEXT DEFAULT '[]', "
                     "PRIMARY KEY (title, rarity)"
                     ")"
-                )
-                self.database_manager.execute("DELETE FROM title_definitions__nr")
-                for row in rows:
-                    title = str(row.get("title") or "").strip()
-                    if not title:
-                        continue
-                    rarity = normalize_rarity(row.get("rarity"))
-                    self.database_manager.execute(
-                        "INSERT OR IGNORE INTO title_definitions__nr "
-                        "(title, rarity, description, reward_money, reward_items) "
-                        "VALUES (?, ?, ?, ?, ?)",
-                        (
-                            title,
-                            rarity,
-                            str(row.get("description") or ""),
-                            float(row.get("reward_money") or 0),
-                            row.get("reward_items") if row.get("reward_items") is not None else "[]",
-                        ),
-                    )
-                self.database_manager.execute("DROP TABLE IF EXISTS title_definitions")
-                self.database_manager.execute(
-                    "ALTER TABLE title_definitions__nr RENAME TO title_definitions"
-                )
-                needs_rebuild = False
-            except Exception:
-                needs_rebuild = True
-                try:
-                    self.database_manager.execute("DROP TABLE IF EXISTS title_definitions__nr")
-                except Exception:
-                    pass
-            _ = needs_rebuild
-        elif def_cols:
+                ),
+                copy_columns=[
+                    "title",
+                    "rarity",
+                    "description",
+                    "reward_money",
+                    "reward_items",
+                ],
+                select_sql=(
+                    "SELECT title, "
+                    "CASE "
+                    "WHEN rarity IS NULL OR rarity = '' THEN '普通' "
+                    "WHEN rarity = '传说' THEN '传奇' "
+                    "ELSE rarity END, "
+                    "description, reward_money, "
+                    "COALESCE(reward_items, '[]') "
+                    "FROM title_definitions"
+                ),
+            )
+            if not ok:
+                print("[ARC Core]title_definitions PK rebuild skipped/failed")
+        elif def_cols and "rarity" not in def_cols:
             # 极旧：无 rarity 列
-            try:
-                rows = self.database_manager.query_all(
-                    "SELECT title, description, reward_money, reward_items FROM title_definitions",
-                    (),
-                ) or []
-            except Exception:
-                rows = []
-            self.database_manager.execute(
-                "CREATE TABLE IF NOT EXISTS title_definitions__nr ("
-                "title TEXT NOT NULL, "
-                "rarity TEXT NOT NULL DEFAULT '普通', "
-                "description TEXT, "
-                "reward_money REAL DEFAULT 0, "
-                "reward_items TEXT DEFAULT '[]', "
-                "PRIMARY KEY (title, rarity)"
-                ")"
+            has_desc = "description" in def_cols
+            has_money = "reward_money" in def_cols
+            has_items = "reward_items" in def_cols
+            desc_expr = "description" if has_desc else "''"
+            money_expr = "COALESCE(reward_money, 0)" if has_money else "0"
+            items_expr = "COALESCE(reward_items, '[]')" if has_items else "'[]'"
+            ok = self.database_manager.rebuild_table_copy(
+                logical_table=self._table_def,
+                temp_table="title_definitions__nr",
+                create_sql=(
+                    "CREATE TABLE title_definitions__nr ("
+                    "title TEXT NOT NULL, "
+                    "rarity TEXT NOT NULL DEFAULT '普通', "
+                    "description TEXT, "
+                    "reward_money REAL DEFAULT 0, "
+                    "reward_items TEXT DEFAULT '[]', "
+                    "PRIMARY KEY (title, rarity)"
+                    ")"
+                ),
+                copy_columns=[
+                    "title",
+                    "rarity",
+                    "description",
+                    "reward_money",
+                    "reward_items",
+                ],
+                select_sql=(
+                    f"SELECT title, '{DEFAULT_RARITY}', {desc_expr}, "
+                    f"{money_expr}, {items_expr} FROM title_definitions"
+                ),
             )
-            self.database_manager.execute("DELETE FROM title_definitions__nr")
-            for row in rows:
-                title = str(row.get("title") or "").strip()
-                if not title:
-                    continue
-                self.database_manager.execute(
-                    "INSERT OR IGNORE INTO title_definitions__nr "
-                    "(title, rarity, description, reward_money, reward_items) "
-                    "VALUES (?, ?, ?, ?, ?)",
-                    (
-                        title,
-                        DEFAULT_RARITY,
-                        str(row.get("description") or ""),
-                        float(row.get("reward_money") or 0),
-                        row.get("reward_items") if row.get("reward_items") is not None else "[]",
-                    ),
-                )
-            self.database_manager.execute("DROP TABLE IF EXISTS title_definitions")
-            self.database_manager.execute(
-                "ALTER TABLE title_definitions__nr RENAME TO title_definitions"
-            )
-
-        # 刷新定义映射，供解锁/佩戴回填
-        rarity_by_title: Dict[str, str] = {}
-        try:
-            for row in self.database_manager.query_all(
-                "SELECT title, rarity FROM title_definitions", ()
-            ) or []:
-                t = str(row.get("title") or "").strip()
-                if t and t not in rarity_by_title:
-                    rarity_by_title[t] = normalize_rarity(row.get("rarity"))
-        except Exception:
-            rarity_by_title = {}
+            if not ok:
+                print("[ARC Core]title_definitions legacy rebuild skipped/failed")
 
         # --- player_title_unlock_time ---
         if unlock_cols and "rarity" not in unlock_cols:
-            try:
-                old_rows = self.database_manager.query_all(
-                    "SELECT xuid, title, unlocked_at FROM player_title_unlock_time", ()
-                ) or []
-            except Exception:
-                old_rows = []
-            self.database_manager.execute(
-                "CREATE TABLE IF NOT EXISTS player_title_unlock_time__nr ("
-                "xuid TEXT NOT NULL, "
-                "title TEXT NOT NULL, "
-                "rarity TEXT NOT NULL DEFAULT '普通', "
-                "unlocked_at TEXT, "
-                "UNIQUE(xuid, title, rarity)"
-                ")"
-            )
-            self.database_manager.execute("DELETE FROM player_title_unlock_time__nr")
-            for row in old_rows:
-                xuid = str(row.get("xuid") or "").strip()
-                title = str(row.get("title") or "").strip()
-                if not xuid or not title:
-                    continue
-                rarity = rarity_by_title.get(title, DEFAULT_RARITY)
-                self.database_manager.execute(
-                    "INSERT OR IGNORE INTO player_title_unlock_time__nr "
-                    "(xuid, title, rarity, unlocked_at) VALUES (?, ?, ?, ?)",
-                    (xuid, title, rarity, row.get("unlocked_at")),
-                )
-            self.database_manager.execute("DROP TABLE IF EXISTS player_title_unlock_time")
-            self.database_manager.execute(
-                "ALTER TABLE player_title_unlock_time__nr RENAME TO player_title_unlock_time"
-            )
-        elif unlock_cols and "rarity" in unlock_cols and not already_nr:
-            # 确保 UNIQUE(xuid,title,rarity)：重建一次幂等
-            try:
-                old_rows = self.database_manager.query_all(
-                    "SELECT xuid, title, rarity, unlocked_at FROM player_title_unlock_time", ()
-                ) or []
-                self.database_manager.execute(
-                    "CREATE TABLE IF NOT EXISTS player_title_unlock_time__nr ("
+            # 从同库 title_definitions 取稀有度；无定义则默认普通
+            ok = self.database_manager.rebuild_table_copy(
+                logical_table=self._table_unlock_time,
+                temp_table="player_title_unlock_time__nr",
+                create_sql=(
+                    "CREATE TABLE player_title_unlock_time__nr ("
                     "xuid TEXT NOT NULL, "
                     "title TEXT NOT NULL, "
                     "rarity TEXT NOT NULL DEFAULT '普通', "
                     "unlocked_at TEXT, "
                     "UNIQUE(xuid, title, rarity)"
                     ")"
-                )
-                self.database_manager.execute("DELETE FROM player_title_unlock_time__nr")
-                for row in old_rows:
-                    xuid = str(row.get("xuid") or "").strip()
-                    title = str(row.get("title") or "").strip()
-                    if not xuid or not title:
-                        continue
-                    rarity = normalize_rarity(row.get("rarity") or rarity_by_title.get(title))
-                    self.database_manager.execute(
-                        "INSERT OR IGNORE INTO player_title_unlock_time__nr "
-                        "(xuid, title, rarity, unlocked_at) VALUES (?, ?, ?, ?)",
-                        (xuid, title, rarity, row.get("unlocked_at")),
-                    )
-                self.database_manager.execute("DROP TABLE IF EXISTS player_title_unlock_time")
+                ),
+                copy_columns=["xuid", "title", "rarity", "unlocked_at"],
+                select_sql=(
+                    "SELECT u.xuid, u.title, "
+                    "COALESCE("
+                    "(SELECT d.rarity FROM title_definitions d "
+                    "WHERE d.title = u.title LIMIT 1), "
+                    f"'{DEFAULT_RARITY}'), "
+                    "u.unlocked_at "
+                    "FROM player_title_unlock_time u"
+                ),
+            )
+            if not ok:
+                print("[ARC Core]player_title_unlock_time rarity rebuild skipped/failed")
+        elif unlock_cols and "rarity" in unlock_cols:
+            try:
                 self.database_manager.execute(
-                    "ALTER TABLE player_title_unlock_time__nr RENAME TO player_title_unlock_time"
+                    "UPDATE player_title_unlock_time SET rarity = ? "
+                    "WHERE rarity IS NULL OR rarity = ''",
+                    (DEFAULT_RARITY,),
+                )
+                self.database_manager.execute(
+                    "UPDATE player_title_unlock_time SET rarity = '传奇' "
+                    "WHERE rarity = '传说'"
                 )
             except Exception:
-                try:
-                    self.database_manager.execute("DROP TABLE IF EXISTS player_title_unlock_time__nr")
-                except Exception:
-                    pass
+                pass
 
         # --- player_title_equipped ---
         if equipped_cols and "rarity" not in equipped_cols:
-            try:
-                old_rows = self.database_manager.query_all(
-                    "SELECT xuid, title FROM player_title_equipped", ()
-                ) or []
-            except Exception:
-                old_rows = []
-            self.database_manager.execute(
-                "CREATE TABLE IF NOT EXISTS player_title_equipped__nr ("
-                "xuid TEXT PRIMARY KEY, "
-                "title TEXT, "
-                "rarity TEXT DEFAULT '普通'"
-                ")"
+            ok = self.database_manager.rebuild_table_copy(
+                logical_table=self._table_equipped,
+                temp_table="player_title_equipped__nr",
+                create_sql=(
+                    "CREATE TABLE player_title_equipped__nr ("
+                    "xuid TEXT PRIMARY KEY, "
+                    "title TEXT, "
+                    "rarity TEXT DEFAULT '普通'"
+                    ")"
+                ),
+                copy_columns=["xuid", "title", "rarity"],
+                select_sql=(
+                    "SELECT e.xuid, e.title, "
+                    "CASE WHEN e.title IS NULL OR TRIM(e.title) = '' THEN NULL "
+                    "ELSE COALESCE("
+                    "(SELECT d.rarity FROM title_definitions d "
+                    "WHERE d.title = e.title LIMIT 1), "
+                    f"'{DEFAULT_RARITY}') END "
+                    "FROM player_title_equipped e"
+                ),
             )
-            self.database_manager.execute("DELETE FROM player_title_equipped__nr")
-            for row in old_rows:
-                xuid = str(row.get("xuid") or "").strip()
-                title = str(row.get("title") or "").strip() if row.get("title") is not None else ""
-                if not xuid:
-                    continue
-                if not title:
-                    self.database_manager.execute(
-                        "INSERT OR REPLACE INTO player_title_equipped__nr (xuid, title, rarity) "
-                        "VALUES (?, NULL, NULL)",
-                        (xuid,),
-                    )
-                    continue
-                rarity = rarity_by_title.get(title, DEFAULT_RARITY)
-                self.database_manager.execute(
-                    "INSERT OR REPLACE INTO player_title_equipped__nr (xuid, title, rarity) "
-                    "VALUES (?, ?, ?)",
-                    (xuid, title, rarity),
-                )
-            self.database_manager.execute("DROP TABLE IF EXISTS player_title_equipped")
-            self.database_manager.execute(
-                "ALTER TABLE player_title_equipped__nr RENAME TO player_title_equipped"
-            )
+            if not ok:
+                print("[ARC Core]player_title_equipped rarity rebuild skipped/failed")
         elif equipped_cols and "rarity" in equipped_cols:
             try:
-                # 补空 rarity
                 self.database_manager.execute(
                     "UPDATE player_title_equipped SET rarity = ? "
-                    "WHERE title IS NOT NULL AND title != '' AND (rarity IS NULL OR rarity = '')",
+                    "WHERE title IS NOT NULL AND title != '' "
+                    "AND (rarity IS NULL OR rarity = '')",
                     (DEFAULT_RARITY,),
                 )
             except Exception:
