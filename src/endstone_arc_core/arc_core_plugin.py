@@ -3368,8 +3368,10 @@ class ARCCorePlugin(Plugin):
         }
         # Always on default DATABASE_PATH (never routed to shared PLAYER_DATABASE_PATH).
         ok = self.database_manager.create_table('player_local_info', fields)
-        # Legacy local tables may only have OP/free/playtime; add check-in cols.
+        # Legacy local tables may lack OP / check-in cols.
         for col, decl in (
+            ('is_op', 'INTEGER DEFAULT 0'),
+            ('remaining_free_land_blocks', f'INTEGER DEFAULT {default_free_blocks}'),
             ('last_checkin_date', 'TEXT'),
             ('total_checkin_count', 'INTEGER DEFAULT 0'),
             ('last_checkin_at', 'TEXT'),

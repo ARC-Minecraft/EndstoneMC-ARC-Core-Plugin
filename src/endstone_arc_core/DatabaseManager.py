@@ -1,7 +1,7 @@
 import re
 import sqlite3
 from contextlib import contextmanager, suppress
-from typing import Any, Callable, List, Dict, Optional
+from typing import Any, Callable, List, Dict, Optional, Set
 import threading
 from pathlib import Path
 
@@ -69,6 +69,15 @@ class DatabaseManager:
         if not db_file.parent.exists():
             db_file.parent.mkdir(parents=True)
 
+    def path_for_table(self, table_name: str) -> str:
+        """返回表所在数据库文件路径（未路由则默认库）。"""
+        t = (table_name or "").lower()
+        return self._table_routes.get(t, self.db_path)
+
+    def connection_for_table(self, table_name: str) -> sqlite3.Connection:
+        """按表名取连接（尊重 add_route）。"""
+        return self._get_connection(self.path_for_table(table_name))
+
     def _get_connection(self, db_path: str) -> sqlite3.Connection:
         """获取指定路径的数据库连接（线程本地，每个线程每个路径独立连接）"""
         if not hasattr(self._local, 'connections'):
@@ -89,21 +98,32 @@ class DatabaseManager:
             return self._get_connection(self._table_routes[table_name])
         return self._get_connection(self.db_path)
 
+    # 顺序重要：DDL / PRAGMA / sqlite_master 必须在泛化 FROM 之前。
     _TABLE_NAME_PATTERNS = (
         r'\bINSERT\s+(?:OR\s+\w+\s+)?INTO\s+[`"\[]?(\w+)',
         r'\bUPDATE\s+[`"\[]?(\w+)',
         r'\bDELETE\s+FROM\s+[`"\[]?(\w+)',
+        r'\bALTER\s+TABLE\s+[`"\[]?(\w+)',
+        r'\bDROP\s+TABLE\s+(?:IF\s+EXISTS\s+)?[`"\[]?(\w+)',
+        r'\bCREATE\s+TABLE\s+(?:IF\s+NOT\s+EXISTS\s+)?[`"\[]?(\w+)',
+        r'\bPRAGMA\s+table_info\s*\(\s*[`"\[]?(\w+)[`"\]]?\s*\)',
+        # SELECT sql FROM sqlite_master WHERE name='foo' → 路由到 foo 所在库
+        r'\bsqlite_master\b[\s\S]*?\bname\s*=\s*[\'"](\w+)[\'"]',
         r'\bFROM\s+[`"\[]?(\w+)',
     )
 
     @classmethod
     def _extract_table_name(cls, sql: str) -> Optional[str]:
-        """从 SQL 语句中提取主表名"""
+        """从 SQL 语句中提取主表名（含 CREATE/ALTER/DROP/PRAGMA）。"""
         s = sql.strip()
         for pattern in cls._TABLE_NAME_PATTERNS:
             m = re.search(pattern, s, re.IGNORECASE)
             if m:
-                return m.group(1).lower()
+                name = m.group(1).lower()
+                # sqlite_master / 临时名不参与业务路由
+                if name in ("sqlite_master", "sqlite_temp_master"):
+                    continue
+                return name
         return None
 
     @staticmethod
@@ -120,6 +140,33 @@ class DatabaseManager:
     @staticmethod
     def _validate_idents(names: Dict[str, Any]) -> List[str]:
         return [DatabaseManager._validate_ident(k) for k in names.keys()]
+
+    def get_table_columns(self, table: str) -> Set[str]:
+        """读取表列名（走表路由）。表不存在时返回空集。"""
+        try:
+            table = self._validate_ident(table)
+            conn = self.connection_for_table(table)
+            cursor = conn.cursor()
+            cursor.execute(f"PRAGMA table_info({table})")
+            return {
+                str(row[1])
+                for row in cursor.fetchall()
+                if row is not None and row[1]
+            }
+        except Exception:
+            return set()
+
+    def _filter_data_to_existing_columns(
+        self, table: str, data: Dict[str, Any]
+    ) -> Dict[str, Any]:
+        """去掉目标表不存在的列，避免同步/版本差导致整行失败刷屏。"""
+        if not data:
+            return data
+        existing = self.get_table_columns(table)
+        if not existing:
+            # 表尚不存在或读失败：原样交给 SQLite（保留明确报错）
+            return data
+        return {k: v for k, v in data.items() if k in existing}
 
     def _rollback_quiet(self, sql: str) -> None:
         with suppress(OSError, sqlite3.Error):
@@ -252,6 +299,9 @@ class DatabaseManager:
         :return: 是否插入成功
         """
         table = self._validate_ident(table)
+        data = self._filter_data_to_existing_columns(table, data)
+        if not data:
+            return False
         cols = self._validate_idents(data)
         fields = ",".join(cols)
         placeholders = ",".join(["?"] * len(cols))
@@ -261,6 +311,9 @@ class DatabaseManager:
     def upsert(self, table: str, data: Dict[str, Any]) -> bool:
         """INSERT OR REPLACE，用于同步镜像整行。"""
         table = self._validate_ident(table)
+        data = self._filter_data_to_existing_columns(table, data)
+        if not data:
+            return False
         cols = self._validate_idents(data)
         fields = ",".join(cols)
         placeholders = ",".join(["?"] * len(cols))
@@ -285,6 +338,9 @@ class DatabaseManager:
         :return: 是否更新成功
         """
         table = self._validate_ident(table)
+        data = self._filter_data_to_existing_columns(table, data)
+        if not data:
+            return False
         cols = self._validate_idents(data)
         set_clause = ",".join(k + "=?" for k in cols)
         sql = "UPDATE " + table + " SET " + set_clause + " WHERE " + where  # nosec B608
@@ -318,9 +374,18 @@ class DatabaseManager:
 
     def table_exists(self, table: str) -> bool:
         """
-        检查表是否存在
+        检查表是否存在（走表路由，不误查默认库）。
         :param table: 表名
         :return: 表是否存在
         """
-        sql = "SELECT name FROM sqlite_master WHERE type='table' AND name=?"
-        return self.query_one(sql, (table,)) is not None
+        try:
+            table = self._validate_ident(table)
+            conn = self.connection_for_table(table)
+            cursor = conn.cursor()
+            cursor.execute(
+                "SELECT name FROM sqlite_master WHERE type='table' AND name=?",
+                (table,),
+            )
+            return cursor.fetchone() is not None
+        except Exception:
+            return False
