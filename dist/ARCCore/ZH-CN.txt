@@ -333,6 +333,21 @@ PAY_SUCCESS_HINT=[弧光核心]成功支付了{0}元，您剩余余额为{1}元
 PAY_FAIL_NO_ENOUGH_MONEY=[弧光核心]扣款{0}元失败，您的余额不足，当前余额为{1}元
 MONEY_ADD_HINT=[弧光核心]你收到了{0}元，当前余额为{1}元
 MONEY_REDUCE_HINT=[弧光核心]你被扣款了{0}元，当前余额为{1}元
+MONEY_ADD_TOAST_TITLE=存款到账
+MONEY_REDUCE_TOAST_TITLE=存款扣款
+TOAST_DEFAULT_TITLE=弧光核心
+TRANSFER_RECEIVE_TOAST_TITLE=收到转账
+TRANSFER_SEND_TOAST_TITLE=转账成功
+TPA_REQUEST_TOAST_TITLE=传送请求
+TPA_RESULT_TOAST_TITLE=传送请求
+TPA_COMMAND_USAGE=[弧光核心]用法：/tpa accept 或 /tpa deny（响应最近一条传送请求）
+LAND_RESULT_TOAST_TITLE=领地
+LAND_CREATE_PRIVATE_SUCCESS=[弧光核心]私人领地 #{0} 创建成功。
+ACCOUNT_TOAST_TITLE=账户
+INVITE_TOAST_TITLE=邀请奖励
+GUILD_TOAST_TITLE=公会
+HOME_TOAST_TITLE=传送点
+SMALL_HORN_TOAST_TITLE=小喇叭
 USE_FREE_BLOCKS_HINT=[弧光核心]使用了 {0} 个免费格子
 
 # 领地系统
@@ -818,9 +833,9 @@ TPHERE_TARGET_BUTTON=请求 {0} 过来
 # 传送请求处理
 TELEPORT_REQUEST_ALREADY_EXISTS=[弧光核心]你已经向玩家{0}发送过请求了
 TPA_REQUEST_SENT=[弧光核心]已向玩家{0}发送传送请求，等待对方接受；若配置了传送费用，仅在对方点击接受时从你的账户扣除
-TPA_REQUEST_RECEIVED=[弧光核心]玩家{0}请求传送到你身边，已弹出确认窗口，请选择接受或拒绝
+TPA_REQUEST_RECEIVED=[弧光核心]玩家{0}请求传送到你身边。可用 /tpa accept 接受，或 /tpa deny 拒绝（也可在弹窗中选择）
 TPHERE_REQUEST_SENT=[弧光核心]已向玩家{0}发送传送请求，等待对方接受；若配置了传送费用，仅在对方点击接受时从你的账户扣除
-TPHERE_REQUEST_RECEIVED=[弧光核心]玩家{0}请求将你传送到对方身边，已弹出确认窗口，请选择接受或拒绝
+TPHERE_REQUEST_RECEIVED=[弧光核心]玩家{0}请求将你传送到对方身边。可用 /tpa accept 接受，或 /tpa deny 拒绝（也可在弹窗中选择）
 
 INCOMING_TP_REQUEST_TITLE=传送请求
 TPA_INCOMING_REQUEST_FORM_CONTENT=玩家「{0}」请求传送到你的身边。\n\n若你接受：对方将在倒计时结束后传送到你附近；传送费用由对方支付。\n若你拒绝：不会扣费，对方会收到通知。

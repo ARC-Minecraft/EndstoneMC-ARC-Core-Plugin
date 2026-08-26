@@ -135,10 +135,15 @@ class ARCCorePlugin(Plugin):
             ],
             "permissions": ["arc_core.command.common"],
         },
+        "tpa": {
+            "description": "Accept or deny the latest teleport request.",
+            "usages": ["/tpa accept", "/tpa deny"],
+            "permissions": ["arc_core.command.common"],
+        },
     }
     permissions = {
         "arc_core.command.common": {
-            "description": "Commands for all players (arc, suicide, spawn, land, connecttoserver, sidebar, /arc guild).",
+            "description": "Commands for all players (arc, suicide, spawn, land, connecttoserver, sidebar, tpa, /arc guild).",
             "default": True,
         },
         "arc_core.command.op": {
@@ -770,6 +775,8 @@ class ARCCorePlugin(Plugin):
                 return True
             player.send_message(self.language_manager.GetText("LAND_COMMAND_USAGE"))
             return True
+        if command.name == "tpa":
+            return self._handle_tpa_command(sender, args)
         if command.name == 'pos1':
             if not isinstance(sender, Player):
                 sender.send_message(f'[ARC Core]This command only works for players.')
@@ -3686,7 +3693,15 @@ class ARCCorePlugin(Plugin):
             guild_prefix = f"§f{no_guild_label}§r"
         et = (equipped_title or "").strip() if equipped_title else ""
         if et:
-            tc = self.title_system.get_title_rarity_color(et)
+            rarity = None
+            try:
+                if xs:
+                    info = self.title_system.get_equipped_title_entry_by_xuid(xs)
+                    if info and info.get("title") == et:
+                        rarity = info.get("rarity")
+            except Exception:
+                rarity = None
+            tc = self.title_system.get_title_rarity_color(et, rarity)
             title_part = f"{tc}[{et}]§r"
         else:
             title_part = ""
@@ -4122,29 +4137,59 @@ class ARCCorePlugin(Plugin):
 
     def show_title_manage_panel(self, player: Player):
         """头衔管理：选择佩戴的头衔或取消佩戴"""
-        unlocked = self.title_system.get_unlocked_titles(player)
-        equipped = self.title_system.get_equipped_title(player)
-        equipped_display = equipped if equipped else self.language_manager.GetText('TITLE_NONE')
+        unlocked = self.title_system.get_unlocked_title_entries(player)
+        equipped_entry = self.title_system.get_equipped_title_entry(player)
+        equipped = equipped_entry.get("title") if equipped_entry else None
+        equipped_rarity = equipped_entry.get("rarity") if equipped_entry else None
+        if equipped and equipped_rarity:
+            equipped_display = f"{equipped}（{equipped_rarity}）"
+        else:
+            equipped_display = equipped if equipped else self.language_manager.GetText('TITLE_NONE')
         content = self.language_manager.GetText('TITLE_MANAGE_CONTENT').format(equipped_display)
         panel = ActionForm(
             title=self.language_manager.GetText('TITLE_MANAGE_TITLE'),
             content=content,
             on_close=None,
         )
-        panel.add_button(self.language_manager.GetText('TITLE_UNEQUIP_BUTTON'), on_click=lambda p: self._title_set_equipped_and_back(p, None))
-        for t in unlocked:
-            label = self._format_title_button_label(t, t == equipped)
-            panel.add_button(label, on_click=lambda pl, title=t: self._title_set_equipped_and_back(pl, title))
-        panel.add_button(self.language_manager.GetText('RETURN_BUTTON_TEXT'), on_click=self.show_my_info_panel)
+        panel.add_button(
+            self.language_manager.GetText('TITLE_UNEQUIP_BUTTON'),
+            on_click=lambda p: self._title_set_equipped_and_back(p, None),
+        )
+        for entry in unlocked:
+            t = entry.get("title") or ""
+            r = entry.get("rarity") or DEFAULT_RARITY
+            equipped_match = bool(
+                equipped_entry
+                and equipped_entry.get("title") == t
+                and equipped_entry.get("rarity") == r
+            )
+            label = self._format_title_button_label(t, equipped_match, r)
+            panel.add_button(
+                label,
+                on_click=lambda pl, title=t, rarity=r: self._title_set_equipped_and_back(
+                    pl, title, rarity
+                ),
+            )
+        panel.add_button(
+            self.language_manager.GetText('RETURN_BUTTON_TEXT'),
+            on_click=self.show_my_info_panel,
+        )
         player.send_form(panel)
 
-    def _format_title_button_label(self, title_name: str, is_equipped: bool) -> str:
+    def _format_title_button_label(
+        self, title_name: str, is_equipped: bool, rarity: Optional[str] = None
+    ) -> str:
         """头衔按钮两行显示：第一行名称（按稀有度颜色+加粗），第二行介绍（若有）。"""
-        color = self.title_system.get_title_rarity_color(title_name)
-        defn = self.title_system.get_title_definition(title_name)
+        color = self.title_system.get_title_rarity_color(title_name, rarity)
+        defn = self.title_system.get_title_definition(title_name, rarity)
         desc = (defn.get("description") or "").strip() if defn else ""
-        prefix = ("§a" + self.language_manager.GetText('TITLE_EQUIPPED_CURRENT').format("") + "§r ") if is_equipped else ""
-        line1 = prefix + "§l" + color + title_name + "§r"
+        rarity_s = (defn.get("rarity") if defn else None) or rarity or DEFAULT_RARITY
+        prefix = (
+            ("§a" + self.language_manager.GetText('TITLE_EQUIPPED_CURRENT').format("") + "§r ")
+            if is_equipped
+            else ""
+        )
+        line1 = prefix + "§l" + color + title_name + "§r §7(" + str(rarity_s) + ")§r"
         if desc:
             return line1 + "\n§r§f" + desc
         return line1
@@ -4174,13 +4219,15 @@ class ARCCorePlugin(Plugin):
                     params=(player_xuid,),
                 )
                 return
-            unlocked = self.title_system.get_unlocked_titles(player)
+            unlocked = self.title_system.get_unlocked_title_entries(player)
             if not unlocked:
                 return
-            best_title = self.title_system.pick_highest_rarity_title(unlocked)
-            if not best_title:
+            best = self.title_system.pick_highest_rarity_entry(unlocked)
+            if not best:
                 return
-            if not self.title_system.set_equipped_title(player, best_title):
+            if not self.title_system.set_equipped_title(
+                player, best["title"], best["rarity"]
+            ):
                 return
             self.database_manager.update(
                 table="player_basic_info",
@@ -4205,44 +4252,53 @@ class ARCCorePlugin(Plugin):
             if self.logger:
                 self.logger.error(f"[ARC Core]Update player name_tag error: {str(e)}")
 
-    def _title_set_equipped_and_back(self, player: Player, title: Optional[str]):
+    def _title_set_equipped_and_back(
+        self, player: Player, title: Optional[str], rarity: Optional[str] = None
+    ):
         if title is None:
             self.title_system.set_equipped_title(player, None)
         else:
-            self.title_system.set_equipped_title(player, title)
+            self.title_system.set_equipped_title(player, title, rarity)
         self._update_player_name_tag(player)
         self.show_title_manage_panel(player)
 
-    def api_unlock_title(self, player: Player, title: str) -> bool:
-        """供其他插件调用：为玩家解锁头衔（不发放金钱/物品；奖励由成就等业务插件自行发放）。"""
+    def api_unlock_title(
+        self, player: Player, title: str, rarity: str = DEFAULT_RARITY
+    ) -> bool:
+        """供其他插件调用：解锁指定名称+稀有度的头衔（不发奖）。"""
         if player is None:
             return False
         title_s = str(title or "").strip()
         if not title_s:
             return False
+        rarity_s = str(rarity or DEFAULT_RARITY).strip() or DEFAULT_RARITY
         equipped_before = None
         try:
             equipped_before = self.title_system.get_equipped_title(player)
         except Exception:
             equipped_before = None
-        unlock_ok, was_new_unlock = self.title_system.unlock_title(player, title_s)
+        unlock_ok, was_new_unlock = self.title_system.unlock_title(
+            player, title_s, rarity=rarity_s
+        )
         if not unlock_ok:
             return False
         if was_new_unlock and not equipped_before:
-            # 若玩家当前未佩戴任何头衔，则自动佩戴刚解锁的头衔
             try:
-                self.title_system.set_equipped_title(player, title_s)
+                self.title_system.set_equipped_title(player, title_s, rarity_s)
                 self._update_player_name_tag(player)
             except Exception:
                 pass
         return True
 
-    def api_unlock_title_by_xuid(self, xuid: str, title: str) -> bool:
-        """按 xuid 解锁头衔；离线可记解锁。在线且新解锁时，若未佩戴则自动佩戴（不发奖）。"""
+    def api_unlock_title_by_xuid(
+        self, xuid: str, title: str, rarity: str = DEFAULT_RARITY
+    ) -> bool:
+        """按 xuid 解锁指定名称+稀有度头衔；在线且新解锁时未佩戴则自动佩戴（不发奖）。"""
         xuid_s = str(xuid or "").strip()
         title_s = str(title or "").strip()
         if not xuid_s or not title_s:
             return False
+        rarity_s = str(rarity or DEFAULT_RARITY).strip() or DEFAULT_RARITY
         online = self._find_online_player_by_xuid(xuid_s)
         equipped_before = None
         if online is not None:
@@ -4250,12 +4306,14 @@ class ARCCorePlugin(Plugin):
                 equipped_before = self.title_system.get_equipped_title(online)
             except Exception:
                 equipped_before = None
-        unlock_ok, was_new_unlock = self.title_system.unlock_title_by_xuid(xuid_s, title_s)
+        unlock_ok, was_new_unlock = self.title_system.unlock_title_by_xuid(
+            xuid_s, title_s, rarity=rarity_s
+        )
         if not unlock_ok:
             return False
         if was_new_unlock and online is not None and not equipped_before:
             try:
-                self.title_system.set_equipped_title(online, title_s)
+                self.title_system.set_equipped_title(online, title_s, rarity_s)
                 self._update_player_name_tag(online)
             except Exception:
                 pass
@@ -4269,7 +4327,7 @@ class ARCCorePlugin(Plugin):
         reward_money: float = 0.0,
         reward_items: Optional[List] = None,
     ) -> bool:
-        """创建或覆盖头衔定义（稀有度、介绍）。reward_* 仅兼容旧调用，解锁时不再据此发奖。"""
+        """创建或覆盖指定 (title, rarity) 的头衔定义。reward_* 兼容旧调用，解锁不发奖。"""
         items = reward_items if reward_items is not None else []
         if not isinstance(items, list):
             return False
@@ -4295,7 +4353,7 @@ class ARCCorePlugin(Plugin):
         reward_money: float = 0.0,
         reward_items: Optional[List] = None,
     ) -> bool:
-        """若头衔未注册则写入基本属性；已存在不覆盖。reward_* 兼容旧调用，解锁不发奖。"""
+        """若 (title, rarity) 未注册则写入基本属性；已存在同名同稀有度不覆盖。"""
         items = reward_items if reward_items is not None else []
         if not isinstance(items, list):
             return False
@@ -4313,36 +4371,47 @@ class ARCCorePlugin(Plugin):
             )
         )
 
-    def api_get_title_definition(self, title: str) -> Optional[Dict[str, Any]]:
-        """获取头衔定义；不存在返回 None。"""
+    def api_get_title_definition(
+        self, title: str, rarity: Optional[str] = None
+    ) -> Optional[Dict[str, Any]]:
+        """获取头衔定义。rarity 给定则精确匹配；省略时同名仅一条则返回，多条优先普通。"""
         title_s = str(title or "").strip()
         if not title_s:
             return None
-        return self.title_system.get_title_definition(title_s)
+        return self.title_system.get_title_definition(title_s, rarity)
 
-    def api_has_title_definition(self, title: str) -> bool:
-        """头衔是否已在核心注册（title_definitions 中有记录）。"""
-        return self.api_get_title_definition(title) is not None
+    def api_has_title_definition(
+        self, title: str, rarity: str = DEFAULT_RARITY
+    ) -> bool:
+        """是否已注册指定名称+稀有度的头衔。"""
+        title_s = str(title or "").strip()
+        if not title_s:
+            return False
+        rarity_s = str(rarity or DEFAULT_RARITY).strip() or DEFAULT_RARITY
+        return bool(self.title_system.has_title_definition(title_s, rarity_s))
 
     def api_list_title_definitions(self) -> list:
-        """全部头衔定义列表（默认头衔、OP 头衔、数据库自定义头衔）。"""
-        out = []
-        for name in self.title_system.get_all_title_names():
-            title_s = str(name or "").strip()
-            if not title_s:
-                continue
-            defn = self.title_system.get_title_definition(title_s)
-            if defn:
-                out.append(defn)
-            else:
-                out.append({
-                    "title": title_s,
-                    "rarity": DEFAULT_RARITY,
-                    "description": "",
-                    "reward_money": 0.0,
-                    "reward_items": [],
-                })
-        return out
+        """全部头衔定义列表（含同名不同稀有度）。"""
+        try:
+            return list(self.title_system.get_all_title_entries())
+        except Exception:
+            out = []
+            for name in self.title_system.get_all_title_names():
+                title_s = str(name or "").strip()
+                if not title_s:
+                    continue
+                defn = self.title_system.get_title_definition(title_s)
+                if defn:
+                    out.append(defn)
+                else:
+                    out.append({
+                        "title": title_s,
+                        "rarity": DEFAULT_RARITY,
+                        "description": "",
+                        "reward_money": 0.0,
+                        "reward_items": [],
+                    })
+            return out
 
     def api_has_unlocked_title(
         self,
@@ -4351,8 +4420,9 @@ class ARCCorePlugin(Plugin):
         player: Optional[Player] = None,
         player_name: str = "",
         xuid: str = "",
+        rarity: Optional[str] = None,
     ) -> bool:
-        """查询玩家是否已解锁指定头衔。优先 player.xuid，其次 xuid，再按 player_name 解析。"""
+        """查询玩家是否已解锁指定头衔。rarity 给定则精确匹配名称+稀有度。"""
         title_s = str(title or "").strip()
         if not title_s:
             return False
@@ -4366,7 +4436,9 @@ class ARCCorePlugin(Plugin):
             resolved = self._api_resolve_player_xuid(player_name, "") or ""
         if not resolved:
             return False
-        return bool(self.title_system.has_unlocked_title_by_xuid(resolved, title_s))
+        return bool(
+            self.title_system.has_unlocked_title_by_xuid(resolved, title_s, rarity)
+        )
 
     def api_get_player_xuid_by_name(self, player_name: str) -> Optional[str]:
         """供其他插件调用：按玩家名解析 XUID（在线优先，其次数据库，大小写不敏感）。"""
@@ -4631,11 +4703,19 @@ class ARCCorePlugin(Plugin):
             # 给邀请人累加一份待领取奖励
             self.add_pending_invite_rewards(inviter_xuid, 1)
 
-            player.send_message(self.language_manager.GetText('FILL_INVITER_SUBMIT_SUCCESS').format(inviter_name_input))
+            self._notify_important(
+                player,
+                self.language_manager.GetText('FILL_INVITER_SUBMIT_SUCCESS').format(inviter_name_input),
+                title=self._toast_title("INVITE_TOAST_TITLE", "邀请奖励"),
+            )
 
             inviter_player = self.server.get_player(inviter_name_input)
             if inviter_player is not None:
-                inviter_player.send_message(self.language_manager.GetText('INVITE_REWARD_GIVE_INVITER_HINT').format(player.name))
+                self._notify_important(
+                    inviter_player,
+                    self.language_manager.GetText('INVITE_REWARD_GIVE_INVITER_HINT').format(player.name),
+                    title=self._toast_title("INVITE_TOAST_TITLE", "邀请奖励"),
+                )
 
             self.show_my_info_panel(player)
 
@@ -4837,7 +4917,11 @@ class ARCCorePlugin(Plugin):
                 return
             r = self.set_player_password(player, password)
             if r:
-                player.send_message(self.language_manager.GetText('REGISTER_SUCCESS'))
+                self._notify_important(
+                    player,
+                    self.language_manager.GetText('REGISTER_SUCCESS'),
+                    title=self._toast_title("ACCOUNT_TOAST_TITLE", "账户"),
+                )
                 pending = self._pending_sensitive_action_by_player.pop(player.name, None)
                 self.player_sensitive_password_verified[player.name] = True
                 if pending and pending.get("on_verified"):
@@ -4888,6 +4972,72 @@ class ARCCorePlugin(Plugin):
     def get_player_money(self, player: Player) -> float:
         return self.economy.get_player_money_by_xuid(str(player.xuid))
 
+    def _toast_title(self, key: str, fallback: str) -> str:
+        text = self.language_manager.GetText(key)
+        return text if text and str(text).strip() else fallback
+
+    def _strip_arc_message_prefix(self, message: str) -> str:
+        s = str(message or "").strip()
+        if not s:
+            return ""
+        cleaned = re.sub(r"^(?:§.)*\[弧光核心\]\s*", "", s)
+        return cleaned.strip() if cleaned else s
+
+    def _send_toast(self, player: Player, title: str, content: str = "") -> None:
+        """重要提示：优先 send_toast（有提示音）；失败则退回聊天栏。"""
+        if player is None:
+            return
+        title_s = str(title or "").strip() or self._toast_title("TOAST_DEFAULT_TITLE", "弧光核心")
+        content_s = str(content or "").strip()
+        try:
+            player.send_toast(title_s, content_s)
+            return
+        except Exception:
+            pass
+        try:
+            if content_s:
+                player.send_message(f"{title_s} {content_s}".strip())
+            else:
+                player.send_message(title_s)
+        except Exception:
+            pass
+
+    def _notify_important(
+        self, player: Player, message: str, *, title: Optional[str] = None
+    ) -> None:
+        """把重要结果通知改为 toast；title 为空时用默认「弧光核心」。"""
+        if player is None:
+            return
+        msg = str(message or "").strip()
+        if not msg:
+            return
+        self._send_toast(
+            player,
+            title or self._toast_title("TOAST_DEFAULT_TITLE", "弧光核心"),
+            self._strip_arc_message_prefix(msg),
+        )
+
+    def _handle_tpa_command(self, sender: CommandSender, args: list[str]) -> bool:
+        if not isinstance(sender, Player):
+            sender.send_message("[ARC Core]This command only works for players.")
+            return True
+        usage = self._toast_title(
+            "TPA_COMMAND_USAGE",
+            "[弧光核心]用法：/tpa accept 或 /tpa deny（响应最近一条传送请求）",
+        )
+        if not args:
+            sender.send_message(usage)
+            return True
+        sub = str(args[0] or "").strip().lower()
+        if sub in ("accept", "yes", "y", "ok", "a"):
+            self.accept_teleport_request(sender)
+            return True
+        if sub in ("deny", "no", "n", "refuse", "reject", "d"):
+            self.deny_teleport_request(sender)
+            return True
+        sender.send_message(usage)
+        return True
+
     def increase_player_money_by_name(self, player_name: str, amount: float, notify: bool = True) -> bool:
         player_xuid = self.get_player_xuid_by_name(player_name)
         if not player_xuid:
@@ -4910,11 +5060,13 @@ class ARCCorePlugin(Plugin):
             online_player = self.server.get_player(player_name)
             if online_player is not None:
                 new_money = self.economy.get_player_money_by_xuid(player_xuid)
-                online_player.send_message(
+                self._notify_important(
+                    online_player,
                     self.language_manager.GetText('MONEY_ADD_HINT').format(
                         self._format_money_display(amount),
                         self._format_money_display(new_money)
-                    )
+                    ),
+                    title=self._toast_title("MONEY_ADD_TOAST_TITLE", "存款到账"),
                 )
         if success:
             try:
@@ -4951,11 +5103,13 @@ class ARCCorePlugin(Plugin):
             target = self._find_online_player_by_xuid(xuid_s)
             if target is not None:
                 new_money = self.economy.get_player_money_by_xuid(xuid_s)
-                target.send_message(
+                self._notify_important(
+                    target,
                     self.language_manager.GetText('MONEY_ADD_HINT').format(
                         self._format_money_display(amount),
                         self._format_money_display(new_money)
-                    )
+                    ),
+                    title=self._toast_title("MONEY_ADD_TOAST_TITLE", "存款到账"),
                 )
         if success:
             try:
@@ -4998,11 +5152,13 @@ class ARCCorePlugin(Plugin):
             online_player = self.server.get_player(player_name)
             if online_player is not None:
                 new_money = self.economy.get_player_money_by_xuid(player_xuid)
-                online_player.send_message(
+                self._notify_important(
+                    online_player,
                     self.language_manager.GetText('MONEY_REDUCE_HINT').format(
                         self._format_money_display(amount),
                         self._format_money_display(new_money)
-                    )
+                    ),
+                    title=self._toast_title("MONEY_REDUCE_TOAST_TITLE", "存款扣款"),
                 )
         if success:
             try:
@@ -5031,11 +5187,11 @@ class ARCCorePlugin(Plugin):
             return self.increase_player_money_by_name(player_name, m, notify)
         return self.decrease_player_money_by_name(player_name, abs(m), notify)
 
-    def increase_player_money(self, player: Player, amount: float) -> bool:
-        return self.increase_player_money_by_name(player.name, amount)
+    def increase_player_money(self, player: Player, amount: float, notify: bool = True) -> bool:
+        return self.increase_player_money_by_name(player.name, amount, notify)
 
-    def decrease_player_money(self, player: Player, amount: float) -> bool:
-        return self.decrease_player_money_by_name(player.name, amount)
+    def decrease_player_money(self, player: Player, amount: float, notify: bool = True) -> bool:
+        return self.decrease_player_money_by_name(player.name, amount, notify)
 
     def _today_checkin_date_str(self) -> str:
         return datetime.now().date().isoformat()
@@ -6006,7 +6162,7 @@ class ARCCorePlugin(Plugin):
 
         # 金钱奖励
         if total_money > 0:
-            self.increase_player_money(player, total_money)
+            self.increase_player_money(player, total_money, notify=False)
 
         # 免费领地格子奖励
         if total_free_blocks > 0:
@@ -6014,12 +6170,14 @@ class ARCCorePlugin(Plugin):
             new_free_blocks = current_free_blocks + total_free_blocks
             self.set_player_free_land_blocks(player, new_free_blocks)
 
-        player.send_message(
+        self._notify_important(
+            player,
             self.language_manager.GetText('INVITE_REWARD_GIVE_SELF_HINT').format(
                 total_item_count,
                 self._format_money_display(total_money),
                 total_free_blocks
-            )
+            ),
+            title=self._toast_title("INVITE_TOAST_TITLE", "邀请奖励"),
         )
 
     def add_pending_invite_rewards(self, inviter_xuid: str, times: int = 1):
@@ -6876,11 +7034,13 @@ class ARCCorePlugin(Plugin):
             motto = str(data[2]).strip()
             ok, err = self.guild_system.create_guild(name, str(p.xuid), motto)
             if ok:
-                p.send_message(
+                self._notify_important(
+                    p,
                     self._guild_text(
                         "GUILD_CREATE_OK",
                         "[弧光核心]公会创建成功，已扣除 {0}。",
-                    ).format(self._format_money_display(cost))
+                    ).format(self._format_money_display(cost)),
+                    title=self._toast_title("GUILD_TOAST_TITLE", "公会"),
                 )
                 self._update_player_name_tag(p)
                 self.show_guild_main_menu(p)
@@ -7996,20 +8156,20 @@ class ARCCorePlugin(Plugin):
             # 直接使用目标玩家对象和金额进行转账
             error_code, receive_player, amount = self._validate_transfer_data_new(sender, target_player, data[2])
             if error_code == 0:
-                if not self.decrease_player_money(sender, amount):
+                if not self.decrease_player_money(sender, amount, notify=False):
                     self.report_arc_error(
                         "BANK12",
                         f"bank transfer decrease failed sender={sender.name!r} receiver={receive_player.name!r} amount={amount!r}",
                         sender,
                     )
                     result_str = self.language_manager.GetText("TRANSFER_FAIL_DB_TEXT").format("BANK12")
-                elif not self.increase_player_money(receive_player, amount):
+                elif not self.increase_player_money(receive_player, amount, notify=False):
                     self.report_arc_error(
                         "BANK13",
                         f"bank transfer increase failed after decrease; attempting rollback sender={sender.name!r} receiver={receive_player.name!r} amount={amount!r}",
                         sender,
                     )
-                    if not self.increase_player_money(sender, amount):
+                    if not self.increase_player_money(sender, amount, notify=False):
                         self.report_arc_error(
                             "BANK14",
                             f"bank transfer rollback to sender FAILED sender={sender.name!r} amount={amount!r}",
@@ -8019,14 +8179,23 @@ class ARCCorePlugin(Plugin):
                     else:
                         result_str = self.language_manager.GetText("TRANSFER_FAIL_DB_TEXT").format("BANK13")
                 else:
-                    receive_player.send_message(self.language_manager.GetText('RECEIVE_PLAYER_TRANSFER_MESSAGE').format(
-                        sender.name,
-                        self._format_money_display(amount),
-                        self._format_money_display(self.get_player_money(receive_player))))
+                    self._notify_important(
+                        receive_player,
+                        self.language_manager.GetText('RECEIVE_PLAYER_TRANSFER_MESSAGE').format(
+                            sender.name,
+                            self._format_money_display(amount),
+                            self._format_money_display(self.get_player_money(receive_player))),
+                        title=self._toast_title("TRANSFER_RECEIVE_TOAST_TITLE", "收到转账"),
+                    )
                     result_str = self.language_manager.GetText('TRANSFER_COMPLETED_HINT_TEXT').format(
                         receive_player.name,
                         self._format_money_display(amount),
                         self._format_money_display(self.get_player_money(sender))
+                    )
+                    self._notify_important(
+                        sender,
+                        result_str,
+                        title=self._toast_title("TRANSFER_SEND_TOAST_TITLE", "转账成功"),
                     )
             else:
                 result_str = self.language_manager.GetText(f'TRANSFER_ERROR_{error_code}_TEXT')
@@ -8132,7 +8301,7 @@ class ARCCorePlugin(Plugin):
                 self.show_small_horn_buy_panel(sender, on_panel_close=close_cb)
                 return
 
-            if total_cost > 0 and not self.decrease_player_money(sender, total_cost):
+            if total_cost > 0 and not self.decrease_player_money(sender, total_cost, notify=False):
                 sender.send_message(self.language_manager.GetText('SMALL_HORN_BUY_PAY_FAILED'))
                 self.show_small_horn_buy_panel(sender, on_panel_close=close_cb)
                 return
@@ -8157,12 +8326,14 @@ class ARCCorePlugin(Plugin):
                 self.show_small_horn_buy_panel(sender, on_panel_close=close_cb)
                 return
 
-            sender.send_message(
+            self._notify_important(
+                sender,
                 self.language_manager.GetText('SMALL_HORN_BUY_SUCCESS').format(
                     valid_hours,
                     self._format_money_display(total_cost),
                     self._format_money_display(self.get_player_money(sender))
-                )
+                ),
+                title=self._toast_title("SMALL_HORN_TOAST_TITLE", "小喇叭"),
             )
             self.show_main_menu(sender)
 
@@ -8641,7 +8812,11 @@ class ARCCorePlugin(Plugin):
             )
             
             if success:
-                player.send_message(self.language_manager.GetText('CREATE_HOME_SUCCESS').format(home_name))
+                self._notify_important(
+                    player,
+                    self.language_manager.GetText('CREATE_HOME_SUCCESS').format(home_name),
+                    title=self._toast_title("HOME_TOAST_TITLE", "传送点"),
+                )
             else:
                 player.send_message(self.language_manager.GetText('CREATE_HOME_FAILED'))
             
@@ -9044,7 +9219,18 @@ class ARCCorePlugin(Plugin):
             sender.send_message(self.language_manager.GetText('TELEPORT_REQUEST_ALREADY_EXISTS').format(target.name))
             return
         sender.send_message(self.language_manager.GetText('TPA_REQUEST_SENT').format(target.name))
-        target.send_message(self.language_manager.GetText('TPA_REQUEST_RECEIVED').format(sender.name))
+        received = self.language_manager.GetText('TPA_REQUEST_RECEIVED').format(sender.name)
+        if not (received and str(received).strip()):
+            received = (
+                f"[弧光核心]玩家{sender.name}请求传送到你身边。"
+                f"可用 /tpa accept 接受，或 /tpa deny 拒绝"
+            )
+        self._notify_important(
+            target,
+            received,
+            title=self._toast_title("TPA_REQUEST_TOAST_TITLE", "传送请求"),
+        )
+        target.send_message(received)
         self._send_incoming_teleport_request_form(target)
 
     def send_tphere_request(self, sender: Player, target: Player):
@@ -9056,7 +9242,18 @@ class ARCCorePlugin(Plugin):
             sender.send_message(self.language_manager.GetText('TELEPORT_REQUEST_ALREADY_EXISTS').format(target.name))
             return
         sender.send_message(self.language_manager.GetText('TPHERE_REQUEST_SENT').format(target.name))
-        target.send_message(self.language_manager.GetText('TPHERE_REQUEST_RECEIVED').format(sender.name))
+        received = self.language_manager.GetText('TPHERE_REQUEST_RECEIVED').format(sender.name)
+        if not (received and str(received).strip()):
+            received = (
+                f"[弧光核心]玩家{sender.name}请求将你传送到对方身边。"
+                f"可用 /tpa accept 接受，或 /tpa deny 拒绝"
+            )
+        self._notify_important(
+            target,
+            received,
+            title=self._toast_title("TPA_REQUEST_TOAST_TITLE", "传送请求"),
+        )
+        target.send_message(received)
         self._send_incoming_teleport_request_form(target)
 
     def _incoming_teleport_request_form_content(self, request: Dict[str, Any]) -> str:
@@ -9149,20 +9346,30 @@ class ARCCorePlugin(Plugin):
                 )
                 self.teleport_system.remove_request(player.name)
                 return
-            sender.send_message(
-                self.language_manager.GetText('TELEPORT_COST_DEDUCTED').format(
-                    self._format_money_display(teleport_cost),
-                    self._format_money_display(self.get_player_money(sender)),
-                )
-            )
         if request['type'] == 'tpa':
             self.start_teleport_to_player_countdown(sender, player)
-            player.send_message(self.language_manager.GetText('TPA_REQUEST_ACCEPTED_BY_TARGET').format(sender.name))
-            sender.send_message(self.language_manager.GetText('TPA_REQUEST_ACCEPTED').format(player.name))
+            self._notify_important(
+                player,
+                self.language_manager.GetText('TPA_REQUEST_ACCEPTED_BY_TARGET').format(sender.name),
+                title=self._toast_title("TPA_RESULT_TOAST_TITLE", "传送请求"),
+            )
+            self._notify_important(
+                sender,
+                self.language_manager.GetText('TPA_REQUEST_ACCEPTED').format(player.name),
+                title=self._toast_title("TPA_RESULT_TOAST_TITLE", "传送请求"),
+            )
         else:
             self.start_teleport_to_player_countdown(player, sender)
-            player.send_message(self.language_manager.GetText('TPHERE_REQUEST_ACCEPTED_BY_TARGET').format(sender.name))
-            sender.send_message(self.language_manager.GetText('TPHERE_REQUEST_ACCEPTED').format(player.name))
+            self._notify_important(
+                player,
+                self.language_manager.GetText('TPHERE_REQUEST_ACCEPTED_BY_TARGET').format(sender.name),
+                title=self._toast_title("TPA_RESULT_TOAST_TITLE", "传送请求"),
+            )
+            self._notify_important(
+                sender,
+                self.language_manager.GetText('TPHERE_REQUEST_ACCEPTED').format(player.name),
+                title=self._toast_title("TPA_RESULT_TOAST_TITLE", "传送请求"),
+            )
         self.teleport_system.remove_request(player.name)
 
     def deny_teleport_request(self, player: Player):
@@ -9174,11 +9381,27 @@ class ARCCorePlugin(Plugin):
         sender = self.server.get_player(request['sender'])
         if sender:
             if request['type'] == 'tpa':
-                sender.send_message(self.language_manager.GetText('TPA_REQUEST_DENIED').format(player.name))
-                player.send_message(self.language_manager.GetText('TPA_REQUEST_DENIED_BY_YOU').format(sender.name))
+                self._notify_important(
+                    sender,
+                    self.language_manager.GetText('TPA_REQUEST_DENIED').format(player.name),
+                    title=self._toast_title("TPA_RESULT_TOAST_TITLE", "传送请求"),
+                )
+                self._notify_important(
+                    player,
+                    self.language_manager.GetText('TPA_REQUEST_DENIED_BY_YOU').format(sender.name),
+                    title=self._toast_title("TPA_RESULT_TOAST_TITLE", "传送请求"),
+                )
             else:
-                sender.send_message(self.language_manager.GetText('TPHERE_REQUEST_DENIED').format(player.name))
-                player.send_message(self.language_manager.GetText('TPHERE_REQUEST_DENIED_BY_YOU').format(sender.name))
+                self._notify_important(
+                    sender,
+                    self.language_manager.GetText('TPHERE_REQUEST_DENIED').format(player.name),
+                    title=self._toast_title("TPA_RESULT_TOAST_TITLE", "传送请求"),
+                )
+                self._notify_important(
+                    player,
+                    self.language_manager.GetText('TPHERE_REQUEST_DENIED_BY_YOU').format(sender.name),
+                    title=self._toast_title("TPA_RESULT_TOAST_TITLE", "传送请求"),
+                )
         self.teleport_system.remove_request(player.name)
 
     def show_op_teleport_manage_panel(self, player: Player):
@@ -10161,8 +10384,10 @@ class ARCCorePlugin(Plugin):
             if not self.land_system.set_land_sale_listing(land_id, True, v):
                 p.send_message(self.language_manager.GetText('LAND_SALE_LISTING_FAIL'))
             else:
-                p.send_message(
-                    self.language_manager.GetText('LAND_SALE_LISTING_OK').format(self._format_money_display(v))
+                self._notify_important(
+                    p,
+                    self.language_manager.GetText('LAND_SALE_LISTING_OK').format(self._format_money_display(v)),
+                    title=self._toast_title("LAND_RESULT_TOAST_TITLE", "领地"),
                 )
             self.show_land_sale_mode_panel(p, land_id)
 
@@ -10235,7 +10460,7 @@ class ARCCorePlugin(Plugin):
                 )
             )
             return
-        if not self.decrease_player_money(buyer, price):
+        if not self.decrease_player_money(buyer, price, notify=False):
             self.report_arc_error(
                 "LAND_SALE1",
                 f"_try_purchase_listed_land decrease failed buyer={buyer.name!r} land_id={land_id!r} price={price!r}",
@@ -10246,7 +10471,7 @@ class ARCCorePlugin(Plugin):
         buyer_key = LandSystem.land_owner_key_player(str(buyer.xuid))
         ok = self.land_system.transfer_land_purchase(land_id, buyer_key, seller_key, price)
         if not ok:
-            if not self.increase_player_money(buyer, price):
+            if not self.increase_player_money(buyer, price, notify=False):
                 self.report_arc_error(
                     "LAND_SALE2",
                     f"_try_purchase_listed_land refund after transfer fail FAILED buyer={buyer.name!r} amount={price!r}",
@@ -10266,7 +10491,7 @@ class ARCCorePlugin(Plugin):
         pay_ok = True
         if seller_net > 0:
             pay_ok = self.increase_player_money_by_xuid(
-                seller_px, seller_net, notify=True
+                seller_px, seller_net, notify=False
             )
         if not pay_ok:
             self.report_arc_error(
@@ -10275,7 +10500,7 @@ class ARCCorePlugin(Plugin):
                 buyer,
             )
             if self.land_system.transfer_land(land_id, seller_key):
-                if not self.increase_player_money(buyer, price):
+                if not self.increase_player_money(buyer, price, notify=False):
                     self.report_arc_error(
                         "LAND_SALE4",
                         f"_try_purchase_listed_land refund after revert FAILED buyer={buyer.name!r} amount={price!r}",
@@ -10286,21 +10511,25 @@ class ARCCorePlugin(Plugin):
                 buyer.send_message(self.language_manager.GetText('LAND_SALE_BUY_FAIL_SELLER_PAY_CRITICAL'))
             return
         ln = land_info.get("land_name", str(land_id))
-        buyer.send_message(
+        self._notify_important(
+            buyer,
             self.language_manager.GetText('LAND_SALE_BUY_SUCCESS_BUYER').format(
                 ln, self._format_money_display(price)
-            )
+            ),
+            title=self._toast_title("LAND_RESULT_TOAST_TITLE", "领地"),
         )
         seller_online = self._find_online_player_by_xuid(seller_px)
         if seller_online:
-            seller_online.send_message(
+            self._notify_important(
+                seller_online,
                 self.language_manager.GetText('LAND_SALE_BUY_SUCCESS_SELLER').format(
                     buyer.name,
                     ln,
                     self._format_money_display(price),
                     self._format_money_display(vat),
                     self._format_money_display(seller_net),
-                )
+                ),
+                title=self._toast_title("LAND_RESULT_TOAST_TITLE", "领地"),
             )
 
     def show_rename_own_land_panel(self, player: Player, land_id: int):
@@ -10496,14 +10725,22 @@ class ARCCorePlugin(Plugin):
         success = self.transfer_land(land_id, str(target_player.xuid))
         if success:
             # 通知当前玩家
-            player.send_message(self.language_manager.GetText('TRANSFER_LAND_SUCCESS').format(land_id, target_player.name))
+            self._notify_important(
+                player,
+                self.language_manager.GetText('TRANSFER_LAND_SUCCESS').format(land_id, target_player.name),
+                title=self._toast_title("LAND_RESULT_TOAST_TITLE", "领地"),
+            )
             
             # 通知目标玩家
-            target_player.send_message(self.language_manager.GetText('TRANSFER_LAND_NOTIFICATION').format(
-                player.name, 
-                land_id, 
-                land_info['land_name']
-            ))
+            self._notify_important(
+                target_player,
+                self.language_manager.GetText('TRANSFER_LAND_NOTIFICATION').format(
+                    player.name, 
+                    land_id, 
+                    land_info['land_name']
+                ),
+                title=self._toast_title("LAND_RESULT_TOAST_TITLE", "领地"),
+            )
         else:
             player.send_message(self.language_manager.GetText('TRANSFER_LAND_FAILED').format(land_id))
         
@@ -10613,9 +10850,13 @@ class ARCCorePlugin(Plugin):
             success = self.land_system.add_land_shared_user(land_id, target_xuid)
             if success:
                 player.send_message(self.language_manager.GetText('LAND_AUTH_SUCCESS_ADD').format(land_id, target_player.name))
-                target_player.send_message(self.language_manager.GetText('LAND_AUTH_NOTIFICATION').format(
-                    player.name, land_id, land_info['land_name']
-                ))
+                self._notify_important(
+                    target_player,
+                    self.language_manager.GetText('LAND_AUTH_NOTIFICATION').format(
+                        player.name, land_id, land_info['land_name']
+                    ),
+                    title=self._toast_title("LAND_RESULT_TOAST_TITLE", "领地"),
+                )
             else:
                 player.send_message(self.language_manager.GetText('LAND_AUTH_FAILED_ADD'))
         except Exception as e:
@@ -10643,9 +10884,13 @@ class ARCCorePlugin(Plugin):
                 player.send_message(self.language_manager.GetText('LAND_AUTH_SUCCESS_REMOVE').format(target_name, land_id))
                 target_player = self.server.get_player(target_name)
                 if target_player:
-                    target_player.send_message(self.language_manager.GetText('LAND_AUTH_REMOVE_NOTIFICATION').format(
-                        player.name, land_id, land_info['land_name']
-                    ))
+                    self._notify_important(
+                        target_player,
+                        self.language_manager.GetText('LAND_AUTH_REMOVE_NOTIFICATION').format(
+                            player.name, land_id, land_info['land_name']
+                        ),
+                        title=self._toast_title("LAND_RESULT_TOAST_TITLE", "领地"),
+                    )
             else:
                 player.send_message(self.language_manager.GetText('LAND_AUTH_FAILED_REMOVE'))
         except Exception as e:
@@ -11681,11 +11926,7 @@ class ARCCorePlugin(Plugin):
             if land_id is not None:
                 if not player.is_op:
                     if money_cost > 0:
-                        if self.decrease_player_money(player, money_cost):
-                            player.send_message(self.language_manager.GetText('PAY_SUCCESS_HINT').format(
-                                self._format_money_display(money_cost),
-                                self._format_money_display(self.get_player_money(player))))
-                        else:
+                        if not self.decrease_player_money(player, money_cost):
                             self.report_arc_error(
                                 "LAND_PAY1",
                                 f"player_buy_new_land land_id={land_id} created but decrease_money failed cost={money_cost!r}",
@@ -11696,8 +11937,20 @@ class ARCCorePlugin(Plugin):
                         current_free_blocks = self.get_player_free_land_blocks(player)
                         new_free_blocks = max(0, current_free_blocks - used_free_blocks)
                         self.set_player_free_land_blocks(player, new_free_blocks)
-                        player.send_message(self.language_manager.GetText('USE_FREE_BLOCKS_HINT').format(used_free_blocks))
+                        self._notify_important(
+                            player,
+                            self.language_manager.GetText('USE_FREE_BLOCKS_HINT').format(used_free_blocks),
+                            title=self._toast_title("LAND_RESULT_TOAST_TITLE", "领地"),
+                        )
 
+                create_msg = self.language_manager.GetText('LAND_CREATE_PRIVATE_SUCCESS')
+                if not (create_msg and str(create_msg).strip()):
+                    create_msg = "[弧光核心]私人领地 #{0} 创建成功。"
+                self._notify_important(
+                    player,
+                    create_msg.format(land_id),
+                    title=self._toast_title("LAND_RESULT_TOAST_TITLE", "领地"),
+                )
                 self.clear_new_land_creation_info_memory(player)
                 self.show_own_land_detail_panel(player, land_id, self.get_land_info(land_id))
             else:
@@ -11883,8 +12136,10 @@ class ARCCorePlugin(Plugin):
                 if allow_private
                 else "LAND_CREATE_PUBLIC_SUCCESS"
             )
-            player.send_message(
-                self.language_manager.GetText(success_key).format(land_id, priority)
+            self._notify_important(
+                player,
+                self.language_manager.GetText(success_key).format(land_id, priority),
+                title=self._toast_title("LAND_RESULT_TOAST_TITLE", "领地"),
             )
             self.show_land_main_menu(player)
         else:
@@ -12000,10 +12255,12 @@ class ARCCorePlugin(Plugin):
             self.show_pending_land_purchase_panel(player)
             return
         self.clear_new_land_creation_info_memory(player)
-        player.send_message(
+        self._notify_important(
+            player,
             self.language_manager.GetText("LAND_CREATE_GUILD_SUCCESS").format(
                 land_id, cost, int(new_total)
-            )
+            ),
+            title=self._toast_title("LAND_RESULT_TOAST_TITLE", "领地"),
         )
         self.show_land_main_menu(player)
 
@@ -12608,9 +12865,17 @@ class ARCCorePlugin(Plugin):
         )
         self.clear_new_land_creation_info_memory(player)
         if guild_extra_msg:
-            player.send_message(guild_extra_msg)
+            self._notify_important(
+                player,
+                guild_extra_msg,
+                title=self._toast_title("LAND_RESULT_TOAST_TITLE", "领地"),
+            )
         else:
-            player.send_message(self.language_manager.GetText("LAND_RESIZE_SUCCESS").format(land_id))
+            self._notify_important(
+                player,
+                self.language_manager.GetText("LAND_RESIZE_SUCCESS").format(land_id),
+                title=self._toast_title("LAND_RESULT_TOAST_TITLE", "领地"),
+            )
         if resize_mode == "op_public":
             self.show_op_land_detail_panel(player, land_id, op_from_page)
         else:
@@ -13088,9 +13353,18 @@ class ARCCorePlugin(Plugin):
         player.send_form(panel)
 
     def show_op_title_attr_list_panel(self, player: Player):
-        """OP 头衔属性管理：列出所有头衔，点击编辑。"""
-        titles = self.title_system.get_all_title_names()
-        if not titles:
+        """OP 头衔属性管理：列出所有 (名称, 稀有度) 条目。"""
+        try:
+            entries = list(self.title_system.get_all_title_entries())
+        except Exception:
+            entries = []
+            for t in self.title_system.get_all_title_names():
+                defn = self.title_system.get_title_definition(t) or {}
+                entries.append({
+                    "title": t,
+                    "rarity": defn.get("rarity") or DEFAULT_RARITY,
+                })
+        if not entries:
             player.send_message(self.language_manager.GetText('OP_TITLE_NO_TITLES'))
             self.show_op_title_manage_panel(player)
             return
@@ -13099,26 +13373,34 @@ class ARCCorePlugin(Plugin):
             content=self.language_manager.GetText('OP_TITLE_ATTR_MANAGE_CONTENT'),
             on_close=None,
         )
-        for t in titles:
-            defn = self.title_system.get_title_definition(t)
-            rarity = (defn.get('rarity') or '普通') if defn else '普通'
-            panel.add_button(f"{t} ({rarity})", on_click=lambda p, title=t: self.show_op_title_edit_panel(p, title))
+        for entry in entries:
+            t = str(entry.get("title") or "").strip()
+            rarity = str(entry.get("rarity") or DEFAULT_RARITY).strip() or DEFAULT_RARITY
+            if not t:
+                continue
+            panel.add_button(
+                f"{t} ({rarity})",
+                on_click=lambda p, title=t, r=rarity: self.show_op_title_edit_panel(p, title, r),
+            )
         panel.add_button(self.language_manager.GetText('RETURN_BUTTON_TEXT'), on_click=self.show_op_title_manage_panel)
         player.send_form(panel)
 
-    def show_op_title_edit_panel(self, player: Player, title_name: str):
+    def show_op_title_edit_panel(self, player: Player, title_name: str, rarity: str = DEFAULT_RARITY):
         """OP 头衔管理：编辑属性 / 重命名。"""
+        rarity_s = str(rarity or DEFAULT_RARITY).strip() or DEFAULT_RARITY
         menu = ActionForm(
-            title=self.language_manager.GetText('OP_TITLE_ATTR_EDIT_TITLE').format(title_name),
+            title=self.language_manager.GetText('OP_TITLE_ATTR_EDIT_TITLE').format(
+                f"{title_name}（{rarity_s}）"
+            ),
             on_close=None,
         )
         menu.add_button(
             self.language_manager.GetText('OP_TITLE_ATTR_EDIT_ATTR_BUTTON'),
-            on_click=lambda p=player, t=title_name: self._show_op_title_attr_edit_modal(p, t)
+            on_click=lambda p=player, t=title_name, r=rarity_s: self._show_op_title_attr_edit_modal(p, t, r)
         )
         menu.add_button(
             self.language_manager.GetText('OP_TITLE_RENAME_BUTTON'),
-            on_click=lambda p=player, t=title_name: self.show_op_title_rename_panel(p, t)
+            on_click=lambda p=player, t=title_name, r=rarity_s: self.show_op_title_rename_panel(p, t, r)
         )
         menu.add_button(
             self.language_manager.GetText('RETURN_BUTTON_TEXT'),
@@ -13126,11 +13408,14 @@ class ARCCorePlugin(Plugin):
         )
         player.send_form(menu)
 
-    def _show_op_title_attr_edit_modal(self, player: Player, title_name: str):
-        """OP 编辑头衔属性：稀有度、介绍、解锁奖励。"""
-        defn = self.title_system.get_title_definition(title_name)
+    def _show_op_title_attr_edit_modal(
+        self, player: Player, title_name: str, rarity: str = DEFAULT_RARITY
+    ):
+        """OP 编辑头衔属性：稀有度、介绍（奖励字段保留兼容，解锁不发奖）。"""
+        rarity_s = str(rarity or DEFAULT_RARITY).strip() or DEFAULT_RARITY
+        defn = self.title_system.get_title_definition(title_name, rarity_s)
         if not defn:
-            defn = {"rarity": "普通", "description": "", "reward_money": 0.0, "reward_items": []}
+            defn = {"rarity": rarity_s, "description": "", "reward_money": 0.0, "reward_items": []}
         reward_items_str = "; ".join(
             f"{x.get('item_name', x.get('id', ''))} {x.get('count', 0)}"
             for x in (defn.get("reward_items") or [])
@@ -13156,30 +13441,43 @@ class ARCCorePlugin(Plugin):
             default_value=reward_items_str,
         )
         form = ModalForm(
-            title=self.language_manager.GetText('OP_TITLE_ATTR_EDIT_TITLE').format(title_name),
+            title=self.language_manager.GetText('OP_TITLE_ATTR_EDIT_TITLE').format(
+                f"{title_name}（{rarity_s}）"
+            ),
             controls=[rarity_input, desc_input, money_input, items_input],
             on_close=None,
-            on_submit=lambda p, json_str: self._do_op_title_save_attr(p, json_str, title_name),
+            on_submit=lambda p, json_str, t=title_name, r=rarity_s: self._do_op_title_save_attr(
+                p, json_str, t, r
+            ),
         )
         player.send_form(form)
 
-    def show_op_title_rename_panel(self, player: Player, title_name: str):
-        """OP 头衔重命名：将旧头衔名迁移为新头衔名。"""
+    def show_op_title_rename_panel(
+        self, player: Player, title_name: str, rarity: str = DEFAULT_RARITY
+    ):
+        """OP 头衔重命名：将旧头衔名迁移为新头衔名（限定该稀有度变体）。"""
+        rarity_s = str(rarity or DEFAULT_RARITY).strip() or DEFAULT_RARITY
         rename_input = TextInput(
             label=self.language_manager.GetText('OP_TITLE_RENAME_INPUT_LABEL'),
             placeholder=self.language_manager.GetText('OP_TITLE_RENAME_INPUT_PLACEHOLDER'),
             default_value="",
         )
         form = ModalForm(
-            title=self.language_manager.GetText('OP_TITLE_RENAME_PANEL_TITLE').format(title_name),
+            title=self.language_manager.GetText('OP_TITLE_RENAME_PANEL_TITLE').format(
+                f"{title_name}（{rarity_s}）"
+            ),
             controls=[rename_input],
             on_close=None,
-            on_submit=lambda p, json_str: self._do_op_title_rename(p, json_str, title_name),
+            on_submit=lambda p, json_str, t=title_name, r=rarity_s: self._do_op_title_rename(
+                p, json_str, t, r
+            ),
         )
         player.send_form(form)
 
-    def _do_op_title_rename(self, player: Player, json_str: str, title_name: str):
-        """执行头衔重命名：校验冲突 + 更新配置（管理员头衔）+ 同步数据库。"""
+    def _do_op_title_rename(
+        self, player: Player, json_str: str, title_name: str, rarity: str = DEFAULT_RARITY
+    ):
+        """执行头衔重命名：校验冲突 + 更新配置 + 同步数据库（限定稀有度变体）。"""
         try:
             data = json.loads(json_str)
             if not data or not str(data[0]).strip():
@@ -13188,34 +13486,36 @@ class ARCCorePlugin(Plugin):
 
             old_title = str(title_name).strip()
             new_title = str(data[0]).strip()
+            rarity_s = str(rarity or DEFAULT_RARITY).strip() or DEFAULT_RARITY
 
             if old_title == new_title:
                 player.send_message(self.language_manager.GetText('OP_TITLE_RENAME_FAIL_SAME'))
                 return self.show_op_title_attr_list_panel(player)
 
-            # 新名字冲突校验
-            if self.title_system.get_title_definition(new_title):
-                player.send_message(self.language_manager.GetText('OP_TITLE_RENAME_FAIL_CONFLICT').format(new_title))
+            if self.title_system.get_title_definition(new_title, rarity_s):
+                player.send_message(
+                    self.language_manager.GetText('OP_TITLE_RENAME_FAIL_CONFLICT').format(new_title)
+                )
                 return self.show_op_title_attr_list_panel(player)
 
-            ok = self.title_system.rename_title(old_title, new_title)
+            ok = self.title_system.rename_title(old_title, new_title, rarity=rarity_s)
             if not ok:
                 player.send_message(self.language_manager.GetText('OP_TITLE_RENAME_FAIL'))
                 return self.show_op_title_attr_list_panel(player)
 
-            # 同步管理员头衔配置（OP_TITLE）
             current_op_title = self.setting_manager.GetSetting('OP_TITLE')
             if current_op_title and str(current_op_title).strip() == old_title:
                 self.setting_manager.SetSetting('OP_TITLE', new_title)
 
-            # 同步默认头衔配置（DEFAULT_TITLE），避免列表仍显示旧名字
             default_raw = self.setting_manager.GetSetting('DEFAULT_TITLE') or ""
             default_list = [t.strip() for t in str(default_raw).split(",") if t.strip()]
             if old_title in default_list:
                 default_list = [new_title if t == old_title else t for t in default_list]
                 self.setting_manager.SetSetting('DEFAULT_TITLE', ",".join(default_list))
 
-            player.send_message(self.language_manager.GetText('OP_TITLE_RENAME_SUCCESS').format(old_title, new_title))
+            player.send_message(
+                self.language_manager.GetText('OP_TITLE_RENAME_SUCCESS').format(old_title, new_title)
+            )
         except Exception as e:
             if self.logger:
                 self.logger.error(f"[ARC Core]Rename title error: {e}")
@@ -13239,22 +13539,58 @@ class ARCCorePlugin(Plugin):
                 result.append({"item_name": tokens[0], "count": 1})
         return result
 
-    def _do_op_title_save_attr(self, player: Player, json_str: str, title_name: str):
+    def _do_op_title_save_attr(
+        self, player: Player, json_str: str, title_name: str, old_rarity: str = DEFAULT_RARITY
+    ):
         try:
             data = json.loads(json_str)
             if len(data) < 4:
                 self.show_op_title_attr_list_panel(player)
                 return
-            rarity = str(data[0]).strip() if data[0] else "普通"
-            if rarity not in ("普通", "稀有", "史诗", "传奇", "神话"):
-                rarity = "普通"
+            new_rarity = str(data[0]).strip() if data[0] else DEFAULT_RARITY
+            if new_rarity not in ("普通", "稀有", "史诗", "传奇", "神话"):
+                new_rarity = DEFAULT_RARITY
             description = str(data[1]).strip() if data[1] else ""
             try:
                 reward_money = float(data[2]) if data[2] is not None and str(data[2]).strip() else 0.0
             except (ValueError, TypeError):
                 reward_money = 0.0
             reward_items = self._parse_reward_items(str(data[3]) if data[3] else "")
-            self.title_system.set_title_definition(title_name, rarity, description, reward_money, reward_items)
+            old_r = str(old_rarity or DEFAULT_RARITY).strip() or DEFAULT_RARITY
+            if new_rarity != old_r:
+                # 稀有度变更：写入新 (title, new_rarity)，迁移解锁/佩戴，删除旧定义
+                if self.title_system.get_title_definition(title_name, new_rarity):
+                    player.send_message(
+                        self.language_manager.GetText('OP_TITLE_RENAME_FAIL_CONFLICT').format(
+                            f"{title_name}（{new_rarity}）"
+                        )
+                    )
+                    self.show_op_title_attr_list_panel(player)
+                    return
+                self.title_system.set_title_definition(
+                    title_name, new_rarity, description, reward_money, reward_items
+                )
+                try:
+                    self.database_manager.execute(
+                        "UPDATE player_title_unlock_time SET rarity = ? "
+                        "WHERE title = ? AND rarity = ?",
+                        (new_rarity, title_name, old_r),
+                    )
+                    self.database_manager.execute(
+                        "UPDATE player_title_equipped SET rarity = ? "
+                        "WHERE title = ? AND rarity = ?",
+                        (new_rarity, title_name, old_r),
+                    )
+                    self.database_manager.execute(
+                        "DELETE FROM title_definitions WHERE title = ? AND rarity = ?",
+                        (title_name, old_r),
+                    )
+                except Exception:
+                    pass
+            else:
+                self.title_system.set_title_definition(
+                    title_name, new_rarity, description, reward_money, reward_items
+                )
             player.send_message(self.language_manager.GetText('OP_TITLE_ATTR_SAVED'))
         except Exception as e:
             if self.logger:
@@ -14408,9 +14744,13 @@ class ARCCorePlugin(Plugin):
             success = self.land_system.add_land_shared_user(land_id, target_xuid)
             if success:
                 player.send_message(self.language_manager.GetText('LAND_AUTH_SUCCESS_ADD').format(land_id, target_player.name))
-                target_player.send_message(self.language_manager.GetText('LAND_AUTH_NOTIFICATION').format(
-                    player.name, land_id, land_info['land_name']
-                ))
+                self._notify_important(
+                    target_player,
+                    self.language_manager.GetText('LAND_AUTH_NOTIFICATION').format(
+                        player.name, land_id, land_info['land_name']
+                    ),
+                    title=self._toast_title("LAND_RESULT_TOAST_TITLE", "领地"),
+                )
             else:
                 player.send_message(self.language_manager.GetText('LAND_AUTH_FAILED_ADD'))
         except Exception as e:
@@ -14439,9 +14779,13 @@ class ARCCorePlugin(Plugin):
                 player.send_message(self.language_manager.GetText('LAND_AUTH_SUCCESS_REMOVE').format(target_name, land_id))
                 target_player = self.server.get_player(target_name)
                 if target_player:
-                    target_player.send_message(self.language_manager.GetText('LAND_AUTH_REMOVE_NOTIFICATION').format(
-                        player.name, land_id, land_info['land_name']
-                    ))
+                    self._notify_important(
+                        target_player,
+                        self.language_manager.GetText('LAND_AUTH_REMOVE_NOTIFICATION').format(
+                            player.name, land_id, land_info['land_name']
+                        ),
+                        title=self._toast_title("LAND_RESULT_TOAST_TITLE", "领地"),
+                    )
             else:
                 player.send_message(self.language_manager.GetText('LAND_AUTH_FAILED_REMOVE'))
         except Exception as e:
