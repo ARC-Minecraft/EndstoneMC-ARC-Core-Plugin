@@ -40,10 +40,17 @@ CONDITIONAL_TITLE_AUTHORITY=
 
 
 # ----- 方式 B：共享数据库文件路径（与远程客户端互斥；路径留空则使用 DATABASE_PATH 主库） -----
+# 推荐拓扑（纯网络）：
+#   主服 ENABLE_SYNC_SERVER=True、ENABLE_SYNC_CLIENT=False，四个路径留空
+#   子服 ENABLE_SYNC_CLIENT=True，四个路径留空
 PLAYER_DATABASE_PATH=
 PLAYER_ECONOMY_DATABASE_PATH=
 PLAYER_TITLE_DATABASE_PATH=
 GUILD_DATABASE_PATH=
+
+# 一次性数据恢复：逗号分隔的旧共享库 .db 路径（仅主服、且未见 plugins/ARCCore/.legacy_import_done 时执行）
+# 用于把旧 PLAYER_*/GUILD_* 文件中的经济/头衔/公会等导回主库，并用天眼重建 player_basic_info（密码需玩家重设）
+LEGACY_IMPORT_DATABASE_PATHS=
 
 # 强制登录（为 True 时，玩家进入游戏强制打开 /arc 菜单登录或注册；关闭登录/注册界面且未正确输入密码时会再次强制打开）
 FORCE_LOGIN=True

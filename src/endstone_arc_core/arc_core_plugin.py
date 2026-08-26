@@ -47,9 +47,13 @@ from endstone_arc_core.arc_error_log import append_arc_error_log, format_context
 from endstone_arc_core.sky_eye_log import SkyEyeStore, format_sky_eye_records, prune_sky_eye_logs
 from endstone_arc_core.sync_server import SyncServer
 from endstone_arc_core.sync_client import SyncClient
-from endstone_arc_core.sync_config import ALL_SHARED_SETTING_KEYS, resolve_sync_consumer_mode
+from endstone_arc_core.sync_config import ALL_SHARED_SETTING_KEYS, has_file_path_sync, resolve_sync_consumer_mode
 from endstone_arc_core.SidebarSystem import SidebarSystem
 from endstone_arc_core import bedrock_glyphs
+from endstone_arc_core.legacy_recovery import (
+    RECOVERED_UUID_PREFIX,
+    maybe_run_legacy_recovery,
+)
 
 MAIN_PATH = 'plugins/ARCCore'
 # 天眼系统：独立 SQLite + 兼容清理旧按日 txt
@@ -453,8 +457,26 @@ class ARCCorePlugin(Plugin):
         if self._sync_mode_conflict:
             self.logger.warning(
                 "[ARC Core] ENABLE_SYNC_CLIENT 与共享数据库路径同时配置，"
-                "已忽略文件路径方式，仅使用远程客户端同步"
+                "已忽略文件路径方式，仅使用远程客户端同步。"
+                "请将旧共享库路径改填 LEGACY_IMPORT_DATABASE_PATHS，并清空四个 *_DATABASE_PATH。"
             )
+        elif has_file_path_sync(self.setting_manager):
+            self.logger.warning(
+                "[ARC Core] 仍配置了 *_DATABASE_PATH。"
+                "推荐主服开同步中心、子服 ENABLE_SYNC_CLIENT，两台都清空共享路径；"
+                "旧共享库文件请填进 LEGACY_IMPORT_DATABASE_PATHS。"
+            )
+        try:
+            maybe_run_legacy_recovery(
+                database_manager=self.database_manager,
+                setting_manager=self.setting_manager,
+                data_dir=Path(MAIN_PATH),
+                sky_eye_db=Path(MAIN_PATH) / SKY_EYE_LOG_DIR_NAME / SKY_EYE_DB_NAME,
+                log=self._safe_log,
+                is_sync_client=self._sync_consumer_mode == "client",
+            )
+        except Exception as e:
+            self.logger.error(f"[ARC Core]Legacy recovery error: {e}")
         self._init_sync_service()
         self.economy.set_logger(self.logger)
 
@@ -3592,11 +3614,7 @@ class ARCCorePlugin(Plugin):
                 basic_cols = self._player_basic_info_columns()
                 present = [c for c in sync_cols if c in basic_cols]
                 if "uuid" in present and "xuid" in present and "name" in present:
-                    col_sql = ", ".join(present)
-                    self.database_manager.execute(
-                        "DROP TABLE IF EXISTS player_basic_info__sync_new"
-                    )
-                    self.database_manager.execute(
+                    create_sql = (
                         "CREATE TABLE player_basic_info__sync_new ("
                         "uuid TEXT PRIMARY KEY, "
                         "xuid TEXT NOT NULL, "
@@ -3612,18 +3630,22 @@ class ARCCorePlugin(Plugin):
                         "once_op INTEGER DEFAULT 0"
                         ")"
                     )
-                    self.database_manager.execute(
-                        f"INSERT INTO player_basic_info__sync_new ({col_sql}) "
-                        f"SELECT {col_sql} FROM player_basic_info"
+                    ok = self.database_manager.rebuild_table_copy(
+                        logical_table="player_basic_info",
+                        temp_table="player_basic_info__sync_new",
+                        create_sql=create_sql,
+                        copy_columns=present,
                     )
-                    self.database_manager.execute("DROP TABLE player_basic_info")
-                    self.database_manager.execute(
-                        "ALTER TABLE player_basic_info__sync_new RENAME TO player_basic_info"
-                    )
-                    print(
-                        "[ARC Core]Rebuilt player_basic_info "
-                        "(synced account + playtime + once_op; check-in is local)"
-                    )
+                    if ok:
+                        print(
+                            "[ARC Core]Rebuilt player_basic_info "
+                            "(synced account + playtime + once_op; check-in is local)"
+                        )
+                    else:
+                        print(
+                            "[ARC Core]Skip rebuild player_basic_info "
+                            "(backup/copy failed; original table kept)"
+                        )
 
             # Rebuild local without playtime columns if present.
             local_cols = self._player_local_info_columns()
@@ -3652,33 +3674,34 @@ class ARCCorePlugin(Plugin):
                 local_cols = self._player_local_info_columns()
                 present = [c for c in keep if c in local_cols]
                 if "xuid" in present:
-                    col_sql = ", ".join(present)
-                    self.database_manager.execute(
-                        "DROP TABLE IF EXISTS player_local_info__new"
-                    )
-                    self.database_manager.execute(
+                    default_free_sql = default_free
+                    create_sql = (
                         "CREATE TABLE player_local_info__new ("
                         "xuid TEXT PRIMARY KEY, "
                         "is_op INTEGER DEFAULT 0, "
-                        f"remaining_free_land_blocks INTEGER DEFAULT {default_free}, "
+                        f"remaining_free_land_blocks INTEGER DEFAULT {default_free_sql}, "
                         "last_checkin_date TEXT, "
                         "total_checkin_count INTEGER DEFAULT 0, "
                         "last_checkin_at TEXT, "
                         "continuous_checkin_days INTEGER DEFAULT 0"
                         ")"
                     )
-                    self.database_manager.execute(
-                        f"INSERT INTO player_local_info__new ({col_sql}) "
-                        f"SELECT {col_sql} FROM player_local_info"
+                    ok = self.database_manager.rebuild_table_copy(
+                        logical_table="player_local_info",
+                        temp_table="player_local_info__new",
+                        create_sql=create_sql,
+                        copy_columns=present,
                     )
-                    self.database_manager.execute("DROP TABLE player_local_info")
-                    self.database_manager.execute(
-                        "ALTER TABLE player_local_info__new RENAME TO player_local_info"
-                    )
-                    print(
-                        "[ARC Core]Rebuilt player_local_info "
-                        "(OP / free land / check-in; playtime is synced)"
-                    )
+                    if ok:
+                        print(
+                            "[ARC Core]Rebuilt player_local_info "
+                            "(OP / free land / check-in; playtime is synced)"
+                        )
+                    else:
+                        print(
+                            "[ARC Core]Skip rebuild player_local_info "
+                            "(backup/copy failed; original table kept)"
+                        )
         except Exception as e:
             print(f"[ARC Core]Migrate player_basic_info split error: {e}")
 
@@ -3790,7 +3813,7 @@ class ARCCorePlugin(Plugin):
 
             # 检查并初始化玩家基本信息（使用XUID作为主键）
             basic_info = self.database_manager.query_one(
-                "SELECT xuid FROM player_basic_info WHERE xuid = ?",
+                "SELECT xuid, uuid FROM player_basic_info WHERE xuid = ?",
                 (player_xuid,)
             )
             if not basic_info:
@@ -3800,6 +3823,8 @@ class ARCCorePlugin(Plugin):
                     success = False
                 else:
                     self._safe_log('info', f"{ColorFormat.GREEN}[ARC Core]Initialized basic info for new player {player.name}")
+            else:
+                self._fix_recovered_player_uuid(player, basic_info)
 
             # Ensure per-server local profile exists
             self.init_player_local_info(player)
@@ -3827,6 +3852,39 @@ class ARCCorePlugin(Plugin):
             self._safe_log('error', f"{ColorFormat.RED}[ARC Core]Ensure player data initialized error: {str(e)}")
             return False, False
 
+    def _fix_recovered_player_uuid(self, player: Player, row: Optional[Dict[str, Any]]) -> None:
+        """把恢复占位 uuid（recovered-<xuid>）覆写为真实 unique_id。"""
+        uuid_s = str((row or {}).get("uuid") or "")
+        if not uuid_s.startswith(RECOVERED_UUID_PREFIX):
+            return
+        real_uuid = str(player.unique_id)
+        xuid = str(player.xuid)
+        try:
+            clash = self.database_manager.query_one(
+                "SELECT xuid FROM player_basic_info WHERE uuid = ?",
+                (real_uuid,),
+            )
+            if clash and str(clash.get("xuid") or "") != xuid:
+                self._safe_log(
+                    "warning",
+                    f"[ARC Core]Skip recovered uuid rewrite for {player.name}: "
+                    f"{real_uuid} already used by xuid={clash.get('xuid')}",
+                )
+                return
+            self.database_manager.update(
+                table="player_basic_info",
+                data={"uuid": real_uuid},
+                where="xuid = ? AND uuid LIKE ?",
+                params=(xuid, RECOVERED_UUID_PREFIX + "%"),
+            )
+            if isinstance(row, dict):
+                row["uuid"] = real_uuid
+        except Exception as e:
+            self._safe_log(
+                "warning",
+                f"[ARC Core]Fix recovered uuid error player={player.name!r}: {e}",
+            )
+
     def get_player_basic_info(self, player: Player) -> Optional[Dict[str, Any]]:
         """
         获取玩家基本信息（跨服字段 + 本服本地字段合并，供 UI 兼容）
@@ -3849,6 +3907,10 @@ class ARCCorePlugin(Plugin):
                     }
                 else:
                     return None
+            else:
+                self._fix_recovered_player_uuid(player, result)
+                if str(result.get("uuid") or "").startswith(RECOVERED_UUID_PREFIX):
+                    result["uuid"] = str(player.unique_id)
             self.init_player_local_info(player)
             local = self.database_manager.query_one(
                 "SELECT * FROM player_local_info WHERE xuid = ?",

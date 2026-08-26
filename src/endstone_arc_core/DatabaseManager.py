@@ -1,6 +1,7 @@
 import re
 import sqlite3
 from contextlib import contextmanager, suppress
+from datetime import datetime
 from typing import Any, Callable, List, Dict, Optional, Set
 import threading
 from pathlib import Path
@@ -110,21 +111,64 @@ class DatabaseManager:
         # SELECT sql FROM sqlite_master WHERE name='foo' → 路由到 foo 所在库
         r'\bsqlite_master\b[\s\S]*?\bname\s*=\s*[\'"](\w+)[\'"]',
         r'\bFROM\s+[`"\[]?(\w+)',
+        r'\bJOIN\s+[`"\[]?(\w+)',
+        r'\bRENAME\s+TO\s+[`"\[]?(\w+)',
+    )
+    _SQL_CATALOG_TABLES = frozenset(
+        ("sqlite_master", "sqlite_temp_master", "sqlite_sequence")
     )
 
     @classmethod
     def _extract_table_name(cls, sql: str) -> Optional[str]:
         """从 SQL 语句中提取主表名（含 CREATE/ALTER/DROP/PRAGMA）。"""
-        s = sql.strip()
+        names = cls.tables_in_sql(sql)
+        return names[0] if names else None
+
+    @classmethod
+    def tables_in_sql(cls, sql: str) -> List[str]:
+        """提取 SQL 中出现的业务表名（去重、保序；忽略 sqlite 系统表）。"""
+        s = (sql or "").strip()
+        found: List[str] = []
+        seen: Set[str] = set()
         for pattern in cls._TABLE_NAME_PATTERNS:
-            m = re.search(pattern, s, re.IGNORECASE)
-            if m:
+            for m in re.finditer(pattern, s, re.IGNORECASE):
                 name = m.group(1).lower()
-                # sqlite_master / 临时名不参与业务路由
-                if name in ("sqlite_master", "sqlite_temp_master"):
+                if name in cls._SQL_CATALOG_TABLES or name in seen:
                     continue
-                return name
-        return None
+                seen.add(name)
+                found.append(name)
+        return found
+
+    def _norm_db_path(self, db_path: str) -> str:
+        try:
+            return str(Path(db_path).resolve())
+        except Exception:
+            return str(db_path)
+
+    def _assert_sql_tables_same_db(
+        self, sql: str, assume_db: Optional[str] = None
+    ) -> None:
+        """一条 SQL 里的表必须落在同一文件；否则抛 ValueError，避免半途 DROP。
+
+        assume_db：execute_for_table 强制连接时，未路由的临时表视为与该库同文件。
+        """
+        names = self.tables_in_sql(sql)
+        if not names:
+            return
+        assume_n = self._norm_db_path(assume_db) if assume_db else None
+        resolved: List[str] = []
+        detail_parts: List[str] = []
+        for name in names:
+            if assume_n and name not in self._table_routes:
+                path_n = assume_n
+            else:
+                path_n = self._norm_db_path(self.path_for_table(name))
+            resolved.append(path_n)
+            detail_parts.append(f"{name}={path_n}")
+        if len(set(resolved)) > 1:
+            raise ValueError(
+                "SQL spans multiple databases: " + ", ".join(detail_parts)
+            )
 
     @staticmethod
     def _is_mutating_sql(sql: str) -> bool:
@@ -209,6 +253,7 @@ class DatabaseManager:
         :return: 是否执行成功
         """
         try:
+            self._assert_sql_tables_same_db(sql)
             conn = self._resolve_connection(sql)
             cursor = conn.cursor()
             cursor.execute(sql, params)
@@ -220,12 +265,33 @@ class DatabaseManager:
             self._rollback_quiet(sql)
             return False
 
+    def execute_for_table(
+        self, logical_table: str, sql: str, params: tuple = ()
+    ) -> bool:
+        """在逻辑表所在库执行 SQL（临时表名不参与路由，避免跨库 DDL）。"""
+        try:
+            logical_table = self._validate_ident(logical_table)
+            assume_db = self.path_for_table(logical_table)
+            self._assert_sql_tables_same_db(sql, assume_db=assume_db)
+            conn = self.connection_for_table(logical_table)
+            cursor = conn.cursor()
+            cursor.execute(sql, params)
+            conn.commit()
+            self._notify_mutating(sql, params)
+            return True
+        except Exception as e:
+            print(f"Execute SQL error: {str(e)}")
+            with suppress(OSError, sqlite3.Error):
+                self.connection_for_table(logical_table).rollback()
+            return False
+
     def execute_and_get_rowcount(self, sql: str, params: tuple = ()) -> int:
         """
         执行 SQL 并返回 cursor.rowcount（常用于 INSERT OR IGNORE 判断是否实际插入一行）。
         失败时返回 -1。
         """
         try:
+            self._assert_sql_tables_same_db(sql)
             conn = self._resolve_connection(sql)
             cursor = conn.cursor()
             cursor.execute(sql, params)
@@ -277,6 +343,7 @@ class DatabaseManager:
     ) -> bool:
         """执行带行数据的写库（insert/upsert），成功后发出写通知。"""
         try:
+            self._assert_sql_tables_same_db(sql)
             conn = self._resolve_connection(sql)
             cursor = conn.cursor()
             cursor.execute(sql, tuple(data.values()))
@@ -389,3 +456,116 @@ class DatabaseManager:
             return cursor.fetchone() is not None
         except Exception:
             return False
+
+    def backup_database_for_table(self, logical_table: str) -> Optional[str]:
+        """VACUUM INTO <db>.bak.<timestamp>。失败返回 None。"""
+        try:
+            logical_table = self._validate_ident(logical_table)
+            src = Path(self.path_for_table(logical_table))
+            if not src.exists():
+                return None
+            conn = self.connection_for_table(logical_table)
+            conn.commit()
+            ts = datetime.now().strftime("%Y%m%d%H%M%S")
+            dest = src.with_name(src.name + f".bak.{ts}")
+            n = 0
+            while dest.exists():
+                n += 1
+                dest = src.with_name(src.name + f".bak.{ts}.{n}")
+            dest_sql = dest.resolve().as_posix().replace("'", "''")
+            bak_conn = sqlite3.connect(str(src))
+            try:
+                bak_conn.execute(f"VACUUM INTO '{dest_sql}'")
+            finally:
+                bak_conn.close()
+            if dest.exists() and dest.stat().st_size > 0:
+                return str(dest)
+            return None
+        except Exception as e:
+            print(f"Backup database error: {e}")
+            return None
+
+    def rebuild_table_copy(
+        self,
+        logical_table: str,
+        temp_table: str,
+        create_sql: str,
+        copy_columns: List[str],
+        select_sql: Optional[str] = None,
+    ) -> bool:
+        """备份后在同一连接事务内：建新表 → 拷数据 → 行数校验 → DROP/RENAME。
+
+        任一步失败则 ROLLBACK，原表保留。备份失败则直接跳过，不 DROP。
+        """
+        logical_table = self._validate_ident(logical_table)
+        temp_table = self._validate_ident(temp_table)
+        cols = [self._validate_ident(c) for c in copy_columns]
+        if not cols:
+            return False
+        bak = self.backup_database_for_table(logical_table)
+        if not bak:
+            print(
+                f"[ARC Core]Skip rebuild {logical_table}: "
+                "VACUUM INTO backup failed"
+            )
+            return False
+        col_sql = ", ".join(cols)
+        insert_select = select_sql or (
+            "SELECT " + col_sql + " FROM " + logical_table
+        )
+        conn = self.connection_for_table(logical_table)
+        assume_db = self.path_for_table(logical_table)
+        old_isolation = conn.isolation_level
+        try:
+            with self.suppress_write_notify():
+                conn.commit()
+                conn.isolation_level = None
+                conn.execute("BEGIN IMMEDIATE")
+                try:
+                    conn.execute("DROP TABLE IF EXISTS " + temp_table)  # nosec B608
+                    conn.execute(create_sql)
+                    insert_sql = (
+                        "INSERT INTO "
+                        + temp_table
+                        + " ("
+                        + col_sql
+                        + ") "
+                        + insert_select
+                    )  # nosec B608
+                    self._assert_sql_tables_same_db(
+                        insert_sql, assume_db=assume_db
+                    )
+                    conn.execute(insert_sql)
+                    old_n = conn.execute(
+                        "SELECT COUNT(*) FROM " + logical_table  # nosec B608
+                    ).fetchone()[0]
+                    new_n = conn.execute(
+                        "SELECT COUNT(*) FROM " + temp_table  # nosec B608
+                    ).fetchone()[0]
+                    if int(old_n) != int(new_n):
+                        raise RuntimeError(
+                            f"rebuild row count mismatch {logical_table}: "
+                            f"old={old_n} new={new_n}"
+                        )
+                    conn.execute("DROP TABLE " + logical_table)  # nosec B608
+                    conn.execute(
+                        "ALTER TABLE "
+                        + temp_table
+                        + " RENAME TO "
+                        + logical_table
+                    )  # nosec B608
+                    conn.execute("COMMIT")
+                except Exception:
+                    with suppress(OSError, sqlite3.Error):
+                        conn.execute("ROLLBACK")
+                    raise
+            print(
+                f"[ARC Core]Rebuilt {logical_table} "
+                f"(backup={bak}, rows={new_n})"
+            )
+            return True
+        except Exception as e:
+            print(f"[ARC Core]Rebuild {logical_table} error: {e}")
+            return False
+        finally:
+            conn.isolation_level = old_isolation

@@ -3,7 +3,7 @@
 # EndStone ARC Core Plugin / EndStone弧光核心
 
 [![Codacy Grade](https://app.codacy.com/project/badge/Grade/2f830615baf347258558dcc2a5ab85a1)](https://app.codacy.com/gh/DEVILENMO/EndstoneMC-ARC-Core-Plugin/dashboard?utm_source=gh&utm_medium=referral&utm_content=&utm_campaign=Badge_grade)
-[![Version](https://img.shields.io/badge/version-v0.9.20-blue)](https://github.com/ARC-Minecraft/EndstoneMC-ARC-Core-Plugin)
+[![Version](https://img.shields.io/badge/version-v0.9.21-blue)](https://github.com/ARC-Minecraft/EndstoneMC-ARC-Core-Plugin)
 [![Python](https://img.shields.io/badge/python-3.13+-blue?logo=python&logoColor=white)](https://www.python.org/)
 [![EndStone API](https://img.shields.io/badge/EndStone_API-0.7+-black)](https://github.com/EndstoneMC/endstone)
 [![License](https://img.shields.io/github/license/ARC-Minecraft/EndstoneMC-ARC-Core-Plugin)](LICENSE)
@@ -19,7 +19,7 @@ EndStone ARC Core 是一个功能完整的 EndStone (Minecraft 基岩版服务�
 
 - **作者**: DEVILENMO
 - **邮箱**: DEVILENMO@gmail.com
-- **版本**: 0.9.20
+- **版本**: 0.9.21
 - **API 版本**: 0.7+
 - **推荐 Python 版本**: 3.13
 
@@ -256,8 +256,10 @@ EndStone ARC Core 是一个功能完整的 EndStone (Minecraft 基岩版服务�
 ### 🔄 跨服数据同步（v0.8 / v0.9.14）
 - **用途**：在多服架构下，让玩家账号级数据、经济、头衔、公会等在多个 ARC Core 实例之间保持一致
 - **游戏服二选一（互斥）**：
+  - **推荐 · 纯网络**：主服 **`ENABLE_SYNC_SERVER=True`** + **`ENABLE_SYNC_CLIENT=False`**，子服 **`ENABLE_SYNC_CLIENT=True`**，两台都把四个 **`*_DATABASE_PATH` 留空**
   - **方式 A · 远程客户端**：**`ENABLE_SYNC_CLIENT=True`**，连接同步中心（**`SYNC_SERVER_IP`** + **`SYNC_CLIENT_PORT`**），首次连接全量拉取、之后接收 **`PUSH_NOTIFY`** 推送；本地写库经 **`sync_outbox`** 可靠上行（断线不丢，重连后重放，协议 v3 带 seq ack）
   - **方式 B · 共享文件**：**`ENABLE_SYNC_CLIENT=False`**，通过 **`PLAYER_DATABASE_PATH`**、**`PLAYER_ECONOMY_DATABASE_PATH`**、**`PLAYER_TITLE_DATABASE_PATH`**、**`GUILD_DATABASE_PATH`** 指向同一 SQLite 文件
+- **旧共享库一次性导入（v0.9.21）**：主服配置 **`LEGACY_IMPORT_DATABASE_PATHS`**（逗号分隔旧 `.db` 路径），启动时若未见 `plugins/ARCCore/.legacy_import_done` 则把经济/头衔/公会等导回主库，并用天眼重建 **`player_basic_info`**（密码需玩家重设）。从服远程客户端模式会跳过。若同时开了客户端与文件路径，会打 WARN 并忽略文件路径
 - **同步中心（可选）**：某一实例可设 **`ENABLE_SYNC_SERVER=True`** 监听 **`SYNC_SERVER_PORT`**（部署上常与 FRP **19135** 对应），供其他游戏服以客户端连接；与上述 A/B 消费方式独立
 - **分项同步开关（仅远程客户端）**：**`SYNC_CLIENT_SYNC_PLAYER`**、**`SYNC_CLIENT_SYNC_ECONOMY`**、**`SYNC_CLIENT_SYNC_TITLE`**、**`SYNC_CLIENT_SYNC_GUILD`** 可单独开关；关闭的类别不会拉取全量数据，也不会接收推送。若 A 与 B 同时配置，插件 **以远程客户端为准** 并忽略文件路径
 - **条件头衔权威服（v0.9.14）**：**`CONDITIONAL_TITLE_AUTHORITY`** 显式指定是否由本机计算首富等条件头衔；留空则自动推断（远程客户端 / 仅文件共享的子服不计算，避免双算）
@@ -451,6 +453,8 @@ PLAYER_DATABASE_PATH=
 PLAYER_ECONOMY_DATABASE_PATH=
 PLAYER_TITLE_DATABASE_PATH=
 GUILD_DATABASE_PATH=
+# 一次性把旧共享库导回主库（仅主服；见 LEGACY_IMPORT_DATABASE_PATHS）
+LEGACY_IMPORT_DATABASE_PATHS=
 ```
 
 ### broadcast.txt - 公告消息文件
@@ -796,7 +800,13 @@ arc.api_sidebar_set_values(
 
 ## 📋 近期更新日志
 
-### v0.9.20（当前版本）
+### v0.9.21（当前版本）
+
+- ✅ **修复跨库 DDL 误删 `player_basic_info`**：重建表时临时表不再落到默认库，避免共享库真表被 DROP；不可逆重建前 `VACUUM INTO` 备份，事务内行数校验失败则回滚
+- ✅ **一次性数据恢复**：主服配置 `LEGACY_IMPORT_DATABASE_PATHS` 可把旧共享库里的经济/头衔/公会导回，并用天眼/本服表重建 `player_basic_info`（密码需玩家重设）
+- ✅ **推荐纯网络同步**：主服开同步中心、子服 `ENABLE_SYNC_CLIENT`，清空四个 `*_DATABASE_PATH`；两种模式同时开时打 WARN
+
+### v0.9.20
 
 - ✅ **修复侧边栏导致客户端闪退**：不再每秒双缓冲销毁/重建 objective；改为复用稳定 `arc_sb` 并原地更新/清理行；假名截断至 40 字符；延迟显示量化为 10ms 档，降低发包频率
 

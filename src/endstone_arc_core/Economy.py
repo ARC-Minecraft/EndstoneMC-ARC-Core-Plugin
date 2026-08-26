@@ -72,16 +72,19 @@ class Economy:
                     break
             if money_type != "INTEGER":
                 return True
-            self.db.execute(
-                "CREATE TABLE player_economy_new (xuid TEXT PRIMARY KEY, money REAL NOT NULL DEFAULT 0)"
+            ok = self.db.rebuild_table_copy(
+                logical_table="player_economy",
+                temp_table="player_economy_new",
+                create_sql=(
+                    "CREATE TABLE player_economy_new "
+                    "(xuid TEXT PRIMARY KEY, money REAL NOT NULL DEFAULT 0)"
+                ),
+                copy_columns=["xuid", "money"],
+                select_sql="SELECT xuid, CAST(money AS REAL) FROM player_economy",
             )
-            self.db.execute(
-                "INSERT INTO player_economy_new (xuid, money) SELECT xuid, CAST(money AS REAL) FROM player_economy"
-            )
-            self.db.execute("DROP TABLE player_economy")
-            self.db.execute("ALTER TABLE player_economy_new RENAME TO player_economy")
-            print("[ARC Core]Upgraded player_economy money column to REAL (float).")
-            return True
+            if ok:
+                print("[ARC Core]Upgraded player_economy money column to REAL (float).")
+            return ok
         except Exception as e:
             print(f"[ARC Core]Upgrade player_economy to float error: {str(e)}")
             self._emit_persistent_error(
