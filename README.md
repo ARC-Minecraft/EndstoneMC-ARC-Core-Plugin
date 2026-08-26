@@ -3,7 +3,7 @@
 # EndStone ARC Core Plugin / EndStone弧光核心
 
 [![Codacy Grade](https://app.codacy.com/project/badge/Grade/2f830615baf347258558dcc2a5ab85a1)](https://app.codacy.com/gh/DEVILENMO/EndstoneMC-ARC-Core-Plugin/dashboard?utm_source=gh&utm_medium=referral&utm_content=&utm_campaign=Badge_grade)
-[![Version](https://img.shields.io/badge/version-v0.9.9-blue)](https://github.com/ARC-Minecraft/EndstoneMC-ARC-Core-Plugin)
+[![Version](https://img.shields.io/badge/version-v0.9.10-blue)](https://github.com/ARC-Minecraft/EndstoneMC-ARC-Core-Plugin)
 [![Python](https://img.shields.io/badge/python-3.13+-blue?logo=python&logoColor=white)](https://www.python.org/)
 [![EndStone API](https://img.shields.io/badge/EndStone_API-0.7+-black)](https://github.com/EndstoneMC/endstone)
 [![License](https://img.shields.io/github/license/ARC-Minecraft/EndstoneMC-ARC-Core-Plugin)](LICENSE)
@@ -19,7 +19,7 @@ EndStone ARC Core 是一个功能完整的 EndStone (Minecraft 基岩版服务�
 
 - **作者**: DEVILENMO
 - **邮箱**: DEVILENMO@gmail.com
-- **版本**: 0.9.9
+- **版本**: 0.9.10
 - **API 版本**: 0.7+
 - **推荐 Python 版本**: 3.13
 
@@ -59,8 +59,9 @@ EndStone ARC Core 是一个功能完整的 EndStone (Minecraft 基岩版服务�
 - **用途**：可选开启的玩家行为审计；写入独立 SQLite，供排查与弧光天星即时查询
 - **配置**（`core_setting.yml`）：**`ENABLE_SKY_EYE`**（`True`/`False`，默认关闭）、**`SKY_EYE_MAX_RETENTION_DAYS`**（保留天数，默认 **7**；更早记录会从库中删除；**`0`** 表示不自动删除）
 - **存储**：**`plugins/ARCCore/sky_eye/skyeye.db`**（独立库，不进主库、不走跨服同步）。升级前的按日 **`YYYYMMDD.txt`** 仍会按同一保留天数清理，新事件不再写 txt
-- **记录字段**：时间、行为、玩家名、XUID、维度、坐标、主手物品、`detail`、**是否在领地内**、领地 ID/名称/主人、攻击对象（打了谁 / 被谁打）
-- **已挂钩行为**：进服 / 离服、方块破坏与放置、对方块交互与无方块交互、与实体交互、**玩家造成的伤害（含 PvP）**、玩家死亡（含击杀者）；关闭开关时不写盘
+- **记录字段**：时间、行为、玩家名、XUID、维度、坐标、主手物品（含附魔摘要）、`detail`、**是否在领地内**、领地 ID/名称/主人、攻击对象（打了谁 / 被谁打）
+- **战斗增强（v0.9.10）**：每次玩家攻击记录 `damage` / `hp_before` / `hp_after` / `max_hp` / `cause`；PvP 另记 `victim_armor`（被打方当时装备+附魔）；死亡记录 `armor`（头盔/胸甲/护腿/靴子/副手）与 `inv`（背包格子摘要）
+- **已挂钩行为**：进服 / 离服、方块破坏与放置、对方块交互与无方块交互、与实体交互、**玩家造成的伤害（含 PvP）**、玩家死亡（含击杀者与死亡时装备/背包）；关闭开关时不写盘
 - **对外查询 API**（其它插件 / 天星）：`api_sky_eye_query`、`api_sky_eye_query_text`、`api_sky_eye_player_now`。天星工具：`mc_skyeye_player` / `mc_skyeye_combat` / `mc_skyeye_location`（仅 OP / QQ 管理）
 
 ### 💰 银行经济系统
@@ -775,7 +776,11 @@ arc.api_sidebar_set_values(
 
 ## 📋 近期更新日志
 
-### v0.9.9（当前版本）
+### v0.9.10（当前版本）
+
+- ✅ **天眼战斗留档增强**：攻击记录伤害量、受击前/后血量、最大血量、伤害类型；PvP 附带被打方装备与附魔；死亡记录全身装备与背包摘要；主手物品格式含附魔（如 `netherite_sword{sharpness:5}x1`）
+
+### v0.9.9
 
 - ✅ **Toast 图标微调**：默认 Windows；公会 剑；账户 护甲；传送 智能体；小喇叭 阅读
 

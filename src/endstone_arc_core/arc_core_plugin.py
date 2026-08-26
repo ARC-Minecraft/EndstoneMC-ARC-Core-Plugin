@@ -1516,14 +1516,33 @@ class ARCCorePlugin(Plugin):
             killer_xuid = ""
             killer_type = ""
             try:
-                damage_source = getattr(event, "damage_source", None)
-                killer = getattr(damage_source, "actor", None) if damage_source is not None else None
+                killer = self._sky_eye_resolve_killer_actor(event)
                 killer_name, killer_xuid, killer_type = self._sky_eye_identity(killer)
             except Exception:
                 pass
             detail = f"cause={death_cause}" if death_cause else "cause=-"
             if killer_name:
                 detail = f"{detail};killer={killer_name}"
+            try:
+                hp, max_hp = self._sky_eye_read_health(event.player)
+                if hp:
+                    detail = f"{detail};hp={hp}"
+                if max_hp:
+                    detail = f"{detail};max_hp={max_hp}"
+            except Exception:
+                pass
+            try:
+                armor = self._sky_eye_format_equipment(event.player)
+                if armor and armor != "-":
+                    detail = f"{detail};armor={armor}"
+            except Exception:
+                pass
+            try:
+                inv_text = self._sky_eye_format_inventory(event.player)
+                if inv_text and inv_text != "-":
+                    detail = f"{detail};inv={inv_text}"
+            except Exception:
+                pass
             self._sky_eye_append(
                 "PlayerDeath",
                 event.player,
@@ -1853,6 +1872,35 @@ class ARCCorePlugin(Plugin):
         )
         if target_name:
             target_desc = target_name if target_type == "player" else f"{target_name}"
+        detail_parts = [f"target={target_desc}"]
+        try:
+            damage = float(getattr(event, "damage", 0) or 0)
+            detail_parts.append(f"damage={damage:.2f}".rstrip("0").rstrip("."))
+        except Exception:
+            damage = None
+        hp_before, max_hp = self._sky_eye_read_health(event.actor)
+        if hp_before:
+            detail_parts.append(f"hp_before={hp_before}")
+            if damage is not None:
+                try:
+                    hp_after_val = max(0.0, float(hp_before) - float(damage))
+                    hp_after = f"{hp_after_val:.1f}".rstrip("0").rstrip(".")
+                    detail_parts.append(f"hp_after={hp_after}")
+                except Exception:
+                    pass
+        if max_hp:
+            detail_parts.append(f"max_hp={max_hp}")
+        cause = self._sky_eye_damage_cause(getattr(event, "damage_source", None))
+        if cause:
+            detail_parts.append(f"cause={cause}")
+        # PvP：附带被打方当时身上装备，便于核对「全套保护」是否属实
+        if target_type == "player":
+            try:
+                victim_armor = self._sky_eye_format_equipment(event.actor)
+                if victim_armor and victim_armor != "-":
+                    detail_parts.append(f"victim_armor={victim_armor}")
+            except Exception:
+                pass
         self._sky_eye_append(
             "ActorDamage",
             attacker,
@@ -1860,7 +1908,7 @@ class ARCCorePlugin(Plugin):
             float(actor_location.x),
             float(actor_location.y),
             float(actor_location.z),
-            detail=f"target={target_desc}",
+            detail=";".join(detail_parts),
             target_name=target_name,
             target_xuid=target_xuid,
             target_type=target_type if target_type else str(target_desc),
@@ -2270,22 +2318,122 @@ class ARCCorePlugin(Plugin):
         except (ValueError, TypeError):
             return 7
 
-    def _sky_eye_format_item_stack(self, stack) -> str:
+    _SKY_EYE_ENCHANT_IDS: list[str] | None = None
+    _SKY_EYE_ARMOR_ATTRS = (
+        ("helmet", "helm"),
+        ("chestplate", "chest"),
+        ("leggings", "legs"),
+        ("boots", "boots"),
+        ("item_in_off_hand", "off"),
+    )
+
+    def _sky_eye_enchant_ids(self) -> list[str]:
+        cached = ARCCorePlugin._SKY_EYE_ENCHANT_IDS
+        if cached is not None:
+            return cached
+        ids: list[str] = []
+        try:
+            from endstone.enchantments import Enchantment
+
+            for name in dir(Enchantment):
+                if not name.isupper():
+                    continue
+                val = getattr(Enchantment, name, None)
+                if isinstance(val, str) and val.startswith("minecraft:"):
+                    ids.append(val)
+        except Exception:
+            pass
+        if not ids:
+            ids = [
+                "minecraft:aqua_affinity",
+                "minecraft:bane_of_arthropods",
+                "minecraft:blast_protection",
+                "minecraft:breach",
+                "minecraft:channeling",
+                "minecraft:binding",
+                "minecraft:vanishing",
+                "minecraft:density",
+                "minecraft:depth_strider",
+                "minecraft:efficiency",
+                "minecraft:feather_falling",
+                "minecraft:fire_aspect",
+                "minecraft:fire_protection",
+                "minecraft:flame",
+                "minecraft:frost_walker",
+                "minecraft:impaling",
+                "minecraft:infinity",
+                "minecraft:knockback",
+                "minecraft:looting",
+                "minecraft:loyalty",
+                "minecraft:luck_of_the_sea",
+                "minecraft:lure",
+                "minecraft:mending",
+                "minecraft:multishot",
+                "minecraft:piercing",
+                "minecraft:power",
+                "minecraft:projectile_protection",
+                "minecraft:protection",
+                "minecraft:punch",
+                "minecraft:quick_charge",
+                "minecraft:respiration",
+                "minecraft:riptide",
+                "minecraft:sharpness",
+                "minecraft:silk_touch",
+                "minecraft:smite",
+                "minecraft:soul_speed",
+                "minecraft:swift_sneak",
+                "minecraft:thorns",
+                "minecraft:unbreaking",
+                "minecraft:wind_burst",
+            ]
+        ARCCorePlugin._SKY_EYE_ENCHANT_IDS = ids
+        return ids
+
+    def _sky_eye_item_enchants(self, stack) -> dict[str, int]:
+        """读取物品附魔（不访问 ItemMeta.enchants，避免 unhashable）。"""
+        if stack is None:
+            return {}
+        meta = getattr(stack, "item_meta", None)
+        get_level = getattr(meta, "get_enchant_level", None) if meta is not None else None
+        if not callable(get_level):
+            return {}
+        out: dict[str, int] = {}
+        try:
+            for eid in self._sky_eye_enchant_ids():
+                try:
+                    level = int(get_level(eid) or 0)
+                except Exception:
+                    continue
+                if level > 0:
+                    short = eid.split(":", 1)[-1] if ":" in eid else eid
+                    out[short] = level
+        except Exception:
+            return {}
+        return out
+
+    def _sky_eye_format_item_stack(self, stack, *, with_enchants: bool = True) -> str:
         if stack is None:
             return "empty"
         item_type = getattr(stack, "type", None)
         if item_type is None:
             return "unknown"
         item_id = getattr(item_type, "id", None) or getattr(item_type, "name", None)
-        if item_id:
-            amount = getattr(stack, "amount", 1)
-            try:
-                amount = int(amount)
-            except (ValueError, TypeError):
-                amount = 1
-            return f"{item_id}x{amount}"
-        text = str(item_type).strip()
-        return text if text else "unknown"
+        if not item_id:
+            text = str(item_type).strip()
+            return text if text else "unknown"
+        amount = getattr(stack, "amount", 1)
+        try:
+            amount = int(amount)
+        except (ValueError, TypeError):
+            amount = 1
+        if amount <= 0 or str(item_id) in ("minecraft:air", "air"):
+            return "empty"
+        enc_text = ""
+        if with_enchants:
+            enchants = self._sky_eye_item_enchants(stack)
+            if enchants:
+                enc_text = "{" + ",".join(f"{k}:{v}" for k, v in sorted(enchants.items())) + "}"
+        return f"{item_id}{enc_text}x{amount}"
 
     def _sky_eye_format_main_hand(self, player: Player) -> str:
         inv = getattr(player, "inventory", None)
@@ -2293,6 +2441,122 @@ class ARCCorePlugin(Plugin):
             return "-"
         stack = getattr(inv, "item_in_main_hand", None)
         return self._sky_eye_format_item_stack(stack)
+
+    def _sky_eye_format_equipment(self, actor) -> str:
+        """头盔/胸甲/护腿/靴子/副手摘要，空槽省略。"""
+        inv = getattr(actor, "inventory", None)
+        if inv is None:
+            return "-"
+        parts: list[str] = []
+        for attr, label in self._SKY_EYE_ARMOR_ATTRS:
+            try:
+                stack = getattr(inv, attr, None)
+            except Exception:
+                stack = None
+            text = self._sky_eye_format_item_stack(stack)
+            if text in ("empty", "unknown", "-"):
+                continue
+            parts.append(f"{label}:{text}")
+        return "|".join(parts) if parts else "-"
+
+    def _sky_eye_format_inventory(self, actor, *, max_slots: int = 54, max_chars: int = 3500) -> str:
+        """背包格子摘要（含热键栏），过长则截断。"""
+        inv = getattr(actor, "inventory", None)
+        if inv is None:
+            return "-"
+        try:
+            size = int(getattr(inv, "size", 0) or 0)
+        except (TypeError, ValueError):
+            size = 0
+        if size <= 0:
+            return "-"
+        parts: list[str] = []
+        limit = min(size, max(1, int(max_slots)))
+        omitted = 0
+        for idx in range(limit):
+            try:
+                stack = inv.get_item(idx)
+            except Exception:
+                continue
+            text = self._sky_eye_format_item_stack(stack)
+            if text in ("empty", "unknown", "-"):
+                continue
+            parts.append(f"[{idx}]{text}")
+        if size > limit:
+            # 未遍历的格子粗略计为省略
+            for idx in range(limit, size):
+                try:
+                    stack = inv.get_item(idx)
+                except Exception:
+                    continue
+                text = self._sky_eye_format_item_stack(stack, with_enchants=False)
+                if text not in ("empty", "unknown", "-"):
+                    omitted += 1
+        joined = "|".join(parts) if parts else "-"
+        if len(joined) > max_chars:
+            joined = joined[: max(0, max_chars - 20)].rstrip("|") + "|...(truncated)"
+            omitted = max(omitted, 1)
+        if omitted > 0 and joined != "-":
+            joined = f"{joined}|(+{omitted}more)"
+        return joined
+
+    def _sky_eye_read_health(self, actor) -> tuple[str, str]:
+        """返回 (当前血量, 最大血量) 字符串；读不到则为空串。"""
+        hp = ""
+        max_hp = ""
+        if actor is None:
+            return hp, max_hp
+        try:
+            raw = getattr(actor, "health", None)
+            if raw is not None:
+                hp = f"{float(raw):.1f}".rstrip("0").rstrip(".")
+        except Exception:
+            pass
+        try:
+            raw_max = getattr(actor, "max_health", None)
+            if raw_max is not None:
+                max_hp = f"{float(raw_max):.1f}".rstrip("0").rstrip(".")
+        except Exception:
+            pass
+        return hp, max_hp
+
+    def _sky_eye_damage_cause(self, damage_source) -> str:
+        if damage_source is None:
+            return ""
+        for attr in ("damage_type", "type", "cause"):
+            try:
+                val = getattr(damage_source, attr, None)
+            except Exception:
+                val = None
+            if val is not None and str(val).strip():
+                return str(val).strip()
+        return ""
+
+    def _sky_eye_resolve_killer_actor(self, event):
+        """尽量从死亡/伤害事件解析击杀者实体。"""
+        if event is None:
+            return None
+        for attr in ("killer", "damager"):
+            try:
+                actor = getattr(event, attr, None)
+            except Exception:
+                actor = None
+            if actor is not None:
+                return actor
+        try:
+            damage_source = getattr(event, "damage_source", None)
+        except Exception:
+            damage_source = None
+        if damage_source is None:
+            return None
+        for attr in ("actor", "damaging_actor", "damaging_entity", "entity", "attacker"):
+            try:
+                actor = getattr(damage_source, attr, None)
+            except Exception:
+                actor = None
+            if actor is not None:
+                return actor
+        return None
 
     def _sky_eye_player_location(self, player: Player) -> tuple[str, float, float, float]:
         loc = getattr(player, "location", None)
