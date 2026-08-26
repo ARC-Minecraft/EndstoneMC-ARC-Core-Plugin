@@ -16798,22 +16798,23 @@ class ARCCorePlugin(Plugin):
             for player in self.server.online_players:
                 player.send_message(game_message)
 
-            # 发送到QQ群（本机 qqsync 或经同步中心主机转发）
-            try:
-                equipped = self.title_system.get_equipped_title(event.player)
-                display_name = self.format_player_display_label_with_guild(
-                    getattr(event.player, "name", "") or "",
-                    equipped,
-                    str(event.player.xuid),
-                )
-                self._notify_qqsync(
-                    "death",
-                    display_name,
-                    getattr(event.player, "name", "") or "",
-                    qq_message,
-                )
-            except Exception as e:
-                self.logger.error(f"[ARC Core] 发送死亡消息到QQ群失败: {e}")
+            # 发送到QQ群（受 QQ_DEATH_BROADCAST_MODE 控制）
+            if self._should_send_qq_death_broadcast(event):
+                try:
+                    equipped = self.title_system.get_equipped_title(event.player)
+                    display_name = self.format_player_display_label_with_guild(
+                        getattr(event.player, "name", "") or "",
+                        equipped,
+                        str(event.player.xuid),
+                    )
+                    self._notify_qqsync(
+                        "death",
+                        display_name,
+                        getattr(event.player, "name", "") or "",
+                        qq_message,
+                    )
+                except Exception as e:
+                    self.logger.error(f"[ARC Core] 发送死亡消息到QQ群失败: {e}")
                 
         except Exception as e:
             self.logger.error(f"[ARC Core]Send death broadcast error: {str(e)}")
@@ -16969,13 +16970,70 @@ class ARCCorePlugin(Plugin):
         return translate_dimension_display(dimension_name, self.language_manager)
 
     def _get_qq_sync_plugin(self):
-        """Resolve ARC QQ Sync plugin (new id first, legacy id fallback)."""
+        """Resolve ARC QQ Sync plugin (AstrBot hub id first, legacy id fallback).
+
+        Endstone 会把 entry-point 里的 '-' 转成 '_'，故优先查找 arc_qq_sync_astrbot。
+        """
         pm = self.server.plugin_manager
-        for name in ("arc-qq-sync-astrbot", "qqsync_plugin"):
+        for name in (
+            "arc_qq_sync_astrbot",
+            "arc-qq-sync-astrbot",
+            "qqsync_plugin",
+        ):
             plug = pm.get_plugin(name)
             if plug is not None:
                 return plug
         return None
+
+    def _get_qq_death_broadcast_mode(self) -> str:
+        """群聊死亡播报模式：off / pvp / all（默认 all）。"""
+        raw = (self.setting_manager.GetSetting("QQ_DEATH_BROADCAST_MODE") or "").strip().lower()
+        if not raw:
+            return "all"
+        aliases = {
+            "off": "off",
+            "none": "off",
+            "0": "off",
+            "false": "off",
+            "no": "off",
+            "不播报": "off",
+            "pvp": "pvp",
+            "only_pvp": "pvp",
+            "pvp_only": "pvp",
+            "仅播报pvp死亡": "pvp",
+            "仅pvp": "pvp",
+            "all": "all",
+            "全部播报": "all",
+            "true": "all",
+            "1": "all",
+        }
+        return aliases.get(raw, "all")
+
+    def _is_pvp_death(self, event: PlayerDeathEvent) -> bool:
+        """判断是否为玩家击杀玩家（PvP）死亡。"""
+        try:
+            killer = self._sky_eye_resolve_killer_actor(event)
+            if killer is None:
+                return False
+            if isinstance(killer, Player):
+                return True
+            killer_type = str(getattr(killer, "type", "") or "").strip().lower()
+            if killer_type in ("minecraft:player", "player"):
+                return True
+            cause = str(self._get_death_cause(event) or "").strip().lower()
+            if ":" in cause:
+                cause = cause.split(":")[-1]
+            return cause == "player_attack"
+        except Exception:
+            return False
+
+    def _should_send_qq_death_broadcast(self, event: PlayerDeathEvent) -> bool:
+        mode = self._get_qq_death_broadcast_mode()
+        if mode == "off":
+            return False
+        if mode == "pvp":
+            return self._is_pvp_death(event)
+        return True
 
     def _send_to_qq_group(self, message: str):
         """Send a raw text message to QQ via local ARC QQ Sync plugin."""
@@ -16984,7 +17042,13 @@ class ARCCorePlugin(Plugin):
             if qqsync is None:
                 self.logger.warning("[ARC Core] QQ Sync plugin not found, cannot send group message")
                 return
-            success = qqsync.api_send_message(message)
+            if hasattr(qqsync, "api_send_raw"):
+                success = qqsync.api_send_raw(message)
+            elif hasattr(qqsync, "api_send_message"):
+                success = qqsync.api_send_message(message)
+            else:
+                self.logger.warning("[ARC Core] QQ Sync 无可用发送 API")
+                return
             if not success:
                 self.logger.warning(f"[ARC Core] QQ group message send failed: {message}")
         except Exception as e:

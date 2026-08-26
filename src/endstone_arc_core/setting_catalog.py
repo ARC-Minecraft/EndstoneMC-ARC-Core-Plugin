@@ -44,6 +44,12 @@ SPAWN_SCOPE_CHOICES: List[Tuple[str, str]] = [
     ("all", "all（全部领地）"),
 ]
 
+QQ_DEATH_BROADCAST_CHOICES: List[Tuple[str, str]] = [
+    ("off", "不播报"),
+    ("pvp", "仅播报PvP死亡"),
+    ("all", "全部播报"),
+]
+
 SETTING_GROUPS: List[Dict[str, object]] = [
     {
         "id": "general",
@@ -52,6 +58,12 @@ SETTING_GROUPS: List[Dict[str, object]] = [
             _s("DEFAULT_LANGUAGE_CODE", "默认语言", "string", placeholder="ZH-CN", restart=True),
             _s("FORCE_LOGIN", "强制登录", "bool", choices=BOOL_CHOICES),
             _s("BROADCAST_INTERVAL", "广播间隔（秒）", "int", placeholder="120"),
+            _s(
+                "QQ_DEATH_BROADCAST_MODE",
+                "群聊死亡播报",
+                "choice",
+                choices=QQ_DEATH_BROADCAST_CHOICES,
+            ),
             _s("ENABLE_CLEANER", "启用清道夫", "bool", choices=BOOL_CHOICES),
             _s("CLEANER_INTERVAL", "清道夫间隔（秒）", "int", placeholder="300"),
             _s("SMALL_HORN_PRICE_PER_HOUR", "小喇叭每小时费用", "int", placeholder="60"),

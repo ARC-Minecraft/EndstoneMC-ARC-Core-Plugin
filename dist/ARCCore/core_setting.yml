@@ -83,6 +83,8 @@ PUBLIC_LAND_INTERACT_BLOCK_BLACKLIST=minecraft:frame,minecraft:glow_frame,minecr
 
 # 广播间隔
 BROADCAST_INTERVAL=120
+# 群聊死亡播报：off=不播报 / pvp=仅播报PvP死亡 / all=全部播报（默认）
+QQ_DEATH_BROADCAST_MODE=all
 # 小喇叭每小时费用（玩家购买后每10分钟广播一次，按小时计费）
 SMALL_HORN_PRICE_PER_HOUR=60
 
