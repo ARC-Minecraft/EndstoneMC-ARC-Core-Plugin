@@ -11,12 +11,19 @@ class Economy:
         self.setting_manager = setting_manager
         self.logger = logger
         self._persistent_error_cb: Optional[Callable[[str, str, Optional[BaseException]], None]] = None
+        self._balance_changed_cb: Optional[Callable[[str], None]] = None
 
     def set_persistent_error_callback(
         self, callback: Optional[Callable[[str, str, Optional[BaseException]], None]]
     ) -> None:
         """由插件注册：仅写入 error_log / 控制台，不向玩家发消息。"""
         self._persistent_error_cb = callback
+
+    def set_balance_changed_callback(
+        self, callback: Optional[Callable[[str], None]]
+    ) -> None:
+        """余额写入成功后回调（参数为 xuid），供侧边栏等订阅。"""
+        self._balance_changed_cb = callback
 
     def _emit_persistent_error(
         self, error_code: str, detail: str, exc: Optional[BaseException] = None
@@ -141,6 +148,14 @@ class Economy:
                     f"set_player_money_by_xuid xuid={xuid!r} amount={amount} db update returned False",
                     None,
                 )
+            elif self._balance_changed_cb is not None:
+                try:
+                    self._balance_changed_cb(str(xuid))
+                except Exception as cb_err:
+                    self._log(
+                        "warning",
+                        f"[ARC Core]balance changed callback failed: {cb_err}",
+                    )
             return ok
         except Exception as e:
             self._log("error", f"[ARC Core]Set player money error: {str(e)}")

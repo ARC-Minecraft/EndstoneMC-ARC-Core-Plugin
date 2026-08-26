@@ -209,6 +209,12 @@ class ARCCorePlugin(Plugin):
             on_money_changed=self._update_richest_title_if_needed,
         )
         self.sidebar_system = SidebarSystem(self)
+        try:
+            self.economy.set_balance_changed_callback(
+                self._on_economy_balance_changed_for_sidebar
+            )
+        except Exception:
+            pass
         self.init_database()
         self._arc_error_log_path = str(Path(MAIN_PATH) / "error_log.txt")
 
@@ -3272,6 +3278,14 @@ class ARCCorePlugin(Plugin):
         """金钱变化后调用：仅权威服迁移首富条件头衔。"""
         try:
             self.conditional_titles.refresh("richest")
+        except Exception:
+            pass
+
+    def _on_economy_balance_changed_for_sidebar(self, xuid: str) -> None:
+        """Economy 写余额成功 → 侧边栏即时刷新金钱行。"""
+        try:
+            if getattr(self, "sidebar_system", None) is not None:
+                self.sidebar_system.notify_money_changed(xuid)
         except Exception:
             pass
 

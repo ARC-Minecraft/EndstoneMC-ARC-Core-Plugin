@@ -3,7 +3,7 @@
 # EndStone ARC Core Plugin / EndStone弧光核心
 
 [![Codacy Grade](https://app.codacy.com/project/badge/Grade/2f830615baf347258558dcc2a5ab85a1)](https://app.codacy.com/gh/DEVILENMO/EndstoneMC-ARC-Core-Plugin/dashboard?utm_source=gh&utm_medium=referral&utm_content=&utm_campaign=Badge_grade)
-[![Version](https://img.shields.io/badge/version-v0.9.24-blue)](https://github.com/ARC-Minecraft/EndstoneMC-ARC-Core-Plugin)
+[![Version](https://img.shields.io/badge/version-v0.9.25-blue)](https://github.com/ARC-Minecraft/EndstoneMC-ARC-Core-Plugin)
 [![Python](https://img.shields.io/badge/python-3.13+-blue?logo=python&logoColor=white)](https://www.python.org/)
 [![EndStone API](https://img.shields.io/badge/EndStone_API-0.7+-black)](https://github.com/EndstoneMC/endstone)
 [![License](https://img.shields.io/github/license/ARC-Minecraft/EndstoneMC-ARC-Core-Plugin)](LICENSE)
@@ -19,7 +19,7 @@ EndStone ARC Core 是一个功能完整的 EndStone (Minecraft 基岩版服务�
 
 - **作者**: DEVILENMO
 - **邮箱**: DEVILENMO@gmail.com
-- **版本**: 0.9.24
+- **版本**: 0.9.25
 - **API 版本**: 0.7+
 - **推荐 Python 版本**: 3.13
 
@@ -76,10 +76,11 @@ EndStone ARC Core 是一个功能完整的 EndStone (Minecraft 基岩版服务�
 ### 📊 侧边栏总控（v0.9.0）
 - **原生计分板 SIDE_BAR**：每玩家独立 `Scoreboard`，复用稳定 objective 原地刷新（避免频繁销毁重建导致客户端闪退）
 - **多页面 + 定时翻页**：可见页 ≥ 2 时默认每 **10 秒**自动切换；可用 `/sidebar lock` 锁定
-- **核心主页面 `arc_core_main`**：现实时间、金钱、生命、饱食度、**TPS**、在线人数、**玩家延迟**等（模板可配）
-- **其它插件注册页面**：`api_sidebar_register_page` + 行模板 `{key}`，数值变更用 `api_sidebar_set_value(s)` 推送
+- **核心主页面 `arc_core_main`**：现实时间、金钱、**TPS**、在线人数、**玩家延迟**等（模板可配；默认不含生命/饱食）
+- **其它插件注册页面**：`api_sidebar_register_page` + 行模板 `{key}`，数值变更用 `api_sidebar_set_value(s)` 推送（会触发刷新）
 - **玩家命令**：`/sidebar`（别名 `/sb`）支持 `on` / `off` / `next` / `prev` / `lock` / `unlock` / `list`；开关与锁定偏好持久化到 SQLite
-- **配置**：`SIDEBAR_ENABLE`、`SIDEBAR_DEFAULT_ON`、`SIDEBAR_TITLE`、`SIDEBAR_SWITCH_INTERVAL`、`SIDEBAR_REFRESH_TICKS`、`SIDEBAR_MAIN_LINES`、`SIDEBAR_MAX_LINES`（亦可在 OP 面板「侧边栏」分组修改）
+- **刷新策略（v0.9.25）**：约 3 秒定时只更新时间/TPS/延迟；金钱变动、进出服（在线人数）、插件推送值为事件触发
+- **配置**：`SIDEBAR_ENABLE`、`SIDEBAR_DEFAULT_ON`、`SIDEBAR_TITLE`、`SIDEBAR_SWITCH_INTERVAL`、`SIDEBAR_REFRESH_TICKS`（默认 60）、`SIDEBAR_MAIN_LINES`、`SIDEBAR_MAX_LINES`（亦可在 OP 面板「侧边栏」分组修改）
 
 ### 🏠 领地管理系统
 - **三维领地** - 按 min/max X/Y/Z 圈地，按体积计价；粒子显示立方体边界（与「进入领地」时边界粒子一致）
@@ -800,7 +801,11 @@ arc.api_sidebar_set_values(
 
 ## 📋 近期更新日志
 
-### v0.9.24（当前版本）
+### v0.9.25（当前版本）
+
+- ✅ **侧边栏事件驱动刷新**：默认去掉生命/饱食；`SIDEBAR_REFRESH_TICKS` 默认 60（约 3 秒）只刷时间/TPS/延迟；金钱写库成功、进出服更新在线、插件 `set_value` 时触发刷新（旧配置 20 自动迁到 60）
+
+### v0.9.24
 
 - ✅ **侧边栏 TPS/延迟改为 3 秒取样**：去掉延迟 10ms 量化；TPS、MSPT、ping 每 3 秒取一次，其它行仍按 `SIDEBAR_REFRESH_TICKS` 刷新
 

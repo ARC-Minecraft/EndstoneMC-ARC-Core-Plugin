@@ -6,7 +6,7 @@ import re
 import time
 from dataclasses import dataclass, field
 from datetime import datetime
-from typing import Any, Dict, List, Optional, Set, Tuple
+from typing import Any, Dict, List, Optional, Set
 
 from endstone import Player
 from endstone.scoreboard import Criteria, DisplaySlot, ObjectiveSortOrder
@@ -28,8 +28,6 @@ DEFAULT_MAIN_LINES = [
     "§7性能：§6TPS §f{tps}",
     "§7在线：§f{online}§8/§f{max_players}",
     "§7延迟：§f{ping}§8ms",
-    "§7生命：§f{hp}§8/§f{max_hp}",
-    "§7饱食：§f{food}",
     "§7金钱：§f{money}",
     "§8----------",
 ]
@@ -50,8 +48,9 @@ def _setting_int(raw: Any, default: int) -> int:
 
 # 个人计分板上的稳定 objective 名（短于 Bedrock 16 字符上限）
 _STABLE_OBJECTIVE = "arc_sb"
-# TPS / MSPT / 延迟：侧边栏仍按 SIDEBAR_REFRESH_TICKS 刷，但这三项按此间隔取样，避免每秒抖动
-PERF_SAMPLE_SECONDS = 3.0
+# 低频定时默认：60 tick ≈ 3 秒（TPS / 延迟 / 现实时间）
+_DEFAULT_REFRESH_TICKS = 60
+_LEGACY_REFRESH_TICKS = 20  # 旧默认 1 秒，启动时自动迁到 60
 
 # 侧边栏假名过长会踢客户端（历史包长上限约 40）
 _MAX_ENTRY_LEN = 40
@@ -119,16 +118,20 @@ class SidebarSystem:
         # page_id -> key -> value
         self._global_values: Dict[str, Dict[str, Any]] = {}
         self._player_state: Dict[str, PlayerSidebarState] = {}
-        # 性能行缓存：全局 TPS/MSPT + 每玩家 ping，按 PERF_SAMPLE_SECONDS 取样
-        self._perf_sample_at: float = 0.0
-        self._perf_tps: Optional[float] = None
-        self._perf_mspt: Optional[float] = None
-        self._ping_cache: Dict[str, Tuple[float, Optional[int]]] = {}
+        # 低频缓存：定时器更新 time/tps/ping；事件更新 money/online
+        self._cached_time: str = ""
+        self._cached_date: str = ""
+        self._cached_tps: Optional[float] = None
+        self._cached_mspt: Optional[float] = None
+        self._cached_online: int = 0
+        self._cached_max_players: Optional[int] = None
+        self._ping_cache: Dict[str, Optional[int]] = {}
+        self._money_cache: Dict[str, str] = {}
         self.enabled = True
         self.default_on = True
         self.sidebar_title = "§6弧光服务器"
         self.switch_interval = 10.0
-        self.refresh_ticks = 20
+        self.refresh_ticks = _DEFAULT_REFRESH_TICKS
         self.max_lines = 15
         self.main_line_templates: List[str] = list(DEFAULT_MAIN_LINES)
         self.reload_config()
@@ -159,9 +162,16 @@ class SidebarSystem:
         self.switch_interval = float(
             max(1, _setting_int(sm.GetSetting("SIDEBAR_SWITCH_INTERVAL"), 10))
         )
-        self.refresh_ticks = max(
-            1, _setting_int(sm.GetSetting("SIDEBAR_REFRESH_TICKS"), 20)
-        )
+        raw_refresh = sm.GetSetting("SIDEBAR_REFRESH_TICKS")
+        refresh = _setting_int(raw_refresh, _DEFAULT_REFRESH_TICKS)
+        # 旧默认 20（每秒）迁到 60（约 3 秒低频定时）
+        if raw_refresh is not None and refresh == _LEGACY_REFRESH_TICKS:
+            refresh = _DEFAULT_REFRESH_TICKS
+            try:
+                sm.SetSetting("SIDEBAR_REFRESH_TICKS", str(_DEFAULT_REFRESH_TICKS))
+            except Exception:
+                pass
+        self.refresh_ticks = max(1, refresh)
         self.max_lines = max(1, min(15, _setting_int(sm.GetSetting("SIDEBAR_MAX_LINES"), 15)))
         raw_lines = sm.GetSetting("SIDEBAR_MAIN_LINES")
         if raw_lines and str(raw_lines).strip():
@@ -352,8 +362,10 @@ class SidebarSystem:
             xs = str(xuid or "").strip()
             if xs:
                 self._values.setdefault(xs, {}).setdefault(pid, {})[k] = value
+                self._schedule_refresh_xuid(xs)
             else:
                 self._global_values.setdefault(pid, {})[k] = value
+                self._schedule_refresh_all_enabled()
             return True
         except Exception as e:
             self._log_error(f"set_value: {e}")
@@ -365,10 +377,22 @@ class SidebarSystem:
         try:
             if not isinstance(values, dict):
                 return False
+            pid = str(page_id or "").strip()
+            xs = str(xuid or "").strip()
             ok = True
             for k, v in values.items():
-                if not self.set_value(page_id, str(k), v, xuid=xuid):
+                kk = str(k or "").strip()
+                if not pid or not kk:
                     ok = False
+                    continue
+                if xs:
+                    self._values.setdefault(xs, {}).setdefault(pid, {})[kk] = v
+                else:
+                    self._global_values.setdefault(pid, {})[kk] = v
+            if xs:
+                self._schedule_refresh_xuid(xs)
+            else:
+                self._schedule_refresh_all_enabled()
             return ok
         except Exception as e:
             self._log_error(f"set_values: {e}")
@@ -445,9 +469,13 @@ class SidebarSystem:
                 last_switch_ts=time.time(),
             )
             self._player_state[xuid] = st
+            self._seed_money_cache(xuid)
+            self._update_online_cache()
             if st.enabled:
                 self._ensure_player_scoreboard(player, st)
-                self.refresh_player(player)
+                self.refresh_player(player, force=True)
+            # 其它已开启侧边栏的玩家：刷新在线人数
+            self._refresh_all_enabled(exclude_xuid=xuid)
         except Exception as e:
             self._log_error(f"on_player_join: {e}")
 
@@ -459,8 +487,11 @@ class SidebarSystem:
             st = self._player_state.pop(xuid, None)
             self._values.pop(xuid, None)
             self._ping_cache.pop(xuid, None)
+            self._money_cache.pop(xuid, None)
             if st is not None:
                 self._clear_sidebar_display(player, st)
+            self._update_online_cache()
+            self._refresh_all_enabled()
         except Exception as e:
             self._log_error(f"on_player_quit: {e}")
 
@@ -597,9 +628,11 @@ class SidebarSystem:
 
     # ------------------------------------------------------------------ tick / render
     def tick(self) -> None:
+        """低频定时：只刷新时间 / TPS / MSPT / 延迟，再重绘已开启侧边栏的玩家。"""
         if not self.enabled:
             return
         try:
+            self._refresh_timed_cache()
             now = time.time()
             for player in list(getattr(self.plugin.server, "online_players", []) or []):
                 try:
@@ -608,6 +641,41 @@ class SidebarSystem:
                     self._log_error(f"tick player: {e}")
         except Exception as e:
             self._log_error(f"tick: {e}")
+
+    def notify_money_changed(self, xuid: str) -> None:
+        """金钱变动：侧边栏开着则立刻刷该玩家金钱行。"""
+        xs = str(xuid or "").strip()
+        if not xs or not self.enabled:
+            return
+
+        def _run() -> None:
+            try:
+                self._seed_money_cache(xs)
+                player = self._find_online(xs)
+                if player is None:
+                    return
+                st = self._player_state.get(xs)
+                if st is None or not st.enabled:
+                    return
+                self.refresh_player(player, force=False)
+            except Exception as e:
+                self._log_error(f"notify_money_changed: {e}")
+
+        self._run_on_main(_run)
+
+    def notify_online_changed(self) -> None:
+        """在线人数变动（一般由进出服调用）。"""
+        if not self.enabled:
+            return
+
+        def _run() -> None:
+            try:
+                self._update_online_cache()
+                self._refresh_all_enabled()
+            except Exception as e:
+                self._log_error(f"notify_online_changed: {e}")
+
+        self._run_on_main(_run)
 
     def refresh(self, xuid: str = "") -> None:
         try:
@@ -654,6 +722,9 @@ class SidebarSystem:
         pages = self._visible_pages_for(xuid)
         if not pages:
             return
+        # 每人延迟随定时器取样；金钱顺带从库重读（跨服共享库无本地事件时兜底）
+        self._sample_player_ping(player, xuid)
+        self._seed_money_cache(xuid)
         if not st.locked_page and len(pages) >= 2:
             if now - st.last_switch_ts >= self.switch_interval:
                 st.page_index = (st.page_index + 1) % len(pages)
@@ -941,11 +1012,66 @@ class SidebarSystem:
 
         return PLACEHOLDER_RE.sub(repl, template), missing
 
-    def _sample_server_perf(self) -> Tuple[Optional[float], Optional[float]]:
-        """TPS/MSPT 每 PERF_SAMPLE_SECONDS 取样一次，供侧边栏显示。"""
-        now = time.time()
-        if now - self._perf_sample_at < PERF_SAMPLE_SECONDS and self._perf_sample_at > 0:
-            return self._perf_tps, self._perf_mspt
+    def _run_on_main(self, fn) -> None:
+        try:
+            self.plugin.server.scheduler.run_task(self.plugin, fn)
+        except Exception:
+            try:
+                fn()
+            except Exception as e:
+                self._log_error(f"run_on_main: {e}")
+
+    def _schedule_refresh_xuid(self, xuid: str) -> None:
+        xs = str(xuid or "").strip()
+        if not xs:
+            return
+
+        def _run() -> None:
+            player = self._find_online(xs)
+            if player is None:
+                return
+            st = self._player_state.get(xs)
+            if st is None or not st.enabled:
+                return
+            self.refresh_player(player, force=False)
+
+        self._run_on_main(_run)
+
+    def _schedule_refresh_all_enabled(self) -> None:
+        self._run_on_main(lambda: self._refresh_all_enabled())
+
+    def _refresh_all_enabled(self, exclude_xuid: str = "") -> None:
+        ex = str(exclude_xuid or "").strip()
+        for player in list(getattr(self.plugin.server, "online_players", []) or []):
+            xuid = str(getattr(player, "xuid", "") or "").strip()
+            if not xuid or xuid == ex:
+                continue
+            st = self._player_state.get(xuid)
+            if st is None or not st.enabled:
+                continue
+            try:
+                self.refresh_player(player, force=False)
+            except Exception as e:
+                self._log_error(f"refresh_all_enabled: {e}")
+
+    def _update_online_cache(self) -> None:
+        try:
+            self._cached_online = len(
+                list(getattr(self.plugin.server, "online_players", []) or [])
+            )
+        except Exception:
+            self._cached_online = 0
+        try:
+            mp = getattr(self.plugin.server, "max_players", None)
+            self._cached_max_players = int(mp) if mp is not None else None
+        except Exception:
+            self._cached_max_players = None
+
+    def _refresh_timed_cache(self) -> None:
+        """定时器专用：现实时间 + TPS/MSPT。"""
+        now = datetime.now()
+        self._cached_time = now.strftime("%H:%M")
+        self._cached_date = now.strftime("%Y-%m-%d")
         tps = None
         mspt = None
         try:
@@ -964,23 +1090,31 @@ class SidebarSystem:
                 mspt = round(float(server.average_mspt), 1)
         except Exception:
             mspt = None
-        self._perf_tps = tps
-        self._perf_mspt = mspt
-        self._perf_sample_at = now
-        return tps, mspt
+        self._cached_tps = tps
+        self._cached_mspt = mspt
+
+    def _seed_money_cache(self, xuid: str) -> None:
+        xs = str(xuid or "").strip()
+        if not xs:
+            return
+        try:
+            money = self.plugin.economy.get_player_money_by_xuid(xs)
+        except Exception:
+            money = 0.0
+        if isinstance(money, float):
+            self._money_cache[xs] = (
+                f"{money:.2f}".rstrip("0").rstrip(".")
+            )
+        else:
+            self._money_cache[xs] = str(money)
 
     def _sample_player_ping(self, player: Player, xuid: str) -> Optional[int]:
-        """玩家延迟每 PERF_SAMPLE_SECONDS 取样一次（真实 ms，不再做 10ms 量化）。"""
-        now = time.time()
-        cached = self._ping_cache.get(xuid)
-        if cached is not None and now - cached[0] < PERF_SAMPLE_SECONDS:
-            return cached[1]
         ping = None
         try:
             ping = max(0, int(getattr(player, "ping", None)))
         except Exception:
             ping = None
-        self._ping_cache[xuid] = (now, ping)
+        self._ping_cache[xuid] = ping
         return ping
 
     def _builtin_vars(
@@ -990,13 +1124,12 @@ class SidebarSystem:
         pages: List[SidebarPage],
         st: PlayerSidebarState,
     ) -> Dict[str, Any]:
-        now = datetime.now()
-        money = 0.0
-        try:
-            money = self.plugin.economy.get_player_money_by_xuid(xuid)
-        except Exception:
-            pass
+        # 金钱：缓存未命中时补一次（进服/事件应已写入）
+        if xuid and xuid not in self._money_cache:
+            self._seed_money_cache(xuid)
+        money_str = self._money_cache.get(xuid, "0")
 
+        # 生命/饱食仅在自定义模板仍引用时现场读取（默认模板已去掉）
         hp = None
         max_hp = None
         try:
@@ -1005,24 +1138,7 @@ class SidebarSystem:
         except Exception:
             hp = None
             max_hp = None
-
         food = self._get_food(player)
-
-        online = 0
-        max_players = None
-        try:
-            online = len(list(self.plugin.server.online_players or []))
-        except Exception:
-            online = 0
-        try:
-            mp = getattr(self.plugin.server, "max_players", None)
-            if mp is not None:
-                max_players = int(mp)
-        except Exception:
-            max_players = None
-
-        tps, mspt = self._sample_server_perf()
-        ping = self._sample_player_ping(player, xuid)
 
         title = ""
         try:
@@ -1048,7 +1164,6 @@ class SidebarSystem:
             if level is not None:
                 t = getattr(level, "time", None)
                 if t is not None:
-                    # 0-23999 → HH:MM 游戏日
                     ticks = int(t) % 24000
                     hours = (ticks // 1000 + 6) % 24
                     mins = int((ticks % 1000) * 60 / 1000)
@@ -1065,25 +1180,19 @@ class SidebarSystem:
                     page_num = i + 1
                     break
 
-        money_str = (
-            f"{money:.2f}".rstrip("0").rstrip(".")
-            if isinstance(money, float)
-            else str(money)
-        )
-
         return {
-            "time": now.strftime("%H:%M"),
-            "date": now.strftime("%Y-%m-%d"),
+            "time": self._cached_time or datetime.now().strftime("%H:%M"),
+            "date": self._cached_date or datetime.now().strftime("%Y-%m-%d"),
             "player": str(getattr(player, "name", "") or ""),
             "money": money_str,
             "hp": hp,
             "max_hp": max_hp,
             "food": food,
-            "online": online,
-            "max_players": max_players,
-            "tps": tps,
-            "mspt": mspt,
-            "ping": ping,
+            "online": self._cached_online,
+            "max_players": self._cached_max_players,
+            "tps": self._cached_tps,
+            "mspt": self._cached_mspt,
+            "ping": self._ping_cache.get(xuid),
             "mc_time": mc_time,
             "title": title,
             "guild": guild,
