@@ -6,7 +6,7 @@ import re
 import time
 from dataclasses import dataclass, field
 from datetime import datetime
-from typing import Any, Dict, List, Optional, Set
+from typing import Any, Dict, List, Optional, Set, Tuple
 
 from endstone import Player
 from endstone.scoreboard import Criteria, DisplaySlot, ObjectiveSortOrder
@@ -50,6 +50,9 @@ def _setting_int(raw: Any, default: int) -> int:
 
 # 个人计分板上的稳定 objective 名（短于 Bedrock 16 字符上限）
 _STABLE_OBJECTIVE = "arc_sb"
+# TPS / MSPT / 延迟：侧边栏仍按 SIDEBAR_REFRESH_TICKS 刷，但这三项按此间隔取样，避免每秒抖动
+PERF_SAMPLE_SECONDS = 3.0
+
 # 侧边栏假名过长会踢客户端（历史包长上限约 40）
 _MAX_ENTRY_LEN = 40
 
@@ -116,6 +119,11 @@ class SidebarSystem:
         # page_id -> key -> value
         self._global_values: Dict[str, Dict[str, Any]] = {}
         self._player_state: Dict[str, PlayerSidebarState] = {}
+        # 性能行缓存：全局 TPS/MSPT + 每玩家 ping，按 PERF_SAMPLE_SECONDS 取样
+        self._perf_sample_at: float = 0.0
+        self._perf_tps: Optional[float] = None
+        self._perf_mspt: Optional[float] = None
+        self._ping_cache: Dict[str, Tuple[float, Optional[int]]] = {}
         self.enabled = True
         self.default_on = True
         self.sidebar_title = "§6弧光服务器"
@@ -450,6 +458,7 @@ class SidebarSystem:
                 return
             st = self._player_state.pop(xuid, None)
             self._values.pop(xuid, None)
+            self._ping_cache.pop(xuid, None)
             if st is not None:
                 self._clear_sidebar_display(player, st)
         except Exception as e:
@@ -932,6 +941,48 @@ class SidebarSystem:
 
         return PLACEHOLDER_RE.sub(repl, template), missing
 
+    def _sample_server_perf(self) -> Tuple[Optional[float], Optional[float]]:
+        """TPS/MSPT 每 PERF_SAMPLE_SECONDS 取样一次，供侧边栏显示。"""
+        now = time.time()
+        if now - self._perf_sample_at < PERF_SAMPLE_SECONDS and self._perf_sample_at > 0:
+            return self._perf_tps, self._perf_mspt
+        tps = None
+        mspt = None
+        try:
+            server = self.plugin.server
+            if hasattr(server, "current_tps"):
+                tps = round(float(server.current_tps), 1)
+            elif hasattr(server, "average_tps"):
+                tps = round(float(server.average_tps), 1)
+        except Exception:
+            tps = None
+        try:
+            server = self.plugin.server
+            if hasattr(server, "current_mspt"):
+                mspt = round(float(server.current_mspt), 1)
+            elif hasattr(server, "average_mspt"):
+                mspt = round(float(server.average_mspt), 1)
+        except Exception:
+            mspt = None
+        self._perf_tps = tps
+        self._perf_mspt = mspt
+        self._perf_sample_at = now
+        return tps, mspt
+
+    def _sample_player_ping(self, player: Player, xuid: str) -> Optional[int]:
+        """玩家延迟每 PERF_SAMPLE_SECONDS 取样一次（真实 ms，不再做 10ms 量化）。"""
+        now = time.time()
+        cached = self._ping_cache.get(xuid)
+        if cached is not None and now - cached[0] < PERF_SAMPLE_SECONDS:
+            return cached[1]
+        ping = None
+        try:
+            ping = max(0, int(getattr(player, "ping", None)))
+        except Exception:
+            ping = None
+        self._ping_cache[xuid] = (now, ping)
+        return ping
+
     def _builtin_vars(
         self,
         player: Player,
@@ -970,32 +1021,8 @@ class SidebarSystem:
         except Exception:
             max_players = None
 
-        tps = None
-        mspt = None
-        try:
-            server = self.plugin.server
-            if hasattr(server, "current_tps"):
-                tps = round(float(server.current_tps), 1)
-            elif hasattr(server, "average_tps"):
-                tps = round(float(server.average_tps), 1)
-        except Exception:
-            tps = None
-        try:
-            server = self.plugin.server
-            if hasattr(server, "current_mspt"):
-                mspt = round(float(server.current_mspt), 1)
-            elif hasattr(server, "average_mspt"):
-                mspt = round(float(server.average_mspt), 1)
-        except Exception:
-            mspt = None
-
-        ping = None
-        try:
-            raw_ping = int(getattr(player, "ping", None))
-            # 量化延迟，减少侧边栏假名每秒变化带来的清行/发包
-            ping = max(0, (raw_ping // 10) * 10)
-        except Exception:
-            ping = None
+        tps, mspt = self._sample_server_perf()
+        ping = self._sample_player_ping(player, xuid)
 
         title = ""
         try:

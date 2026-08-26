@@ -3,7 +3,7 @@
 # EndStone ARC Core Plugin / EndStone弧光核心
 
 [![Codacy Grade](https://app.codacy.com/project/badge/Grade/2f830615baf347258558dcc2a5ab85a1)](https://app.codacy.com/gh/DEVILENMO/EndstoneMC-ARC-Core-Plugin/dashboard?utm_source=gh&utm_medium=referral&utm_content=&utm_campaign=Badge_grade)
-[![Version](https://img.shields.io/badge/version-v0.9.23-blue)](https://github.com/ARC-Minecraft/EndstoneMC-ARC-Core-Plugin)
+[![Version](https://img.shields.io/badge/version-v0.9.24-blue)](https://github.com/ARC-Minecraft/EndstoneMC-ARC-Core-Plugin)
 [![Python](https://img.shields.io/badge/python-3.13+-blue?logo=python&logoColor=white)](https://www.python.org/)
 [![EndStone API](https://img.shields.io/badge/EndStone_API-0.7+-black)](https://github.com/EndstoneMC/endstone)
 [![License](https://img.shields.io/github/license/ARC-Minecraft/EndstoneMC-ARC-Core-Plugin)](LICENSE)
@@ -19,7 +19,7 @@ EndStone ARC Core 是一个功能完整的 EndStone (Minecraft 基岩版服务�
 
 - **作者**: DEVILENMO
 - **邮箱**: DEVILENMO@gmail.com
-- **版本**: 0.9.23
+- **版本**: 0.9.24
 - **API 版本**: 0.7+
 - **推荐 Python 版本**: 3.13
 
@@ -800,7 +800,11 @@ arc.api_sidebar_set_values(
 
 ## 📋 近期更新日志
 
-### v0.9.23（当前版本）
+### v0.9.24（当前版本）
+
+- ✅ **侧边栏 TPS/延迟改为 3 秒取样**：去掉延迟 10ms 量化；TPS、MSPT、ping 每 3 秒取一次，其它行仍按 `SIDEBAR_REFRESH_TICKS` 刷新
+
+### v0.9.23
 
 - ✅ **修复文件同步模式下头衔迁移跨库删表**：`title_definitions` 等表重建改为 `rebuild_table_copy`（同连接事务 + VACUUM 备份），避免临时表落子服本地库、`DROP` 却打到主服共享库导致定义表丢失；启动前后校验表存在；对路由表 `DROP` 打 warning
 
@@ -816,7 +820,7 @@ arc.api_sidebar_set_values(
 
 ### v0.9.20
 
-- ✅ **修复侧边栏导致客户端闪退**：不再每秒双缓冲销毁/重建 objective；改为复用稳定 `arc_sb` 并原地更新/清理行；假名截断至 40 字符；延迟显示量化为 10ms 档，降低发包频率
+- ✅ **修复侧边栏导致客户端闪退**：不再每秒双缓冲销毁/重建 objective；改为复用稳定 `arc_sb` 并原地更新/清理行；假名截断至 40 字符；TPS/延迟按较低频率取样，降低发包频率
 
 ### v0.9.19
 
