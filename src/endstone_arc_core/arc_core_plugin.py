@@ -185,7 +185,7 @@ class ARCCorePlugin(Plugin):
             can_compute=self._can_compute_conditional_titles,
             find_online_by_xuid=self._find_online_player_by_xuid,
             update_name_tag=self._update_player_name_tag,
-            grant_unlock_reward=self._grant_title_unlock_reward,
+            grant_unlock_reward=None,
         )
         self.entity_display_name_manager = EntityDisplayNameManager(Path(MAIN_PATH), logger=None)
         self.kill_reward_config = KillRewardConfig(Path(MAIN_PATH), logger=None)
@@ -2686,7 +2686,7 @@ class ARCCorePlugin(Plugin):
 
                                 try:
                                     # 仅在「从某领地走出到无领地区」时提示离开；
-                                    # 领地A→领地B 直接以进入B 的提示覆盖，避免两条 popup 互相覆盖。
+                                    # 领地A→领地B 直接以进入B 的提示覆盖，避免两条 tip 互相覆盖。
                                     leave_text = (
                                         self._build_land_transition_text(old_land_id, is_leaving=True)
                                         if (old_land_id is not None and land_id is None)
@@ -2714,9 +2714,9 @@ class ARCCorePlugin(Plugin):
                                         def send_land_message():
                                             try:
                                                 if leave_message:
-                                                    target_player.send_popup(leave_message)
+                                                    target_player.send_tip(leave_message)
                                                 if enter_message:
-                                                    target_player.send_popup(enter_message)
+                                                    target_player.send_tip(enter_message)
                                                 if new_id is not None and new_info:
                                                     self.display_land_particle_boundary(target_player, new_info)
                                                     # 私人领地上架出售：非主人进入时弹出购买表单
@@ -4214,7 +4214,7 @@ class ARCCorePlugin(Plugin):
         self.show_title_manage_panel(player)
 
     def api_unlock_title(self, player: Player, title: str) -> bool:
-        """供其他插件调用的接口：为玩家解锁头衔，并发放解锁奖励（若在线）。"""
+        """供其他插件调用：为玩家解锁头衔（不发放金钱/物品；奖励由成就等业务插件自行发放）。"""
         if player is None:
             return False
         title_s = str(title or "").strip()
@@ -4228,19 +4228,17 @@ class ARCCorePlugin(Plugin):
         unlock_ok, was_new_unlock = self.title_system.unlock_title(player, title_s)
         if not unlock_ok:
             return False
-        if was_new_unlock:
-            self._grant_title_unlock_reward(player, title_s)
+        if was_new_unlock and not equipped_before:
             # 若玩家当前未佩戴任何头衔，则自动佩戴刚解锁的头衔
-            if not equipped_before:
-                try:
-                    self.title_system.set_equipped_title(player, title_s)
-                    self._update_player_name_tag(player)
-                except Exception:
-                    pass
+            try:
+                self.title_system.set_equipped_title(player, title_s)
+                self._update_player_name_tag(player)
+            except Exception:
+                pass
         return True
 
     def api_unlock_title_by_xuid(self, xuid: str, title: str) -> bool:
-        """按 xuid 解锁头衔；离线可记解锁。若玩家在线且为新解锁，则发奖并在未佩戴时自动佩戴。"""
+        """按 xuid 解锁头衔；离线可记解锁。在线且新解锁时，若未佩戴则自动佩戴（不发奖）。"""
         xuid_s = str(xuid or "").strip()
         title_s = str(title or "").strip()
         if not xuid_s or not title_s:
@@ -4255,14 +4253,12 @@ class ARCCorePlugin(Plugin):
         unlock_ok, was_new_unlock = self.title_system.unlock_title_by_xuid(xuid_s, title_s)
         if not unlock_ok:
             return False
-        if was_new_unlock and online is not None:
-            self._grant_title_unlock_reward(online, title_s)
-            if not equipped_before:
-                try:
-                    self.title_system.set_equipped_title(online, title_s)
-                    self._update_player_name_tag(online)
-                except Exception:
-                    pass
+        if was_new_unlock and online is not None and not equipped_before:
+            try:
+                self.title_system.set_equipped_title(online, title_s)
+                self._update_player_name_tag(online)
+            except Exception:
+                pass
         return True
 
     def api_set_title_definition(
@@ -4270,10 +4266,10 @@ class ARCCorePlugin(Plugin):
         title: str,
         rarity: str,
         description: str,
-        reward_money: float,
+        reward_money: float = 0.0,
         reward_items: Optional[List] = None,
     ) -> bool:
-        """创建或覆盖头衔定义（稀有度、介绍、解锁金钱/物品奖励）。供成就等插件写入奖励头衔。"""
+        """创建或覆盖头衔定义（稀有度、介绍）。reward_* 仅兼容旧调用，解锁时不再据此发奖。"""
         items = reward_items if reward_items is not None else []
         if not isinstance(items, list):
             return False
@@ -4299,7 +4295,7 @@ class ARCCorePlugin(Plugin):
         reward_money: float = 0.0,
         reward_items: Optional[List] = None,
     ) -> bool:
-        """若头衔不存在则插入定义；已存在不覆盖（保留 OP 手工修改）。"""
+        """若头衔未注册则写入基本属性；已存在不覆盖。reward_* 兼容旧调用，解锁不发奖。"""
         items = reward_items if reward_items is not None else []
         if not isinstance(items, list):
             return False
@@ -4323,6 +4319,10 @@ class ARCCorePlugin(Plugin):
         if not title_s:
             return None
         return self.title_system.get_title_definition(title_s)
+
+    def api_has_title_definition(self, title: str) -> bool:
+        """头衔是否已在核心注册（title_definitions 中有记录）。"""
+        return self.api_get_title_definition(title) is not None
 
     def api_list_title_definitions(self) -> list:
         """全部头衔定义列表（默认头衔、OP 头衔、数据库自定义头衔）。"""
@@ -4535,19 +4535,10 @@ class ARCCorePlugin(Plugin):
         return "\n".join(lines)
 
     def _grant_title_unlock_reward(self, player: Player, title: str) -> None:
-        """若头衔定义中有解锁奖励，则给该玩家发放金钱与物品（仅当玩家在线时）。"""
-        defn = self.title_system.get_title_definition(title)
-        if not defn:
-            return
-        money = defn.get("reward_money") or 0
-        if money > 0:
-            try:
-                self.increase_player_money(player, money)
-            except Exception:
-                pass
-        items = defn.get("reward_items") or []
-        if items:
-            self.api_give_player_items(player, items)
+        """已废弃：头衔解锁不再发放金钱/物品（成就奖励改由 arc_achievement 发放）。"""
+        _ = player
+        _ = title
+        return
 
     def show_fill_inviter_panel(self, player: Player, hint_message: Optional[str] = None):
         """显示填写邀请人面板"""
@@ -13415,8 +13406,6 @@ class ARCCorePlugin(Plugin):
                 if str(p.xuid) == target_xuid:
                     target_online = p
                     break
-            if target_online and was_new_unlock:
-                self._grant_title_unlock_reward(target_online, title)
             player.send_message(self.language_manager.GetText('OP_TITLE_GRANT_TO_SINGLE_SUCCESS').format(target_name, title))
         else:
             player.send_message(self.language_manager.GetText('OP_TITLE_GRANT_TO_SINGLE_FAIL'))
@@ -13968,8 +13957,7 @@ class ARCCorePlugin(Plugin):
                     equipped_before = self.title_system.get_equipped_title_by_xuid(rx)
                     online_player = self._find_online_player_by_xuid(rx)
                     ok, was_new = self.title_system.unlock_title_by_xuid(rx, grant_title)
-                    if ok and was_new and online_player is not None:
-                        self._grant_title_unlock_reward(online_player, grant_title)
+                    _ = was_new
                     if ok and not equipped_before:
                         self.title_system.set_equipped_title_by_xuid(rx, grant_title)
                     if online_player is not None:
