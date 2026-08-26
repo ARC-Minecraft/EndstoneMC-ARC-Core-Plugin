@@ -67,7 +67,15 @@ TABLE_TO_ENUM = {
 ENUM_TO_TABLE = {v: k for k, v in TABLE_TO_ENUM.items()}
 
 # 2+：认证响应可带 settings；可收 SETTINGS_PUSH。旧客户端不发此字段，视为 1。
-PROTOCOL_VERSION = 2
+# 3+：数据操作请求/响应带 seq；响应使用真实的 INSERT/UPDATE/DELETE_RESPONSE。
+PROTOCOL_VERSION = 3
+
+# 请求类型 → 对应响应类型
+REQUEST_TO_RESPONSE = {
+    SyncMessageType.INSERT_REQUEST: SyncMessageType.INSERT_RESPONSE,
+    SyncMessageType.UPDATE_REQUEST: SyncMessageType.UPDATE_RESPONSE,
+    SyncMessageType.DELETE_REQUEST: SyncMessageType.DELETE_RESPONSE,
+}
 
 
 def encode_message(msg_type: SyncMessageType, data: Dict[str, Any]) -> bytes:
@@ -123,11 +131,13 @@ def build_auth_response(
     success: bool,
     message: str = "",
     settings: Optional[Dict[str, str]] = None,
+    protocol_version: int = PROTOCOL_VERSION,
 ) -> bytes:
-    """构建认证响应；settings 仅新客户端使用，旧客户端会忽略未知字段。"""
+    """构建认证响应；settings / protocol_version 仅新客户端使用，旧客户端会忽略未知字段。"""
     payload = {
         'success': success,
         'message': message,
+        'protocol_version': int(protocol_version),
     }
     if settings is not None:
         payload['settings'] = settings
@@ -167,9 +177,10 @@ def build_data_request(
     table: SyncTable,
     data: Dict[str, Any],
     where: str = "",
-    params: List = None
+    params: List = None,
+    seq: Optional[int] = None,
 ) -> bytes:
-    """构建数据操作请求（插入/更新/删除）"""
+    """构建数据操作请求（插入/更新/删除）；seq 用于 outbox ack 配对。"""
     payload = {
         'table': int(table),
         'data': data,
@@ -178,16 +189,27 @@ def build_data_request(
         payload['where'] = where
     if params:
         payload['params'] = params
+    if seq is not None:
+        payload['seq'] = int(seq)
     return encode_message(msg_type, payload)
 
 
-def build_data_response(success: bool, affected_rows: int = 0, error: str = "") -> bytes:
-    """构建数据操作响应"""
-    return encode_message(SyncMessageType.ERROR_RESPONSE, {
+def build_data_response(
+    msg_type: SyncMessageType,
+    success: bool,
+    affected_rows: int = 0,
+    error: str = "",
+    seq: Optional[int] = None,
+) -> bytes:
+    """构建数据操作响应（INSERT/UPDATE/DELETE_RESPONSE）。"""
+    payload = {
         'success': success,
         'affected_rows': affected_rows,
         'error': error,
-    })
+    }
+    if seq is not None:
+        payload['seq'] = int(seq)
+    return encode_message(msg_type, payload)
 
 
 def build_batch_sync_request(operations: List[Dict[str, Any]]) -> bytes:

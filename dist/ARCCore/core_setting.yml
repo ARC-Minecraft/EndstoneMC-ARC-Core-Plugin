@@ -34,6 +34,9 @@ SYNC_CLIENT_SYNC_PLAYER=True
 SYNC_CLIENT_SYNC_ECONOMY=True
 SYNC_CLIENT_SYNC_TITLE=True
 SYNC_CLIENT_SYNC_GUILD=True
+# 条件头衔（首富等）是否由本机计算。主服/同步中心留 True；远程从服与仅共享文件的子服建议 False。
+# 留空则自动推断：远程客户端=否；文件模式且未开同步中心=否；其余=是。
+CONDITIONAL_TITLE_AUTHORITY=
 
 
 # ----- 方式 B：共享数据库文件路径（与远程客户端互斥；路径留空则使用 DATABASE_PATH 主库） -----

@@ -1,11 +1,12 @@
 # -*- coding: utf-8 -*-
-"""跨服数据同步客户端：连接同步中心并拉取/接收推送"""
+"""跨服数据同步客户端：连接同步中心并拉取/接收推送；本地变更经 outbox 可靠上行。"""
 import socket
 import threading
 import time
 from contextlib import suppress
 from typing import Any, Callable, Dict, Optional, Set
 
+from endstone_arc_core import sync_outbox
 from endstone_arc_core.sync_config import (
     filter_incoming_settings,
     get_client_sync_categories,
@@ -16,6 +17,7 @@ from endstone_arc_core.sync_protocol import (
     SyncTable,
     TABLE_TO_ENUM,
     ENUM_TO_TABLE,
+    PROTOCOL_VERSION,
     build_auth_request,
     build_data_request,
     build_full_sync_request,
@@ -30,6 +32,7 @@ class SyncClient:
     """连接远程同步中心，按配置分项同步数据到本地数据库。
 
     断线或主机不可达时，按 SYNC_CLIENT_RECONNECT_INTERVAL 秒定时重连。
+    本地写库先入 sync_outbox，重连后按序重放，收到 ack 才删除。
     """
 
     def __init__(self, database_manager, setting_manager, logger=None):
@@ -54,6 +57,17 @@ class SyncClient:
         self._active = False  # 希望保持连接（允许断线重连）
         self._worker_thread: Optional[threading.Thread] = None
         self._socket_lock = threading.Lock()
+        self._outbox_lock = threading.Lock()
+        self._pending_acks: Set[int] = set()
+        self._server_protocol_version = 1
+        self._last_error = ""
+        self._flushing = False
+        self._reconcile_on_connect: Optional[Set[str]] = None
+
+        try:
+            sync_outbox.ensure_outbox_table(self.db)
+        except Exception:
+            pass
 
     def _setting_int(self, key: str, default: int, fallback_key: str = "") -> int:
         raw = self.settings.GetSetting(key)
@@ -121,14 +135,38 @@ class SyncClient:
             self._worker_thread.join(timeout=self.reconnect_interval + 5)
         self._worker_thread = None
 
+    def is_active(self) -> bool:
+        """是否已启动（含断线重连等待中）。"""
+        return self._active
+
     def is_running(self) -> bool:
         """当前是否已与同步中心建立连接。"""
         with self._socket_lock:
             return self._active and self._socket is not None
 
+    def get_status(self) -> Dict[str, Any]:
+        """供 OP 面板展示的状态快照。"""
+        pending = 0
+        try:
+            pending = sync_outbox.count_pending(self.db)
+        except Exception:
+            pending = 0
+        err = self._last_error or sync_outbox.latest_error(self.db)
+        return {
+            "active": self._active,
+            "connected": self.is_running(),
+            "server": f"{self.server_ip}:{self.server_port}",
+            "server_id": self.server_id,
+            "server_name": self.server_name,
+            "server_protocol": self._server_protocol_version,
+            "outbox_pending": pending,
+            "last_error": err,
+            "enabled_tables": sorted(self.enabled_tables),
+        }
+
     def mirror_local_write(self, kind: str, table: str, **kwargs) -> None:
-        """本地业务写库后上行到同步中心（fire-and-forget，响应由监听线程丢弃）。"""
-        if table not in self.enabled_tables or not self.is_running():
+        """本地业务写库后入 outbox；已连接则立即尝试发送。"""
+        if table not in self.enabled_tables:
             return
         table_enum = TABLE_TO_ENUM.get(table)
         if table_enum is None:
@@ -137,30 +175,125 @@ class SyncClient:
             for action in iter_mirror_write_actions(self.db, kind, table, **kwargs):
                 if action[0] == "delete":
                     _, where, params = action
-                    self._send(
-                        build_data_request(
-                            SyncMessageType.DELETE_REQUEST,
-                            table_enum,
-                            {},
-                            where=where,
-                            params=params,
-                        )
-                    )
+                    payload = {"where": where, "params": list(params or [])}
+                    seq = sync_outbox.enqueue(self.db, table, "delete", payload)
                 else:
-                    self._send(
-                        build_data_request(
-                            SyncMessageType.INSERT_REQUEST,
-                            table_enum,
-                            dict(action[1]),
-                        )
-                    )
+                    payload = {"row": dict(action[1])}
+                    seq = sync_outbox.enqueue(self.db, table, "insert", payload)
+                if seq is None:
+                    self._log("error", f"Outbox enqueue failed for {table}/{kind}")
+                    continue
+                if self.is_running():
+                    self._send_outbox_item(seq, table, action[0], payload)
         except Exception as e:
+            self._last_error = str(e)
             self._log("error", f"Mirror local write {table}/{kind} error: {e}")
+
+    def _send_outbox_item(
+        self, seq: int, table: str, op: str, payload: Dict[str, Any]
+    ) -> bool:
+        table_enum = TABLE_TO_ENUM.get(table)
+        if table_enum is None:
+            sync_outbox.delete_seq(self.db, seq)
+            return True
+        use_ack = self._server_protocol_version >= 3
+        try:
+            if op == "delete":
+                msg = build_data_request(
+                    SyncMessageType.DELETE_REQUEST,
+                    table_enum,
+                    {},
+                    where=str(payload.get("where") or ""),
+                    params=list(payload.get("params") or []),
+                    seq=seq if use_ack else None,
+                )
+            else:
+                msg = build_data_request(
+                    SyncMessageType.INSERT_REQUEST,
+                    table_enum,
+                    dict(payload.get("row") or {}),
+                    seq=seq if use_ack else None,
+                )
+            self._send(msg)
+            if use_ack:
+                with self._outbox_lock:
+                    self._pending_acks.add(int(seq))
+            else:
+                # 旧中心：发出即成功
+                sync_outbox.delete_seq(self.db, seq)
+            return True
+        except Exception as e:
+            self._last_error = str(e)
+            attempts = sync_outbox.mark_attempt(self.db, seq, str(e))
+            if attempts >= sync_outbox.OUTBOX_MAX_ATTEMPTS:
+                self._log(
+                    "error",
+                    f"Outbox seq={seq} exceeded max attempts ({attempts}): {e}",
+                )
+            return False
+
+    def flush_outbox(self) -> int:
+        """按 seq 升序重放 outbox；返回本次尝试发送条数。"""
+        if not self.is_running() or self._flushing:
+            return 0
+        self._flushing = True
+        sent = 0
+        try:
+            with self._outbox_lock:
+                pending_now = set(self._pending_acks)
+            for item in sync_outbox.list_pending(self.db, limit=500):
+                seq = int(item.get("seq") or 0)
+                if not seq or seq in pending_now:
+                    continue
+                if int(item.get("attempts") or 0) >= sync_outbox.OUTBOX_MAX_ATTEMPTS:
+                    continue
+                table = str(item.get("table_name") or "")
+                op = str(item.get("op") or "")
+                payload = item.get("payload") or {}
+                if table not in self.enabled_tables:
+                    sync_outbox.delete_seq(self.db, seq)
+                    continue
+                if self._send_outbox_item(seq, table, op, payload):
+                    sent += 1
+                else:
+                    break
+        finally:
+            self._flushing = False
+        return sent
+
+    def _handle_data_ack(self, data: Dict[str, Any]) -> None:
+        seq_raw = data.get("seq")
+        if seq_raw is None:
+            return
+        try:
+            seq = int(seq_raw)
+        except (TypeError, ValueError):
+            return
+        with self._outbox_lock:
+            self._pending_acks.discard(seq)
+        if data.get("success"):
+            sync_outbox.delete_seq(self.db, seq)
+            return
+        err = str(data.get("error") or "remote write failed")
+        self._last_error = err
+        attempts = sync_outbox.mark_attempt(self.db, seq, err)
+        self._log(
+            "warning",
+            f"Outbox ack failure seq={seq} attempts={attempts}: {err}",
+        )
+
+    def enqueue_upsert_row(self, table: str, row: Dict[str, Any]) -> Optional[int]:
+        """对账用：把一行整行 upsert 入 outbox（不依赖写通知）。"""
+        if table not in self.enabled_tables or not row:
+            return None
+        return sync_outbox.enqueue(self.db, table, "insert", {"row": dict(row)})
 
     def _close_socket(self) -> None:
         with self._socket_lock:
             sock = self._socket
             self._socket = None
+        with self._outbox_lock:
+            self._pending_acks.clear()
         if sock:
             with suppress(OSError):
                 sock.close()
@@ -194,7 +327,7 @@ class SyncClient:
         self._log("info", "Sync client stopped")
 
     def _connect_session(self) -> bool:
-        """建立连接、认证、全量同步。成功返回 True。"""
+        """建立连接、认证、全量同步、flush outbox。成功返回 True。"""
         sock = None
         try:
             sock = socket.socket(socket.AF_INET, socket.SOCK_STREAM)
@@ -208,7 +341,19 @@ class SyncClient:
                 self._log("error", "Authentication failed")
                 return False
 
+            # 先拉全量（中心→本地），再 flush 本地 outbox，避免旧中心行覆盖新本地行后丢失上行。
             self._perform_full_sync()
+            if self._reconcile_on_connect:
+                tables = set(self._reconcile_on_connect)
+                self._reconcile_on_connect = None
+                queued = self._enqueue_local_tables_for_reconcile(tables)
+                self._log(
+                    "info",
+                    f"Reconcile: enqueued {queued} local row(s) from {len(tables)} table(s)",
+                )
+            flushed = self.flush_outbox()
+            if flushed:
+                self._log("info", f"Flushed {flushed} outbox item(s) after connect")
 
             with self._socket_lock:
                 if self._socket:
@@ -271,6 +416,7 @@ class SyncClient:
             self.server_name,
             self.auth_key,
             sorted(self.enabled_tables),
+            protocol_version=PROTOCOL_VERSION,
         )
         msg_type, data = self._request_response(payload)
         if msg_type != SyncMessageType.AUTH_RESPONSE:
@@ -279,6 +425,12 @@ class SyncClient:
         if not data.get("success"):
             self._log("error", f"Authentication failed: {data.get('message', '')}")
             return False
+        try:
+            self._server_protocol_version = int(
+                data.get("protocol_version") or 1
+            )
+        except (TypeError, ValueError):
+            self._server_protocol_version = 1
         settings = data.get("settings")
         if settings:
             self._apply_remote_settings(settings)
@@ -305,6 +457,39 @@ class SyncClient:
                 self._log("info", f"Full sync {table_name}: {applied}/{len(rows)} rows applied")
             except Exception as e:
                 self._log("error", f"Full sync {table_name} error: {e}")
+
+    def reconcile_tables(self, tables: Optional[Set[str]] = None) -> Dict[str, int]:
+        """请求双向对账：强制重连 → 先拉全量 → 再把本地行入 outbox 并 flush。
+
+        立即返回当前 outbox 待发估算；实际对账在后台连接线程完成。
+        """
+        target = set(tables) if tables is not None else set(self.enabled_tables)
+        target &= self.enabled_tables
+        self._reconcile_on_connect = target
+        # 打断当前会话以尽快重连执行对账
+        if self._active:
+            self._close_socket()
+        pending = 0
+        try:
+            pending = sync_outbox.count_pending(self.db)
+        except Exception:
+            pending = 0
+        return {"requested_tables": len(target), "outbox_pending": pending}
+
+    def _enqueue_local_tables_for_reconcile(self, tables: Set[str]) -> int:
+        from endstone_arc_core.sync_write import select_all_sync_table
+
+        queued = 0
+        for table_name in sorted(tables):
+            if table_name not in self.enabled_tables:
+                continue
+            try:
+                for row in select_all_sync_table(self.db, table_name):
+                    if self.enqueue_upsert_row(table_name, row):
+                        queued += 1
+            except Exception as e:
+                self._log("error", f"Reconcile enqueue {table_name} error: {e}")
+        return queued
 
     def _upsert_row(self, table: str, row: Dict[str, Any]) -> bool:
         if not row:
@@ -353,6 +538,15 @@ class SyncClient:
             )
         elif msg_type == SyncMessageType.SETTINGS_PUSH:
             self._apply_remote_settings(data.get("settings"))
+        elif msg_type in (
+            SyncMessageType.INSERT_RESPONSE,
+            SyncMessageType.UPDATE_RESPONSE,
+            SyncMessageType.DELETE_RESPONSE,
+            # 兼容旧中心误用 ERROR_RESPONSE 回写操作结果
+            SyncMessageType.ERROR_RESPONSE,
+        ):
+            if "success" in data:
+                self._handle_data_ack(data)
         elif msg_type == SyncMessageType.HEARTBEAT:
             return time.time()
         return heartbeat_ts
@@ -360,18 +554,23 @@ class SyncClient:
     def _listen_loop(self) -> None:
         buffer = b""
         last_heartbeat = time.time()
+        last_flush = time.time()
         while self._active:
             with self._socket_lock:
                 sock = self._socket
             if not sock:
                 break
             try:
-                if time.time() - last_heartbeat > 30:
+                now = time.time()
+                if now - last_heartbeat > 30:
                     try:
                         self._send(build_heartbeat())
                     except Exception:
                         break
-                    last_heartbeat = time.time()
+                    last_heartbeat = now
+                if now - last_flush > 15:
+                    self.flush_outbox()
+                    last_flush = now
 
                 sock.settimeout(5.0)
                 chunk = sock.recv(4096)

@@ -3167,8 +3167,27 @@ class ARCCorePlugin(Plugin):
                 pass
 
     def _can_compute_conditional_titles(self) -> bool:
-        """跨服从服不计算条件头衔；主服与单机计算。"""
-        return getattr(self, "_sync_consumer_mode", "none") != "client"
+        """仅权威服计算条件头衔（首富等）。
+
+        显式 CONDITIONAL_TITLE_AUTHORITY 优先；未配置时：
+        - 远程客户端模式不计算；
+        - 文件模式且本机未开同步中心不计算（避免与主服双算）；
+        - 其余（同步中心 / 单机）计算。
+        """
+        from endstone_arc_core.sync_config import setting_bool
+
+        raw = self.setting_manager.GetSetting("CONDITIONAL_TITLE_AUTHORITY")
+        if raw is not None and str(raw).strip() != "":
+            return setting_bool(self.setting_manager, "CONDITIONAL_TITLE_AUTHORITY", True)
+
+        mode = getattr(self, "_sync_consumer_mode", "none")
+        if mode == "client":
+            return False
+        if mode == "file" and not setting_bool(
+            self.setting_manager, "ENABLE_SYNC_SERVER", False
+        ):
+            return False
+        return True
 
     @property
     def current_richest_xuid(self) -> Optional[str]:
@@ -3212,7 +3231,7 @@ class ARCCorePlugin(Plugin):
                 row = self.database_manager.query_one(
                     "SELECT e.xuid, e.money "
                     "FROM player_economy e "
-                    "LEFT JOIN player_local_info b ON e.xuid = b.xuid "
+                    "LEFT JOIN player_basic_info b ON e.xuid = b.xuid "
                     "WHERE (b.is_op IS NULL OR b.is_op = 0) "
                     "ORDER BY e.money DESC, e.xuid ASC LIMIT 1"
                 )
@@ -3314,6 +3333,8 @@ class ARCCorePlugin(Plugin):
                 ('session_count', 'INTEGER DEFAULT 0'),
                 ('last_join_time', 'TEXT'),
                 ('last_quit_time', 'TEXT'),
+                # 跨服 OP 镜像：供首富榜等权威服排除 OP（player_local_info 不跨服）
+                ('is_op', 'INTEGER DEFAULT 0'),
             ]
             for col, decl in upgrades:
                 if not self._add_column_if_not_exists('player_basic_info', col, decl):
@@ -3493,11 +3514,21 @@ class ARCCorePlugin(Plugin):
                     where="xuid = ?",
                     params=(xuid,),
                 )
+                # 把本服 local is_op 镜像到跨服 basic（权威服排行用）
+                try:
+                    if "is_op" in self._player_basic_info_columns():
+                        self.database_manager.update(
+                            table="player_basic_info",
+                            data={"is_op": _i(lrow, "is_op", 0)},
+                            where="xuid = ?",
+                            params=(xuid,),
+                        )
+                except Exception:
+                    pass
 
-            # Rebuild basic without check-in / OP / free-land columns.
+            # Rebuild basic without check-in / free-land columns（保留 is_op 镜像）。
             basic_cols = self._player_basic_info_columns()
             drop_from_basic = {
-                "is_op",
                 "remaining_free_land_blocks",
                 "last_checkin_date",
                 "total_checkin_count",
@@ -3517,11 +3548,12 @@ class ARCCorePlugin(Plugin):
                     "session_count",
                     "last_join_time",
                     "last_quit_time",
+                    "is_op",
                 ]
                 present = [c for c in sync_cols if c in basic_cols or c in (
-                    "total_playtime", "session_count", "last_join_time", "last_quit_time"
+                    "total_playtime", "session_count", "last_join_time", "last_quit_time", "is_op"
                 )]
-                # Ensure playtime cols exist before rebuild select.
+                # Ensure playtime / is_op cols exist before rebuild select.
                 self._upgrade_player_basic_table()
                 basic_cols = self._player_basic_info_columns()
                 present = [c for c in sync_cols if c in basic_cols]
@@ -3542,7 +3574,8 @@ class ARCCorePlugin(Plugin):
                         "total_playtime INTEGER DEFAULT 0, "
                         "session_count INTEGER DEFAULT 0, "
                         "last_join_time TEXT, "
-                        "last_quit_time TEXT"
+                        "last_quit_time TEXT, "
+                        "is_op INTEGER DEFAULT 0"
                         ")"
                     )
                     self.database_manager.execute(
@@ -3555,7 +3588,7 @@ class ARCCorePlugin(Plugin):
                     )
                     print(
                         "[ARC Core]Rebuilt player_basic_info "
-                        "(synced account + playtime; check-in is local)"
+                        "(synced account + playtime + is_op; check-in is local)"
                     )
 
             # Rebuild local without playtime columns if present.
@@ -3629,6 +3662,7 @@ class ARCCorePlugin(Plugin):
             'session_count': 'INTEGER DEFAULT 0',
             'last_join_time': 'TEXT',
             'last_quit_time': 'TEXT',
+            'is_op': 'INTEGER DEFAULT 0',
         }
         result = self.database_manager.create_table('player_basic_info', fields)
         if result:
@@ -3862,37 +3896,61 @@ class ARCCorePlugin(Plugin):
 
     def update_player_op_status(self, player: Player) -> bool:
         """
-        更新玩家OP状态
+        更新玩家OP状态（本服 local + 跨服 basic 镜像）。
         :param player: 玩家对象
         :return: 是否更新成功
         """
         try:
             current_op_status = 1 if player.is_op else 0
-            
-            # 检查当前数据库中的OP状态
+            xuid = str(player.xuid)
+
             self.init_player_local_info(player)
             current_info = self.database_manager.query_one(
                 "SELECT is_op FROM player_local_info WHERE xuid = ?",
-                (str(player.xuid),)
+                (xuid,),
             )
-            
+
             if current_info is not None:
-                stored_op_status = current_info.get('is_op', 0)
+                stored_op_status = int(current_info.get("is_op") or 0)
                 if stored_op_status != current_op_status:
-                    # OP状态发生变化，更新数据库
                     success = self.database_manager.update(
-                        table='player_local_info',
-                        data={'is_op': current_op_status},
-                        where='xuid = ?',
-                        params=(str(player.xuid),)
+                        table="player_local_info",
+                        data={"is_op": current_op_status},
+                        where="xuid = ?",
+                        params=(xuid,),
                     )
                     if success:
                         status_text = "OP" if current_op_status else "非OP"
-                        self._safe_log('info', f"{ColorFormat.GREEN}[ARC Core]Updated player OP status: {player.name} -> {status_text}")
-                    return success
-            return True  # 状态未变化或记录不存在，返回成功
+                        self._safe_log(
+                            "info",
+                            f"{ColorFormat.GREEN}[ARC Core]Updated player OP status: "
+                            f"{player.name} -> {status_text}",
+                        )
+                    else:
+                        return False
+
+            # 跨服镜像列（供首富榜等）
+            try:
+                if "is_op" in self._player_basic_info_columns():
+                    basic = self.database_manager.query_one(
+                        "SELECT is_op FROM player_basic_info WHERE xuid = ?",
+                        (xuid,),
+                    )
+                    if basic is not None and int(basic.get("is_op") or 0) != current_op_status:
+                        self.database_manager.update(
+                            table="player_basic_info",
+                            data={"is_op": current_op_status},
+                            where="xuid = ?",
+                            params=(xuid,),
+                        )
+            except Exception:
+                pass
+            return True
         except Exception as e:
-            self._safe_log('error', f"{ColorFormat.RED}[ARC Core]Update player OP status error: {str(e)}")
+            self._safe_log(
+                "error",
+                f"{ColorFormat.RED}[ARC Core]Update player OP status error: {str(e)}",
+            )
             return False
 
     def get_offline_player_op_status(self, player_name: str) -> Optional[bool]:
@@ -17070,13 +17128,15 @@ class ARCCorePlugin(Plugin):
             self.logger.error(f"[ARC Core] QQ group message send error: {str(e)}")
 
     def _on_db_write_for_sync(self, kind: str, table: str, **kwargs):
-        """本地写库成功后：子服上行到中心 / 主机广播给子服。"""
+        """本地写库成功后：子服入 outbox 上行 / 主机广播给子服。"""
         try:
             from endstone_arc_core.sync_protocol import TABLE_TO_ENUM
             if table not in TABLE_TO_ENUM:
                 return
-            if self.sync_client and self.sync_client.is_running():
-                self.sync_client.mirror_local_write(kind, table, **kwargs)
+            # 客户端：无论是否已连接都入队（断线不丢）
+            client = getattr(self, "sync_client", None)
+            if client is not None and getattr(client, "is_active", lambda: False)():
+                client.mirror_local_write(kind, table, **kwargs)
                 return
             if self.sync_server and self.sync_server.is_running():
                 self.sync_server.mirror_local_write(kind, table, **kwargs)
@@ -17085,6 +17145,135 @@ class ARCCorePlugin(Plugin):
                 self.logger.error(f"[ARC Core] Sync mirror write error: {e}")
             except Exception:
                 pass
+
+    def get_sync_status_text(self) -> str:
+        """OP 面板：跨服同步状态摘要。"""
+        from endstone_arc_core.sync_config import setting_bool
+
+        mode = getattr(self, "_sync_consumer_mode", "none")
+        mode_label = {
+            "client": "远程客户端",
+            "file": "共享文件",
+            "none": "未启用消费",
+        }.get(mode, str(mode))
+        lines = [
+            f"消费模式: {mode_label}",
+            f"同步中心: "
+            f"{'运行中' if self.sync_server and self.sync_server.is_running() else '未开启'}",
+        ]
+        if self.sync_server and self.sync_server.is_running():
+            try:
+                lines.append(
+                    f"已连接从服: {self.sync_server.get_connected_count()}"
+                )
+            except Exception:
+                pass
+        if self.sync_client is not None:
+            st = {}
+            try:
+                st = self.sync_client.get_status()
+            except Exception:
+                st = {}
+            lines.append(
+                f"客户端: "
+                f"{'已连接' if st.get('connected') else ('重连中' if st.get('active') else '未启动')}"
+            )
+            if st.get("server"):
+                lines.append(f"目标: {st.get('server')}")
+            lines.append(f"Outbox 待发: {st.get('outbox_pending', 0)}")
+            if st.get("last_error"):
+                lines.append(f"最近失败: {st.get('last_error')}")
+        authority = self._can_compute_conditional_titles()
+        raw_auth = self.setting_manager.GetSetting("CONDITIONAL_TITLE_AUTHORITY")
+        auth_src = (
+            "显式配置"
+            if raw_auth is not None and str(raw_auth).strip() != ""
+            else "自动推断"
+        )
+        lines.append(
+            f"条件头衔权威: {'是' if authority else '否'}（{auth_src}）"
+        )
+        try:
+            holder = self.current_richest_xuid
+            if holder and authority:
+                lines.append(f"当前首富 xuid: {holder}")
+        except Exception:
+            pass
+        return "\n".join(lines)
+
+    def run_sync_reconcile(self) -> dict:
+        """OP：触发头衔等同步表双向对账 / 文件模式残留合并。"""
+        mode = getattr(self, "_sync_consumer_mode", "none")
+        title_tables = {
+            "title_definitions",
+            "player_title_unlock_time",
+            "player_title_equipped",
+        }
+        if mode == "client" and self.sync_client is not None:
+            if not getattr(self.sync_client, "is_active", lambda: False)():
+                return {
+                    "mode": "client",
+                    "detail": "同步客户端未启动",
+                }
+            result = self.sync_client.reconcile_tables(title_tables)
+            return {
+                "mode": "client",
+                "detail": (
+                    f"已请求对账 {result.get('requested_tables', 0)} 张表，"
+                    f"当前 outbox={result.get('outbox_pending', 0)}（后台重连后执行）"
+                ),
+            }
+        if mode == "file":
+            merged = self._reconcile_file_mode_title_residuals()
+            return {
+                "mode": "file",
+                "detail": f"已从本机残留库合并头衔行 {merged} 条到共享库",
+            }
+        return {
+            "mode": mode or "none",
+            "detail": "当前不是远程客户端或文件同步模式，无需对账",
+        }
+
+    def _reconcile_file_mode_title_residuals(self) -> int:
+        """文件模式：把默认 DATABASE_PATH 里残留的头衔表行 upsert 进已路由的共享库。"""
+        import sqlite3
+        from pathlib import Path
+
+        local_path = Path(self.database_manager.db_path)
+        if not local_path.exists():
+            return 0
+        title_tables = (
+            "title_definitions",
+            "player_title_unlock_time",
+            "player_title_equipped",
+        )
+        merged = 0
+        try:
+            conn = sqlite3.connect(str(local_path))
+            conn.row_factory = sqlite3.Row
+            try:
+                for table in title_tables:
+                    try:
+                        cur = conn.execute(f"SELECT * FROM {table}")
+                    except sqlite3.Error:
+                        continue
+                    rows = [dict(r) for r in cur.fetchall()]
+                    for row in rows:
+                        if not row:
+                            continue
+                        # upsert 走路由后的共享库；suppress 避免无意义 TCP 广播
+                        with self.database_manager.suppress_write_notify():
+                            if self.database_manager.upsert(table, row):
+                                merged += 1
+            finally:
+                conn.close()
+        except Exception as e:
+            try:
+                self.logger.error(f"[ARC Core] File-mode title reconcile error: {e}")
+            except Exception:
+                pass
+        return merged
+
 
     def _notify_qqsync(self, event_type: str, display_name: str,
                         raw_player_name: str, message: str = ""):

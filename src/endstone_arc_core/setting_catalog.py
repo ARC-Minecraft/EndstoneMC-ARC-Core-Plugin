@@ -91,6 +91,13 @@ SETTING_GROUPS: List[Dict[str, object]] = [
             _s("SYNC_CLIENT_SYNC_ECONOMY", "同步经济数据", "bool", choices=BOOL_CHOICES, restart=True),
             _s("SYNC_CLIENT_SYNC_TITLE", "同步头衔数据", "bool", choices=BOOL_CHOICES, restart=True),
             _s("SYNC_CLIENT_SYNC_GUILD", "同步公会数据", "bool", choices=BOOL_CHOICES, restart=True),
+            _s(
+                "CONDITIONAL_TITLE_AUTHORITY",
+                "条件头衔权威服",
+                "bool",
+                choices=BOOL_CHOICES,
+                restart=True,
+            ),
             _s("PLAYER_DATABASE_PATH", "玩家库路径", "string", placeholder="", restart=True),
             _s("PLAYER_ECONOMY_DATABASE_PATH", "经济库路径", "string", placeholder="", restart=True),
             _s("PLAYER_TITLE_DATABASE_PATH", "头衔库路径", "string", placeholder="", restart=True),

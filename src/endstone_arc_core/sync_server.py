@@ -19,6 +19,8 @@ from endstone_arc_core.sync_protocol import (
     SyncTable,
     TABLE_TO_ENUM,
     ENUM_TO_TABLE,
+    PROTOCOL_VERSION,
+    REQUEST_TO_RESPONSE,
     decode_message,
     build_auth_response,
     build_query_response,
@@ -315,7 +317,10 @@ class SyncServer:
         if client.protocol_version >= 2:
             auth_settings = self._settings_for_client(client)
         client.conn.sendall(build_auth_response(
-            True, "Authentication successful", settings=auth_settings
+            True,
+            "Authentication successful",
+            settings=auth_settings,
+            protocol_version=PROTOCOL_VERSION,
         ))
         self._log("info", f"Client authenticated: {server_name} ({server_id}) from {client.addr}")
 
@@ -366,13 +371,26 @@ class SyncServer:
         mutate,
         push_op: str,
         push_data: Dict,
+        request_type: SyncMessageType,
     ) -> None:
-        """校验表权限 → 抑制通知写库 → 成功则广播 → 回响应。"""
+        """校验表权限 → 抑制通知写库 → 成功则广播 → 回响应（带 seq）。"""
+        seq = data.get("seq")
+        try:
+            seq = int(seq) if seq is not None else None
+        except (TypeError, ValueError):
+            seq = None
+        resp_type = REQUEST_TO_RESPONSE.get(
+            request_type, SyncMessageType.INSERT_RESPONSE
+        )
         try:
             table_enum = SyncTable(data.get('table', 0))
             table_name = ENUM_TO_TABLE.get(table_enum)
             if table_name not in self._sync_tables:
-                client.conn.sendall(build_data_response(False, 0, "Table not allowed"))
+                client.conn.sendall(
+                    build_data_response(
+                        resp_type, False, 0, "Table not allowed", seq=seq
+                    )
+                )
                 return
             with self.db.suppress_write_notify():
                 success = mutate(table_name)
@@ -381,9 +399,15 @@ class SyncServer:
                     SyncTable(table_enum), push_op, push_data, exclude=client
                 )
                 self._notify_economy_mutated(table_name)
-            client.conn.sendall(build_data_response(success, 1 if success else 0))
+            client.conn.sendall(
+                build_data_response(
+                    resp_type, success, 1 if success else 0, seq=seq
+                )
+            )
         except Exception as e:
-            client.conn.sendall(build_data_response(False, 0, str(e)))
+            client.conn.sendall(
+                build_data_response(resp_type, False, 0, str(e), seq=seq)
+            )
             self._log("error", f"{log_label} error: {e}")
 
     def _handle_insert(self, client: ConnectedClient, data: Dict):
@@ -396,6 +420,7 @@ class SyncServer:
             mutate=lambda t: self.db.upsert(t, row_data),
             push_op="insert",
             push_data=row_data,
+            request_type=SyncMessageType.INSERT_REQUEST,
         )
 
     def _handle_update(self, client: ConnectedClient, data: Dict):
@@ -410,6 +435,7 @@ class SyncServer:
             mutate=lambda t: self.db.update(t, row_data, where, tuple(params)),
             push_op="update",
             push_data={**row_data, '_where': where, '_params': params},
+            request_type=SyncMessageType.UPDATE_REQUEST,
         )
 
     def _handle_delete(self, client: ConnectedClient, data: Dict):
@@ -423,6 +449,7 @@ class SyncServer:
             mutate=lambda t: self.db.delete(t, where, tuple(params)),
             push_op="delete",
             push_data={'_where': where, '_params': params},
+            request_type=SyncMessageType.DELETE_REQUEST,
         )
 
     def _run_batch_op(self, op_type: str, table_name: str, op: Dict) -> Dict:
