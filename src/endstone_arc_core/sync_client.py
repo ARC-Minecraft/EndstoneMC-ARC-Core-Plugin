@@ -62,6 +62,10 @@ class SyncClient:
         self._server_protocol_version = 1
         self._last_error = ""
         self._flushing = False
+        # TCP 粘包缓冲：跨多次 recv / request-response 保留半包，避免错位超时
+        self._recv_buffer = b""
+        self._connect_timeout = 30.0
+        self._full_sync_timeout = 120.0
 
         try:
             sync_outbox.ensure_outbox_table(self.db)
@@ -291,6 +295,7 @@ class SyncClient:
         with self._socket_lock:
             sock = self._socket
             self._socket = None
+            self._recv_buffer = b""
         with self._outbox_lock:
             self._pending_acks.clear()
         if sock:
@@ -330,10 +335,11 @@ class SyncClient:
         sock = None
         try:
             sock = socket.socket(socket.AF_INET, socket.SOCK_STREAM)
-            sock.settimeout(30.0)
+            sock.settimeout(self._connect_timeout)
             sock.connect((self.server_ip, self.server_port))
             with self._socket_lock:
                 self._socket = sock
+                self._recv_buffer = b""
             sock = None  # ownership transferred
 
             if not self._authenticate():
@@ -382,31 +388,89 @@ class SyncClient:
                 raise ConnectionError("Sync client socket is closed")
             self._socket.sendall(payload)
 
-    def _recv_message_unlocked(self, sock: socket.socket) -> Optional[tuple]:
-        buffer = b""
-        while len(buffer) < 5:
-            chunk = sock.recv(4096)
-            if not chunk:
-                return None
-            buffer += chunk
-        msg_len = int.from_bytes(buffer[:4], "big")
-        while len(buffer) < 5 + msg_len:
-            chunk = sock.recv(4096)
-            if not chunk:
-                return None
-            buffer += chunk
-        return decode_message(buffer[: 5 + msg_len])
+    def _pop_complete_message(self) -> Optional[tuple]:
+        """从 _recv_buffer 弹出一条完整消息；数据不足则返回 None。须持有 _socket_lock。"""
+        if len(self._recv_buffer) < 5:
+            return None
+        msg_len = int.from_bytes(self._recv_buffer[:4], "big")
+        if msg_len < 0 or msg_len > 64 * 1024 * 1024:
+            raise ConnectionError(f"Invalid sync message length: {msg_len}")
+        if len(self._recv_buffer) < 5 + msg_len:
+            return None
+        raw = self._recv_buffer[: 5 + msg_len]
+        self._recv_buffer = self._recv_buffer[5 + msg_len :]
+        return decode_message(raw)
 
-    def _request_response(self, payload: bytes) -> tuple:
-        """在已连接会话内发送请求并同步等待响应（连接阶段单线程使用）。"""
+    def _recv_message_unlocked(self, sock: socket.socket) -> Optional[tuple]:
+        """读满一条消息（保留粘包剩余字节）。须持有 _socket_lock。"""
+        while True:
+            msg = self._pop_complete_message()
+            if msg is not None:
+                return msg
+            chunk = sock.recv(65536)
+            if not chunk:
+                return None
+            self._recv_buffer += chunk
+
+    def _handle_side_message_during_request(self, msg_type, data: Dict[str, Any]) -> None:
+        """连接阶段等待响应时穿插到的 PUSH/心跳等，就地消化，避免帧错位。"""
+        if msg_type == SyncMessageType.PUSH_NOTIFY:
+            try:
+                self._apply_push(
+                    SyncTable(data.get("table", 0)),
+                    data.get("operation", ""),
+                    data.get("data", {}),
+                )
+            except Exception as e:
+                self._log("warning", f"Side PUSH during request ignored error: {e}")
+        elif msg_type == SyncMessageType.SETTINGS_PUSH:
+            self._apply_remote_settings(data.get("settings"))
+        elif msg_type in (
+            SyncMessageType.INSERT_RESPONSE,
+            SyncMessageType.UPDATE_RESPONSE,
+            SyncMessageType.DELETE_RESPONSE,
+            SyncMessageType.ERROR_RESPONSE,
+        ):
+            if "success" in data:
+                self._handle_data_ack(data)
+        elif msg_type == SyncMessageType.HEARTBEAT:
+            return
+        else:
+            self._log(
+                "warning",
+                f"Ignoring unexpected side message during request: {msg_type}",
+            )
+
+    def _request_response(
+        self,
+        payload: bytes,
+        *,
+        expect_types: Optional[Set[SyncMessageType]] = None,
+        timeout: Optional[float] = None,
+    ) -> tuple:
+        """发送请求并等待期望类型的响应；中途 PUSH/心跳不打断帧同步。"""
+        wait = self._connect_timeout if timeout is None else float(timeout)
+        deadline = time.time() + wait
         with self._socket_lock:
             if not self._socket:
                 raise ConnectionError("Sync client socket is closed")
             self._socket.sendall(payload)
-            result = self._recv_message_unlocked(self._socket)
-        if result is None:
-            raise ConnectionError("Sync server closed connection")
-        return result
+            while True:
+                remaining = deadline - time.time()
+                if remaining <= 0:
+                    raise TimeoutError("timed out")
+                self._socket.settimeout(max(0.05, remaining))
+                try:
+                    result = self._recv_message_unlocked(self._socket)
+                except socket.timeout:
+                    raise TimeoutError("timed out") from None
+                if result is None:
+                    raise ConnectionError("Sync server closed connection")
+                msg_type, data = result
+                if expect_types is None or msg_type in expect_types:
+                    return result
+                # 释放锁前不能调用可能再抢锁的 _send；侧路消息仅本地消化
+                self._handle_side_message_during_request(msg_type, data)
 
     def _authenticate(self) -> bool:
         payload = build_auth_request(
@@ -416,7 +480,11 @@ class SyncClient:
             sorted(self.enabled_tables),
             protocol_version=PROTOCOL_VERSION,
         )
-        msg_type, data = self._request_response(payload)
+        msg_type, data = self._request_response(
+            payload,
+            expect_types={SyncMessageType.AUTH_RESPONSE},
+            timeout=self._connect_timeout,
+        )
         if msg_type != SyncMessageType.AUTH_RESPONSE:
             self._log("error", f"Unexpected auth response type: {msg_type}")
             return False
@@ -440,19 +508,32 @@ class SyncClient:
             if table_enum is None:
                 continue
             try:
-                msg_type, data = self._request_response(build_full_sync_request(table_enum))
+                msg_type, data = self._request_response(
+                    build_full_sync_request(table_enum),
+                    expect_types={SyncMessageType.FULL_SYNC_RESPONSE},
+                    timeout=self._full_sync_timeout,
+                )
                 if msg_type != SyncMessageType.FULL_SYNC_RESPONSE:
-                    self._log("warning", f"Full sync {table_name}: unexpected response {msg_type}")
+                    self._log(
+                        "warning",
+                        f"Full sync {table_name}: unexpected response {msg_type}",
+                    )
                     continue
                 if not data.get("success"):
-                    self._log("warning", f"Full sync {table_name} failed: {data.get('error', '')}")
+                    self._log(
+                        "warning",
+                        f"Full sync {table_name} failed: {data.get('error', '')}",
+                    )
                     continue
                 rows = data.get("rows", [])
                 applied = 0
                 for row in rows:
                     if self._upsert_row(table_name, row):
                         applied += 1
-                self._log("info", f"Full sync {table_name}: {applied}/{len(rows)} rows applied")
+                self._log(
+                    "info",
+                    f"Full sync {table_name}: {applied}/{len(rows)} rows applied",
+                )
             except Exception as e:
                 self._log("error", f"Full sync {table_name} error: {e}")
 
@@ -550,7 +631,6 @@ class SyncClient:
         return heartbeat_ts
 
     def _listen_loop(self) -> None:
-        buffer = b""
         last_heartbeat = time.time()
         last_flush = time.time()
         while self._active:
@@ -570,22 +650,27 @@ class SyncClient:
                     self.flush_outbox()
                     last_flush = now
 
-                sock.settimeout(5.0)
-                chunk = sock.recv(4096)
-                if not chunk:
-                    break
-                buffer += chunk
-
-                while len(buffer) >= 5:
-                    msg_len = int.from_bytes(buffer[:4], "big")
-                    if len(buffer) < 5 + msg_len:
+                with self._socket_lock:
+                    if not self._socket:
                         break
-                    raw_msg = buffer[: 5 + msg_len]
-                    buffer = buffer[5 + msg_len :]
-                    msg_type, data = decode_message(raw_msg)
-                    last_heartbeat = self._dispatch_listen_message(
-                        msg_type, data, last_heartbeat
-                    )
+                    self._socket.settimeout(5.0)
+                    try:
+                        # 先消化缓冲里已有完整包；没有则再 recv
+                        msg = self._pop_complete_message()
+                        if msg is None:
+                            chunk = self._socket.recv(65536)
+                            if not chunk:
+                                break
+                            self._recv_buffer += chunk
+                            msg = self._pop_complete_message()
+                        while msg is not None:
+                            msg_type, data = msg
+                            last_heartbeat = self._dispatch_listen_message(
+                                msg_type, data, last_heartbeat
+                            )
+                            msg = self._pop_complete_message()
+                    except socket.timeout:
+                        pass
             except socket.timeout:
                 continue
             except Exception as e:

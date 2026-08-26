@@ -43,6 +43,8 @@ class ConnectedClient:
     server_id: str = ""
     server_name: str = ""
     authenticated: bool = False
+    # 全量同步完成前不接受 PUSH，避免与 request/response 粘包错位
+    accepts_push: bool = False
     last_heartbeat: float = field(default_factory=time.time)
     sync_tables: Set[str] = field(default_factory=set)
     protocol_version: int = 1
@@ -327,6 +329,8 @@ class SyncServer:
     def _handle_heartbeat(self, client: ConnectedClient):
         """处理心跳包"""
         client.last_heartbeat = time.time()
+        # 客户端进入 listen 循环后才会发心跳，此时全量同步已结束
+        client.accepts_push = True
         try:
             client.conn.sendall(build_heartbeat())
         except Exception:
@@ -513,22 +517,31 @@ class SyncServer:
             self._log("error", f"Batch sync error: {e}")
 
     def _handle_full_sync(self, client: ConnectedClient, data: Dict):
-        """处理全量同步请求"""
-        with self._full_sync_lock:
-            try:
-                table_enum = SyncTable(data.get('table', 0))
-                table_name = ENUM_TO_TABLE.get(table_enum)
-                
-                if table_name not in self._sync_tables:
-                    client.conn.sendall(build_full_sync_response(False, [], "Table not allowed"))
-                    return
-                
+        """处理全量同步请求。
+
+        只在读库时短暂加锁，发送响应不占锁，避免多从服互相堵到超时。
+        """
+        try:
+            table_enum = SyncTable(data.get('table', 0))
+            table_name = ENUM_TO_TABLE.get(table_enum)
+
+            if table_name not in self._sync_tables:
+                client.conn.sendall(build_full_sync_response(False, [], "Table not allowed"))
+                return
+
+            with self._full_sync_lock:
                 rows = select_all_sync_table(self.db, table_name)
-                client.conn.sendall(build_full_sync_response(True, rows))
-                self._log("info", f"Full sync for {table_name}: {len(rows)} rows to {client.server_name}")
-            except Exception as e:
+            client.conn.sendall(build_full_sync_response(True, rows))
+            self._log(
+                "info",
+                f"Full sync for {table_name}: {len(rows)} rows to {client.server_name}",
+            )
+        except Exception as e:
+            try:
                 client.conn.sendall(build_full_sync_response(False, [], str(e)))
-                self._log("error", f"Full sync error: {e}")
+            except Exception:
+                pass
+            self._log("error", f"Full sync error: {e}")
 
     def _handle_pull(self, client: ConnectedClient, data: Dict):
         """处理拉取请求"""
@@ -590,6 +603,8 @@ class SyncServer:
         with self._clients_lock:
             for client in self._clients:
                 if client is exclude:
+                    continue
+                if not client.accepts_push:
                     continue
                 if table_name and client.sync_tables and table_name not in client.sync_tables:
                     continue

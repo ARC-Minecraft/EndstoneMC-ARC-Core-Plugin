@@ -3,7 +3,7 @@
 # EndStone ARC Core Plugin / EndStone弧光核心
 
 [![Codacy Grade](https://app.codacy.com/project/badge/Grade/2f830615baf347258558dcc2a5ab85a1)](https://app.codacy.com/gh/DEVILENMO/EndstoneMC-ARC-Core-Plugin/dashboard?utm_source=gh&utm_medium=referral&utm_content=&utm_campaign=Badge_grade)
-[![Version](https://img.shields.io/badge/version-v0.9.17-blue)](https://github.com/ARC-Minecraft/EndstoneMC-ARC-Core-Plugin)
+[![Version](https://img.shields.io/badge/version-v0.9.18-blue)](https://github.com/ARC-Minecraft/EndstoneMC-ARC-Core-Plugin)
 [![Python](https://img.shields.io/badge/python-3.13+-blue?logo=python&logoColor=white)](https://www.python.org/)
 [![EndStone API](https://img.shields.io/badge/EndStone_API-0.7+-black)](https://github.com/EndstoneMC/endstone)
 [![License](https://img.shields.io/github/license/ARC-Minecraft/EndstoneMC-ARC-Core-Plugin)](LICENSE)
@@ -19,7 +19,7 @@ EndStone ARC Core 是一个功能完整的 EndStone (Minecraft 基岩版服务�
 
 - **作者**: DEVILENMO
 - **邮箱**: DEVILENMO@gmail.com
-- **版本**: 0.9.17
+- **版本**: 0.9.18
 - **API 版本**: 0.7+
 - **推荐 Python 版本**: 3.13
 
@@ -796,7 +796,13 @@ arc.api_sidebar_set_values(
 
 ## 📋 近期更新日志
 
-### v0.9.17（当前版本）
+### v0.9.18（当前版本）
+
+- ✅ **修复全量同步超时**：连接阶段 TCP 粘包缓冲保留半包；等待 `FULL_SYNC_RESPONSE` 时消化穿插的 PUSH/心跳，避免帧错位后 `title_definitions` 等表 `timed out`
+- ✅ **全量同步期间不推送**：从服首心跳前 `accepts_push=False`，避免认证后立刻广播打断 request/response
+- ✅ **全量读库锁缩短**：同步中心 `_full_sync_lock` 只包住 SELECT，不再在 `sendall` 期间堵住其他从服；单表等待超时提到 120s
+
+### v0.9.17
 
 - ✅ **修复共享库 DDL 路由**：`CREATE` / `ALTER` / `DROP` / `PRAGMA table_info` 按表走 `PLAYER_*_DATABASE_PATH`，不再误改子服本地库；避免「提示已加 is_op 列、写共享库仍缺列」刷屏
 - ✅ **同步落库容忍列差**：`insert` / `upsert` / `update` 自动忽略目标表不存在的列（如远端多出的 `is_op`、误带的 `money`），避免网络同步协议服刷 `no column named …`
