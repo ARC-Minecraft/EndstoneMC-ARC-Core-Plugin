@@ -3150,6 +3150,21 @@ class ARCCorePlugin(Plugin):
         self.conditional_titles.ensure_tables()
         self.sidebar_system.init_pref_table()
         self.activity_stats.ensure_tables()
+        self._drop_obsolete_core_tables()
+
+    def _drop_obsolete_core_tables(self) -> None:
+        """删除已迁出/废弃的核心库表（可重复执行）。"""
+        obsolete = (
+            # 旧成就解锁表：解锁标记已在成就插件 achievement.db
+            "player_achievement_unlocked",
+            # 一次性 UUID→XUID 迁移记录，代码不再读取
+            "migration_history",
+        )
+        for name in obsolete:
+            try:
+                self.database_manager.execute(f"DROP TABLE IF EXISTS {name}")
+            except Exception:
+                pass
 
     def _can_compute_conditional_titles(self) -> bool:
         """跨服从服不计算条件头衔；主服与单机计算。"""

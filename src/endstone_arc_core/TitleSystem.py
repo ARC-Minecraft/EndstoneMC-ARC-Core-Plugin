@@ -80,6 +80,11 @@ class TitleSystem:
             )
             self._migrate_title_identity_schema()
             self._seed_default_title_definitions()
+            # v0.7.1 起解锁时间只走 player_title_unlock_time；空壳兼容表直接删掉
+            try:
+                self.database_manager.execute("DROP TABLE IF EXISTS player_title_extra")
+            except Exception:
+                pass
             return True
         except Exception:
             return False

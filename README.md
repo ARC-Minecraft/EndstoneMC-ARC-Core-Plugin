@@ -3,7 +3,7 @@
 # EndStone ARC Core Plugin / EndStone弧光核心
 
 [![Codacy Grade](https://app.codacy.com/project/badge/Grade/2f830615baf347258558dcc2a5ab85a1)](https://app.codacy.com/gh/DEVILENMO/EndstoneMC-ARC-Core-Plugin/dashboard?utm_source=gh&utm_medium=referral&utm_content=&utm_campaign=Badge_grade)
-[![Version](https://img.shields.io/badge/version-v0.9.12-blue)](https://github.com/ARC-Minecraft/EndstoneMC-ARC-Core-Plugin)
+[![Version](https://img.shields.io/badge/version-v0.9.13-blue)](https://github.com/ARC-Minecraft/EndstoneMC-ARC-Core-Plugin)
 [![Python](https://img.shields.io/badge/python-3.13+-blue?logo=python&logoColor=white)](https://www.python.org/)
 [![EndStone API](https://img.shields.io/badge/EndStone_API-0.7+-black)](https://github.com/EndstoneMC/endstone)
 [![License](https://img.shields.io/github/license/ARC-Minecraft/EndstoneMC-ARC-Core-Plugin)](LICENSE)
@@ -19,7 +19,7 @@ EndStone ARC Core 是一个功能完整的 EndStone (Minecraft 基岩版服务�
 
 - **作者**: DEVILENMO
 - **邮箱**: DEVILENMO@gmail.com
-- **版本**: 0.9.12
+- **版本**: 0.9.13
 - **API 版本**: 0.7+
 - **推荐 Python 版本**: 3.13
 
@@ -120,7 +120,7 @@ EndStone ARC Core 是一个功能完整的 EndStone (Minecraft 基岩版服务�
 ### 📊 玩家活动统计（v0.9.11）
 - 表 **`player_activity_stats`**：`kill_total` / `kill:{entity_id}`（含 `minecraft:player`）、`break_total` / `break:{block_id}`、`place_total` / `place:{block_id}`
 - 生物击杀在 `ActorDeathEvent` 记账；玩家击杀在 `PlayerDeathEvent` 记账；方块破坏/放置仅在事件**未取消**时记账
-- 本服独立，不跨服同步；旧表 `player_achievement_stats` 中的 `kill_*` 键会一次性迁移
+- 本服独立，不跨服同步；启动时将旧表 `player_achievement_stats` 中的 `kill_*` / `block_break_*` / `block_place_*` 一次性迁入本表后 **DROP** 旧表（`ach_unlock:*` 由成就插件迁入本地库）
 - API：`api_get_player_stat` / `api_get_player_stats` / `api_get_player_kill_count` / `api_get_player_block_break_count` / `api_get_player_block_place_count`
 
 ### 📅 每日签到（v0.4.0 起，v0.4.2 / v0.6.0 增强）
@@ -218,7 +218,7 @@ EndStone ARC Core 是一个功能完整的 EndStone (Minecraft 基岩版服务�
 
 ### 🏷️ 头衔系统（v0.3.0，表结构 v0.7.1）
 - **聊天头衔展示** - 远古 QQ 风格：首行 `[头衔]玩家名(年.月.日-时:分)：`，下一行消息内容；`[头衔]玩家名` 加粗并按稀有度上色（MC 格式码 §l、§r、§f/§9/§d/§6/§c），「玩家」前缀可在语言文件中配置（如英文 `Player-`）
-- **数据（v0.7.1）** - 玩家解锁时间仅存 **`player_title_unlock_time`**（`xuid`、`title`、`unlocked_at`）；已移除仅作历史兼容的 **`player_title_extra`**。若旧库中仍有该表可手动 `DROP TABLE IF EXISTS player_title_extra;`
+- **数据（v0.7.1 / v0.9.13）** - 玩家解锁时间仅存 **`player_title_unlock_time`**（`xuid`、`title`、`unlocked_at`）；废弃表 **`player_title_extra`** 在启动时自动 DROP
 - **头衔属性** - 每个头衔支持：**稀有度**（普通/稀有/史诗/传奇/神话，对应白/蓝/紫/橙/红）、**头衔介绍**、**解锁时间**（解锁时记录，默认头衔在首次进服或首次获得时记录；已进服但尚未有默认头衔的玩家在下一次进服时补发并记录时间）、**解锁奖励**（金钱 + 物品列表「物品ID 数量」）
 - **默认头衔** - 配置 `DEFAULT_TITLE`（逗号分隔），**进服时**为每位玩家写入解锁记录（与成就无关）；默认稀有度为普通，介绍与奖励为空，OP 可在头衔属性管理中修改。
 - **OP 专属头衔** - 配置 `OP_TITLE`（单个），仅 OP 拥有；非 OP 进服时若正佩戴该头衔则自动解除
@@ -789,7 +789,11 @@ arc.api_sidebar_set_values(
 
 ## 📋 近期更新日志
 
-### v0.9.12（当前版本）
+### v0.9.13（当前版本）
+
+- ✅ **核心库过时表清理**：启动时将旧 `player_achievement_stats` 的击杀/破坏/放置键迁入 `player_activity_stats` 后删除旧表；同步 DROP `richest_title_state`、`player_title_extra`、`player_achievement_unlocked`、`migration_history`（数据已迁至条件头衔表 / 成就插件本地库）
+
+### v0.9.12
 
 - ✅ **群聊死亡播报对接修复**：正确查找 `arc_qq_sync_astrbot`（Endstone 将 entry-point `-` 转为 `_`）；原始文本优先 `api_send_raw`
 - ✅ **群聊死亡播报模式**：新增配置 `QQ_DEATH_BROADCAST_MODE`（`off` / `pvp` / `all`，默认 `all`），可在 OP 配置面板「通用」中调整

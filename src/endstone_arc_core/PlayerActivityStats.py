@@ -38,7 +38,8 @@ class PlayerActivityStats:
             )
             if ok is False:
                 return False
-            self._migrate_legacy_kill_stats()
+            if self._migrate_legacy_activity_stats():
+                self._drop_legacy_achievement_stats_table()
             return True
         except Exception as e:
             self._log("error", f"[ARC Core]PlayerActivityStats ensure_tables error: {e}")
@@ -69,17 +70,41 @@ class PlayerActivityStats:
         bid = PlayerActivityStats.normalize_block_id(block_id)
         return (not bid) or bid in ("air", "minecraft:air")
 
-    def _migrate_legacy_kill_stats(self) -> None:
-        """将旧成就表中的 kill_* 键拷贝到本表（不碰 ach_unlock:*）。"""
+    @staticmethod
+    def _map_legacy_stat_key(stat_key: str) -> Optional[str]:
+        """旧 player_achievement_stats 键 → 本表键；ach_unlock 等返回 None（由成就插件接管）。"""
+        key = str(stat_key or "").strip()
+        if not key:
+            return None
+        if key == "kill_total" or key.startswith("kill:"):
+            return key
+        if key == "block_break_total":
+            return "break_total"
+        if key.startswith("block_break:"):
+            bid = PlayerActivityStats.normalize_block_id(key.split(":", 1)[1])
+            return f"break:{bid}" if bid and not PlayerActivityStats._is_air_block(bid) else None
+        if key == "break_total" or key.startswith("break:"):
+            return key
+        if key == "block_place_total":
+            return "place_total"
+        if key.startswith("block_place:"):
+            bid = PlayerActivityStats.normalize_block_id(key.split(":", 1)[1])
+            return f"place:{bid}" if bid and not PlayerActivityStats._is_air_block(bid) else None
+        if key == "place_total" or key.startswith("place:"):
+            return key
+        return None
+
+    def _migrate_legacy_activity_stats(self) -> bool:
+        """将旧成就表中的 kill / break / place 键拷贝到本表。成功（含无旧表）返回 True。"""
         try:
             legacy = self.database_manager.query_all(
-                f"SELECT xuid, stat_key, count FROM {self.LEGACY_TABLE} "
-                "WHERE stat_key = 'kill_total' OR stat_key LIKE 'kill:%'"
+                f"SELECT xuid, stat_key, count FROM {self.LEGACY_TABLE}"
             )
         except Exception:
-            return
+            # 旧表不存在或不可读：视为无需再迁，允许 DROP IF EXISTS
+            return True
         if not legacy:
-            return
+            return True
         try:
             migrated = 0
             for row in legacy:
@@ -91,17 +116,32 @@ class PlayerActivityStats:
                     xuid = str(row[0] or "").strip()
                     key = str(row[1] or "").strip()
                     count = int(row[2] or 0)
-                if not xuid or not key or count <= 0:
+                mapped = self._map_legacy_stat_key(key)
+                if not xuid or not mapped or count <= 0:
                     continue
-                existing = self.get_stat(xuid, key)
+                existing = self.get_stat(xuid, mapped)
                 if existing >= count:
                     continue
-                self._set_stat(xuid, key, count)
+                self._set_stat(xuid, mapped, count)
                 migrated += 1
             if migrated:
-                self._log("info", f"[ARC Core]Migrated {migrated} kill stat rows from {self.LEGACY_TABLE}")
+                self._log(
+                    "info",
+                    f"[ARC Core]Migrated {migrated} activity stat rows from {self.LEGACY_TABLE}",
+                )
+            return True
         except Exception as e:
-            self._log("warning", f"[ARC Core]Legacy kill stat migrate skipped: {e}")
+            self._log("warning", f"[ARC Core]Legacy activity stat migrate skipped: {e}")
+            return False
+
+    def _drop_legacy_achievement_stats_table(self) -> None:
+        """活动键已迁入本表、成就解锁已由成就插件接管后，删除旧表。"""
+        try:
+            self.database_manager.execute(f"DROP TABLE IF EXISTS {self.LEGACY_TABLE}")
+            self._log("info", f"[ARC Core]Dropped obsolete table {self.LEGACY_TABLE}")
+        except Exception as e:
+            self._log("warning", f"[ARC Core]Drop {self.LEGACY_TABLE} skipped: {e}")
+
     def get_stat(self, xuid: str, stat_key: str) -> int:
         xuid = str(xuid or "").strip()
         stat_key = str(stat_key or "").strip()

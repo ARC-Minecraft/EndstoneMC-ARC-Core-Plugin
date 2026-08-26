@@ -55,7 +55,7 @@ class ConditionalTitleManager:
             pass
 
     def _migrate_richest_state_if_needed(self) -> None:
-        """将旧 richest_title_state 迁入 conditional_title_state。"""
+        """将旧 richest_title_state 迁入 conditional_title_state，随后删除旧表。"""
         try:
             exists = self.db.query_one(
                 "SELECT name FROM sqlite_master WHERE type='table' AND name='richest_title_state'"
@@ -70,6 +70,7 @@ class ConditionalTitleManager:
                 "INSERT OR IGNORE INTO conditional_title_state (id, holder_xuid) VALUES ('richest', ?)",
                 (v,),
             )
+            self.db.execute("DROP TABLE IF EXISTS richest_title_state")
         except Exception:
             pass
 
