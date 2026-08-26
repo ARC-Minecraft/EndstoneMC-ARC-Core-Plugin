@@ -48,6 +48,7 @@ from endstone_arc_core.sync_server import SyncServer
 from endstone_arc_core.sync_client import SyncClient
 from endstone_arc_core.sync_config import ALL_SHARED_SETTING_KEYS, resolve_sync_consumer_mode
 from endstone_arc_core.SidebarSystem import SidebarSystem
+from endstone_arc_core import bedrock_glyphs
 
 MAIN_PATH = 'plugins/ARCCore'
 # 天眼系统：独立 SQLite + 兼容清理旧按日 txt
@@ -4973,8 +4974,14 @@ class ARCCorePlugin(Plugin):
         return self.economy.get_player_money_by_xuid(str(player.xuid))
 
     def _toast_title(self, key: str, fallback: str) -> str:
+        """取 toast 标题；若语言文案未含对应基岩字形，则自动补到最前面。"""
         text = self.language_manager.GetText(key)
-        return text if text and str(text).strip() else fallback
+        title = text if text and str(text).strip() else fallback
+        title = str(title or "").strip()
+        icon = bedrock_glyphs.TOAST_TITLE_ICONS.get(key) or ""
+        if icon and icon not in title:
+            title = f"{icon} {title}".strip()
+        return title
 
     def _strip_arc_message_prefix(self, message: str) -> str:
         s = str(message or "").strip()
@@ -5021,10 +5028,9 @@ class ARCCorePlugin(Plugin):
         if not isinstance(sender, Player):
             sender.send_message("[ARC Core]This command only works for players.")
             return True
-        usage = self._toast_title(
-            "TPA_COMMAND_USAGE",
-            "[弧光核心]用法：/tpa accept 或 /tpa deny（响应最近一条传送请求）",
-        )
+        usage = self.language_manager.GetText("TPA_COMMAND_USAGE")
+        if not (usage and str(usage).strip()):
+            usage = "[弧光核心]用法：/tpa accept 或 /tpa deny（响应最近一条传送请求）"
         if not args:
             sender.send_message(usage)
             return True
