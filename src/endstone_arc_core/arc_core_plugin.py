@@ -17208,25 +17208,20 @@ class ARCCorePlugin(Plugin):
         return "\n".join(lines)
 
     def run_sync_reconcile(self) -> dict:
-        """OP：触发头衔等同步表双向对账 / 文件模式残留合并。"""
+        """OP / 连接：触发已启用同步表全面对账（远程重连自动拉+推；文件模式合并残留）。"""
         mode = getattr(self, "_sync_consumer_mode", "none")
-        title_tables = {
-            "title_definitions",
-            "player_title_unlock_time",
-            "player_title_equipped",
-        }
         if mode == "client" and self.sync_client is not None:
             if not getattr(self.sync_client, "is_active", lambda: False)():
                 return {
                     "mode": "client",
                     "detail": "同步客户端未启动",
                 }
-            result = self.sync_client.reconcile_tables(title_tables)
+            result = self.sync_client.reconcile_tables()
             return {
                 "mode": "client",
                 "detail": (
-                    f"已请求对账 {result.get('requested_tables', 0)} 张表，"
-                    f"当前 outbox={result.get('outbox_pending', 0)}（后台重连后执行）"
+                    f"已发起全面对账（{result.get('requested_tables', 0)} 张表），"
+                    f"重连后自动拉全量并上行；当前 outbox={result.get('outbox_pending', 0)}"
                 ),
             }
         if mode == "file":

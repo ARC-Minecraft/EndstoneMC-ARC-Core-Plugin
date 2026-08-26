@@ -55,13 +55,53 @@ class OpSettingsUi:
         for group in SETTING_GROUPS:
             gid = str(group["id"])
             title = str(group["title"])
-            panel.add_button(
-                title,
-                on_click=lambda p, g=gid: self.show_group(p, g),
-            )
+            if gid == "sync":
+                panel.add_button(
+                    title,
+                    on_click=self.open_sync_and_reconcile,
+                )
+            else:
+                panel.add_button(
+                    title,
+                    on_click=lambda p, g=gid: self.show_group(p, g),
+                )
         panel.add_button(
             self._text("RETURN_BUTTON_TEXT"),
             on_click=self.plugin.show_op_main_panel,
+        )
+        player.send_form(panel)
+
+    def open_sync_and_reconcile(self, player: Player) -> None:
+        """点「跨服同步」：立即发起全面对账，并打开同步状态/配置页。"""
+        try:
+            result = self.plugin.run_sync_reconcile()
+            player.send_message(
+                self._text("OP_SYNC_RECONCILE_OK").format(
+                    result.get("mode", "?"),
+                    result.get("detail", ""),
+                )
+            )
+        except Exception as e:
+            player.send_message(
+                self._text("OP_SYNC_RECONCILE_FAIL").format(str(e))
+            )
+        self.show_sync_hub(player)
+
+    def show_sync_hub(self, player: Player) -> None:
+        """同步页：顶部状态 + 进入配置项。"""
+        content = self.plugin.get_sync_status_text()
+        panel = ActionForm(
+            title=self._text("OP_SYNC_STATUS_TITLE"),
+            content=content,
+            on_close=None,
+        )
+        panel.add_button(
+            self._text("OP_SYNC_OPEN_SETTINGS"),
+            on_click=lambda p: self.show_group(p, "sync", 0),
+        )
+        panel.add_button(
+            self._text("RETURN_BUTTON_TEXT"),
+            on_click=self.show_groups,
         )
         player.send_form(panel)
 
@@ -82,15 +122,6 @@ class OpSettingsUi:
             ),
             on_close=None,
         )
-        if group_id == "sync" and page == 0:
-            panel.add_button(
-                self._text("OP_SYNC_STATUS_BUTTON"),
-                on_click=self.show_sync_status,
-            )
-            panel.add_button(
-                self._text("OP_SYNC_RECONCILE_BUTTON"),
-                on_click=self.confirm_sync_reconcile,
-            )
         for spec in chunk:
             key = str(spec["key"])
             title = str(spec["title"])
@@ -117,61 +148,17 @@ class OpSettingsUi:
                 self._text("OP_CORE_SETTINGS_NEXT"),
                 on_click=lambda p, g=group_id, pg=page: self.show_group(p, g, pg + 1),
             )
-        panel.add_button(
-            self._text("RETURN_BUTTON_TEXT"),
-            on_click=self.show_groups,
-        )
-        player.send_form(panel)
-
-    def show_sync_status(self, player: Player) -> None:
-        """展示跨服同步运行状态。"""
-        content = self.plugin.get_sync_status_text()
-        panel = ActionForm(
-            title=self._text("OP_SYNC_STATUS_TITLE"),
-            content=content,
-            on_close=None,
-        )
-        panel.add_button(
-            self._text("OP_SYNC_RECONCILE_BUTTON"),
-            on_click=self.confirm_sync_reconcile,
-        )
-        panel.add_button(
-            self._text("RETURN_BUTTON_TEXT"),
-            on_click=lambda p: self.show_group(p, "sync", 0),
-        )
-        player.send_form(panel)
-
-    def confirm_sync_reconcile(self, player: Player) -> None:
-        panel = ActionForm(
-            title=self._text("OP_SYNC_RECONCILE_TITLE"),
-            content=self._text("OP_SYNC_RECONCILE_CONFIRM"),
-            on_close=None,
-        )
-        panel.add_button(
-            self._text("OP_SYNC_RECONCILE_RUN"),
-            on_click=self.run_sync_reconcile,
-        )
-        panel.add_button(
-            self._text("RETURN_BUTTON_TEXT"),
-            on_click=self.show_sync_status,
-        )
-        player.send_form(panel)
-
-    def run_sync_reconcile(self, player: Player) -> None:
-        try:
-            result = self.plugin.run_sync_reconcile()
-        except Exception as e:
-            player.send_message(
-                self._text("OP_SYNC_RECONCILE_FAIL").format(str(e))
+        if group_id == "sync":
+            panel.add_button(
+                self._text("RETURN_BUTTON_TEXT"),
+                on_click=self.show_sync_hub,
             )
-            return self.show_sync_status(player)
-        player.send_message(
-            self._text("OP_SYNC_RECONCILE_OK").format(
-                result.get("mode", "?"),
-                result.get("detail", ""),
+        else:
+            panel.add_button(
+                self._text("RETURN_BUTTON_TEXT"),
+                on_click=self.show_groups,
             )
-        )
-        self.show_sync_status(player)
+        player.send_form(panel)
 
     def open_setting(self, player: Player, group_id: str, key: str, page: int = 0) -> None:
         spec = get_spec(group_id, key)

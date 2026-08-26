@@ -62,7 +62,6 @@ class SyncClient:
         self._server_protocol_version = 1
         self._last_error = ""
         self._flushing = False
-        self._reconcile_on_connect: Optional[Set[str]] = None
 
         try:
             sync_outbox.ensure_outbox_table(self.db)
@@ -341,15 +340,14 @@ class SyncClient:
                 self._log("error", "Authentication failed")
                 return False
 
-            # 先拉全量（中心→本地），再 flush 本地 outbox，避免旧中心行覆盖新本地行后丢失上行。
+            # 先拉全量（中心→本地），再把本地已启用表整表入 outbox 上行（全面对账），最后 flush。
             self._perform_full_sync()
-            if self._reconcile_on_connect:
-                tables = set(self._reconcile_on_connect)
-                self._reconcile_on_connect = None
-                queued = self._enqueue_local_tables_for_reconcile(tables)
+            queued = self._enqueue_local_tables_for_reconcile(set(self.enabled_tables))
+            if queued:
                 self._log(
                     "info",
-                    f"Reconcile: enqueued {queued} local row(s) from {len(tables)} table(s)",
+                    f"Auto-reconcile: enqueued {queued} local row(s) "
+                    f"from {len(self.enabled_tables)} table(s)",
                 )
             flushed = self.flush_outbox()
             if flushed:
@@ -459,22 +457,22 @@ class SyncClient:
                 self._log("error", f"Full sync {table_name} error: {e}")
 
     def reconcile_tables(self, tables: Optional[Set[str]] = None) -> Dict[str, int]:
-        """请求双向对账：强制重连 → 先拉全量 → 再把本地行入 outbox 并 flush。
+        """手动触发全面对账：断线重连后自动「拉全量 + 本地全表上行」。
 
-        立即返回当前 outbox 待发估算；实际对账在后台连接线程完成。
+        tables 参数保留兼容，实际始终对账全部已启用同步表。
         """
-        target = set(tables) if tables is not None else set(self.enabled_tables)
-        target &= self.enabled_tables
-        self._reconcile_on_connect = target
-        # 打断当前会话以尽快重连执行对账
-        if self._active:
-            self._close_socket()
+        _ = tables
         pending = 0
         try:
             pending = sync_outbox.count_pending(self.db)
         except Exception:
             pending = 0
-        return {"requested_tables": len(target), "outbox_pending": pending}
+        if self._active:
+            self._close_socket()
+        return {
+            "requested_tables": len(self.enabled_tables),
+            "outbox_pending": pending,
+        }
 
     def _enqueue_local_tables_for_reconcile(self, tables: Set[str]) -> int:
         from endstone_arc_core.sync_write import select_all_sync_table

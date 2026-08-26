@@ -3,7 +3,7 @@
 # EndStone ARC Core Plugin / EndStone弧光核心
 
 [![Codacy Grade](https://app.codacy.com/project/badge/Grade/2f830615baf347258558dcc2a5ab85a1)](https://app.codacy.com/gh/DEVILENMO/EndstoneMC-ARC-Core-Plugin/dashboard?utm_source=gh&utm_medium=referral&utm_content=&utm_campaign=Badge_grade)
-[![Version](https://img.shields.io/badge/version-v0.9.14-blue)](https://github.com/ARC-Minecraft/EndstoneMC-ARC-Core-Plugin)
+[![Version](https://img.shields.io/badge/version-v0.9.16-blue)](https://github.com/ARC-Minecraft/EndstoneMC-ARC-Core-Plugin)
 [![Python](https://img.shields.io/badge/python-3.13+-blue?logo=python&logoColor=white)](https://www.python.org/)
 [![EndStone API](https://img.shields.io/badge/EndStone_API-0.7+-black)](https://github.com/EndstoneMC/endstone)
 [![License](https://img.shields.io/github/license/ARC-Minecraft/EndstoneMC-ARC-Core-Plugin)](LICENSE)
@@ -19,7 +19,7 @@ EndStone ARC Core 是一个功能完整的 EndStone (Minecraft 基岩版服务�
 
 - **作者**: DEVILENMO
 - **邮箱**: DEVILENMO@gmail.com
-- **版本**: 0.9.14
+- **版本**: 0.9.16
 - **API 版本**: 0.7+
 - **推荐 Python 版本**: 3.13
 
@@ -265,7 +265,7 @@ EndStone ARC Core 是一个功能完整的 EndStone (Minecraft 基岩版服务�
 - **模块**：`sync_protocol.py`、`sync_server.py`、`sync_client.py`、`sync_config.py`、`sync_outbox.py`
 - **可同步数据表**：跨服玩家账号信息（`player_basic_info`，含 **`is_op` 镜像列**）、经济（`player_economy`）、头衔（`title_definitions` / `player_title_unlock_time` / `player_title_equipped`）、公会（`guilds` / `guild_members` / `guild_invites`）
 - **本服本地表（不同步）**：**`player_local_info`** — 本服 `is_op`、剩余免费领地格、**签到**（每服独立）。始终写在本服 **`DATABASE_PATH`**，即使配置了 `PLAYER_DATABASE_PATH` 也不会进共享库；跨服排行用的 OP 排除读 **`player_basic_info.is_op`**
-- **OP 面板**：核心设置 → 跨服同步 → **同步运行状态** / **立即对账（头衔）**
+- **OP 面板**：点「跨服同步」即发起全面对账并显示运行状态；每次连上同步中心也会自动拉全量并上行本地已启用表
 - **QQ 群消息**：跨服 QQ 互通由 **AstrBot 弧光 EndStone 消息中枢** + **endstone-arc-qq-sync-astrbot** 负责；ARCCore **不再**经 SyncServer 做 QQ 事件中继。死亡播报调用本机 QQ Sync 的 `api_send_event("death", …)`；成就等可用 `custom`
 - **群聊死亡播报模式（v0.9.12）**：`QQ_DEATH_BROADCAST_MODE` = `off`（不播报）/ `pvp`（仅 PvP）/ `all`（全部，默认）；仅影响群聊，游戏内死亡播报仍始终发送
 - **启动迁移**：签到迁入本服表；时长 / 进服次数保留在跨服 `player_basic_info`
@@ -796,7 +796,12 @@ arc.api_sidebar_set_values(
 
 ## 📋 近期更新日志
 
-### v0.9.15（当前版本）
+### v0.9.16（当前版本）
+
+- ✅ **连接即全面对账**：远程客户端每次连上同步中心，在全量拉取后自动把本地已启用同步表整表上行
+- ✅ **OP 一键对账**：配置面板点「跨服同步」即发起全面对账并显示状态，去掉多余确认步骤
+
+### v0.9.15
 
 - ✅ **猎手榜插件适配**：检测到 `arc_hunter` 时在主菜单显示「猎手榜」入口，委托 `/hunter` 打开玩家个人榜单 Form
 
