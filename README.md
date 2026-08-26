@@ -3,7 +3,7 @@
 # EndStone ARC Core Plugin / EndStone弧光核心
 
 [![Codacy Grade](https://app.codacy.com/project/badge/Grade/2f830615baf347258558dcc2a5ab85a1)](https://app.codacy.com/gh/DEVILENMO/EndstoneMC-ARC-Core-Plugin/dashboard?utm_source=gh&utm_medium=referral&utm_content=&utm_campaign=Badge_grade)
-[![Version](https://img.shields.io/badge/version-v0.9.19-blue)](https://github.com/ARC-Minecraft/EndstoneMC-ARC-Core-Plugin)
+[![Version](https://img.shields.io/badge/version-v0.9.20-blue)](https://github.com/ARC-Minecraft/EndstoneMC-ARC-Core-Plugin)
 [![Python](https://img.shields.io/badge/python-3.13+-blue?logo=python&logoColor=white)](https://www.python.org/)
 [![EndStone API](https://img.shields.io/badge/EndStone_API-0.7+-black)](https://github.com/EndstoneMC/endstone)
 [![License](https://img.shields.io/github/license/ARC-Minecraft/EndstoneMC-ARC-Core-Plugin)](LICENSE)
@@ -19,7 +19,7 @@ EndStone ARC Core 是一个功能完整的 EndStone (Minecraft 基岩版服务�
 
 - **作者**: DEVILENMO
 - **邮箱**: DEVILENMO@gmail.com
-- **版本**: 0.9.19
+- **版本**: 0.9.20
 - **API 版本**: 0.7+
 - **推荐 Python 版本**: 3.13
 
@@ -74,7 +74,7 @@ EndStone ARC Core 是一个功能完整的 EndStone (Minecraft 基岩版服务�
 - **财富榜首富头衔（v0.4.0 / v0.8.22）** - 配置 `RICHEST_TITLE_NAME`（默认「首富」）、传奇稀有度；金钱变动后自动刷新财富榜第一；若首富易主则撤销旧头衔并授予新首富；同分按 xuid 稳定排序；跨服仅主服计算、从服只消费同步头衔；可在 **OP 面板 → 经济管理 → 经济参数配置** 中修改
 
 ### 📊 侧边栏总控（v0.9.0）
-- **原生计分板 SIDE_BAR**：每玩家独立 `Scoreboard`，双缓冲刷新减少闪烁
+- **原生计分板 SIDE_BAR**：每玩家独立 `Scoreboard`，复用稳定 objective 原地刷新（避免频繁销毁重建导致客户端闪退）
 - **多页面 + 定时翻页**：可见页 ≥ 2 时默认每 **10 秒**自动切换；可用 `/sidebar lock` 锁定
 - **核心主页面 `arc_core_main`**：现实时间、金钱、生命、饱食度、**TPS**、在线人数、**玩家延迟**等（模板可配）
 - **其它插件注册页面**：`api_sidebar_register_page` + 行模板 `{key}`，数值变更用 `api_sidebar_set_value(s)` 推送
@@ -796,7 +796,11 @@ arc.api_sidebar_set_values(
 
 ## 📋 近期更新日志
 
-### v0.9.19（当前版本）
+### v0.9.20（当前版本）
+
+- ✅ **修复侧边栏导致客户端闪退**：不再每秒双缓冲销毁/重建 objective；改为复用稳定 `arc_sb` 并原地更新/清理行；假名截断至 40 字符；延迟显示量化为 10ms 档，降低发包频率
+
+### v0.9.19
 
 - ✅ **跨服排行改用 `once_op`**：`player_basic_info` 去掉镜像 `is_op`，改为粘性 `once_op`——任意服以 OP 登录过即置 1、卸任不回落；首富/金钱榜排除读此列。本服权限仍只看 `player_local_info.is_op`
 - ✅ **启动迁移**：旧 `basic.is_op=1` 与本服 `local.is_op=1` 自动写入 `once_op`，并重建表去掉旧列

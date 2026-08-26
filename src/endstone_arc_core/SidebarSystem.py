@@ -48,17 +48,36 @@ def _setting_int(raw: Any, default: int) -> int:
         return default
 
 
+# 个人计分板上的稳定 objective 名（短于 Bedrock 16 字符上限）
+_STABLE_OBJECTIVE = "arc_sb"
+# 侧边栏假名过长会踢客户端（历史包长上限约 40）
+_MAX_ENTRY_LEN = 40
+
+
+def _sanitize_entry_name(text: str) -> str:
+    """去掉换行并截断，避免超长假名导致基岩端解码崩溃/踢线。"""
+    s = str(text or "").replace("\r", " ").replace("\n", " ").strip()
+    if not s:
+        s = " "
+    if len(s) > _MAX_ENTRY_LEN:
+        s = s[:_MAX_ENTRY_LEN]
+    return s
+
+
 def _unique_entry_name(text: str, used: Set[str]) -> str:
     """同一 objective 内 entry 名必须唯一；重复行追加不可见 §r。"""
-    base = text if text else " "
+    base = _sanitize_entry_name(text)
     name = base
     n = 0
     while name in used:
         n += 1
-        name = base + ("§r" * n)
-        if len(name) > 40:
-            # Bedrock 行名过长会截断；截断后再追加
-            name = (base[: 40 - n] if 40 > n else base[:1]) + ("§r" * n)
+        suffix = "§r" * n
+        keep = _MAX_ENTRY_LEN - len(suffix)
+        if keep < 1:
+            name = suffix[-_MAX_ENTRY_LEN :]
+        else:
+            name = base[:keep] + suffix
+        name = _sanitize_entry_name(name)
     used.add(name)
     return name
 
@@ -83,7 +102,8 @@ class PlayerSidebarState:
     page_visible: Dict[str, bool] = field(default_factory=dict)
     scoreboard: Any = None
     current_objective_name: str = ""
-    obj_seq: int = 0
+    display_title: str = ""
+    last_entries: Set[str] = field(default_factory=set)
     last_render_sig: str = ""
 
 
@@ -698,14 +718,16 @@ class SidebarSystem:
                     sb.clear_slot(DisplaySlot.SIDE_BAR)
                 except Exception:
                     pass
-                if st.current_objective_name:
-                    try:
-                        obj = sb.get_objective(st.current_objective_name)
-                        if obj is not None:
-                            obj.unregister()
-                    except Exception:
-                        pass
+                obj_name = st.current_objective_name or _STABLE_OBJECTIVE
+                try:
+                    obj = sb.get_objective(obj_name)
+                    if obj is not None:
+                        obj.unregister()
+                except Exception:
+                    pass
             st.current_objective_name = ""
+            st.display_title = ""
+            st.last_entries = set()
             st.last_render_sig = ""
             # 恢复默认计分板
             try:
@@ -717,6 +739,71 @@ class SidebarSystem:
             st.scoreboard = None
         except Exception as e:
             self._log_error(f"clear_sidebar: {e}")
+
+    def _dummy_criteria(self):
+        criteria = getattr(Criteria, "DUMMY", None)
+        if criteria is None:
+            criteria = Criteria.Type.DUMMY  # type: ignore[attr-defined]
+        return criteria
+
+    def _reset_score_entry(self, sb: Any, obj: Any, entry: str) -> bool:
+        """尽量从 objective 上移除一行；失败返回 False。"""
+        try:
+            sc = obj.get_score(entry)
+            reset = getattr(sc, "reset", None)
+            if callable(reset):
+                reset()
+                return True
+        except Exception:
+            pass
+        try:
+            rs = getattr(sb, "reset_scores", None)
+            if callable(rs):
+                rs(entry)
+                return True
+        except Exception:
+            pass
+        return False
+
+    def _get_or_create_objective(
+        self, sb: Any, st: PlayerSidebarState, display_title: str
+    ) -> Any:
+        """复用稳定 objective；仅标题变化时重建（避免每秒销毁重建打崩客户端）。"""
+        title = _sanitize_entry_name(display_title)[:32] or " "
+        obj_name = _STABLE_OBJECTIVE
+        need_new = (
+            not st.current_objective_name
+            or st.current_objective_name != obj_name
+            or st.display_title != title
+        )
+        if not need_new:
+            try:
+                obj = sb.get_objective(obj_name)
+                if obj is not None:
+                    return obj
+            except Exception:
+                pass
+            need_new = True
+
+        if need_new:
+            try:
+                old = sb.get_objective(obj_name)
+                if old is not None:
+                    old.unregister()
+            except Exception:
+                pass
+            if st.current_objective_name and st.current_objective_name != obj_name:
+                try:
+                    old2 = sb.get_objective(st.current_objective_name)
+                    if old2 is not None:
+                        old2.unregister()
+                except Exception:
+                    pass
+            obj = sb.add_objective(obj_name, self._dummy_criteria(), title)
+            st.current_objective_name = obj_name
+            st.display_title = title
+            st.last_entries = set()
+            return obj
 
     def _render_to_player(
         self,
@@ -739,43 +826,42 @@ class SidebarSystem:
         if sb is None:
             return
 
-        st.obj_seq = (st.obj_seq + 1) % 10000
-        new_name = f"arc_sb_{st.obj_seq}"
-        old_name = st.current_objective_name
+        used: Set[str] = set()
+        entries: List[str] = []
+        for line in rendered[: self.max_lines]:
+            entries.append(_unique_entry_name(line, used))
+        if not entries:
+            entries = [" "]
 
         try:
-            # 清理同名残留
-            try:
-                existing = sb.get_objective(new_name)
-                if existing is not None:
-                    existing.unregister()
-            except Exception:
-                pass
+            obj = self._get_or_create_objective(sb, st, display_title)
+            if obj is None:
+                return
 
-            criteria = getattr(Criteria, "DUMMY", None)
-            if criteria is None:
-                criteria = Criteria.Type.DUMMY  # type: ignore[attr-defined]
-            obj = sb.add_objective(new_name, criteria, display_title)
+            new_set = set(entries)
+            # 先清掉不再使用的旧行，再写入/更新当前行（原地刷新，不双缓冲拆 objective）
+            for old_entry in list(st.last_entries - new_set):
+                if not self._reset_score_entry(sb, obj, old_entry):
+                    # 无法逐条删除时重建一次 objective
+                    st.display_title = ""
+                    obj = self._get_or_create_objective(sb, st, display_title)
+                    if obj is None:
+                        return
+                    st.last_entries = set()
+                    break
 
-            used: Set[str] = set()
-            # DESCENDING：分值大的在上，第 1 行给最大分
-            score_base = max(len(rendered), 1)
-            for i, line in enumerate(rendered[: self.max_lines]):
-                entry = _unique_entry_name(line, used)
+            score_base = max(len(entries), 1)
+            for i, entry in enumerate(entries):
                 sc = obj.get_score(entry)
                 sc.value = score_base - i
 
-            obj.set_display(DisplaySlot.SIDE_BAR, ObjectiveSortOrder.DESCENDING)
-            st.current_objective_name = new_name
-            st.last_render_sig = sig
+            try:
+                obj.set_display(DisplaySlot.SIDE_BAR, ObjectiveSortOrder.DESCENDING)
+            except Exception:
+                pass
 
-            if old_name and old_name != new_name:
-                try:
-                    old = sb.get_objective(old_name)
-                    if old is not None:
-                        old.unregister()
-                except Exception:
-                    pass
+            st.last_entries = new_set
+            st.last_render_sig = sig
         except Exception as e:
             self._log_error(f"render_to_player: {e}")
 
@@ -905,7 +991,9 @@ class SidebarSystem:
 
         ping = None
         try:
-            ping = int(getattr(player, "ping", None))
+            raw_ping = int(getattr(player, "ping", None))
+            # 量化延迟，减少侧边栏假名每秒变化带来的清行/发包
+            ping = max(0, (raw_ping // 10) * 10)
         except Exception:
             ping = None
 
