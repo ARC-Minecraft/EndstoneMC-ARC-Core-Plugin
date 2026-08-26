@@ -963,6 +963,8 @@ class ARCCorePlugin(Plugin):
         return self._resolve_player_from_sender_name(str(getattr(sender, "name", "") or ""))
 
     def _run_land_pos1_for_player(self, player: Player) -> None:
+        if not self._ensure_land_claim_allowed(player):
+            return
         self.require_sensitive_password_verified(
             player,
             self._run_land_pos1_for_player_verified,
@@ -985,6 +987,8 @@ class ARCCorePlugin(Plugin):
         )
 
     def _run_land_pos2_for_player(self, player: Player) -> None:
+        if not self._ensure_land_claim_allowed(player):
+            return
         self.require_sensitive_password_verified(
             player,
             self._run_land_pos2_for_player_verified,
@@ -1017,6 +1021,8 @@ class ARCCorePlugin(Plugin):
         self.show_pending_land_purchase_panel(player)
 
     def _run_land_buy_for_player(self, player: Player) -> None:
+        if not self._ensure_land_claim_allowed(player):
+            return
         self.require_sensitive_password_verified(
             player,
             self._run_land_buy_for_player_verified,
@@ -2230,6 +2236,22 @@ class ARCCorePlugin(Plugin):
             return str(raw).strip().lower() in ("true", "1", "yes")
         except (ValueError, AttributeError):
             return default
+
+    def _is_land_claim_allowed(self) -> bool:
+        """本服是否允许圈地（新建领地）；配置 ALLOW_LAND_CLAIM，默认 True，不跨服同步。"""
+        return self._sky_eye_setting_bool("ALLOW_LAND_CLAIM", True)
+
+    def _notify_land_claim_disabled(self, player: Player) -> None:
+        msg = self.language_manager.GetText("LAND_CLAIM_DISABLED")
+        if not msg or not str(msg).strip():
+            msg = "[弧光核心]本服已关闭圈地功能，无法创建新领地。"
+        player.send_message(msg)
+
+    def _ensure_land_claim_allowed(self, player: Player) -> bool:
+        if self._is_land_claim_allowed():
+            return True
+        self._notify_land_claim_disabled(player)
+        return False
 
     def _sky_eye_retention_days(self) -> int:
         raw = self.setting_manager.GetSetting("SKY_EYE_MAX_RETENTION_DAYS")
@@ -9955,8 +9977,9 @@ class ARCCorePlugin(Plugin):
         )
         land_main_menu.add_button(self.language_manager.GetText('LAND_MAIN_MENU_MANAGE_LAND_TEXT'),
                                   on_click=self.show_own_land_menu)
-        land_main_menu.add_button(self.language_manager.GetText('LAND_MAIN_MENU_CREATE_NEW_LAND_TEXT'),
-                                  on_click=self.start_interactive_land_creation)
+        if self._is_land_claim_allowed():
+            land_main_menu.add_button(self.language_manager.GetText('LAND_MAIN_MENU_CREATE_NEW_LAND_TEXT'),
+                                      on_click=self.start_interactive_land_creation)
         land_main_menu.add_button(self.language_manager.GetText('LAND_MAIN_MENU_CHECK_CURRENT_LAND_TEXT'),
                                   on_click=self.show_current_land_info)
         # 返回
@@ -10984,6 +11007,9 @@ class ARCCorePlugin(Plugin):
     def show_create_new_land_guide(self, player: Player):
         """显示创建领地的坐标输入表单，可预填上次设定的值"""
         cached = self.player_new_land_creation_info.get(player.name, {})
+        # 调整已有领地范围不受「允许圈地」限制；仅新建圈地需检查
+        if cached.get("resize_land_id") is None and not self._ensure_land_claim_allowed(player):
+            return
         dim_raw = (
             cached.get("dimension", get_dimension_id(player.location.dimension))
             if cached.get("resize_land_id") is not None
@@ -11258,6 +11284,8 @@ class ARCCorePlugin(Plugin):
 
     def start_interactive_land_creation(self, player: Player):
         """创建领地：先在世界中交互 4 个选点，再进入购买确认面板。"""
+        if not self._ensure_land_claim_allowed(player):
+            return
         self.require_sensitive_password_verified(
             player,
             self._start_interactive_land_creation_impl,
@@ -11281,6 +11309,12 @@ class ARCCorePlugin(Plugin):
         state = self.player_land_creation_pick.get(name)
         if not state:
             return False
+        # 新建圈地选点受 ALLOW_LAND_CLAIM 限制；调整已有领地范围不受影响
+        if state.get("resize_land_id") is None and not self._is_land_claim_allowed():
+            self.clear_new_land_creation_info_memory(player)
+            self._notify_land_claim_disabled(player)
+            event.is_cancelled = True
+            return True
         if not getattr(event, "has_block", False):
             return False
         block = getattr(event, "block", None)
@@ -11383,6 +11417,9 @@ class ARCCorePlugin(Plugin):
             return
         if info.get("resize_land_id") is not None:
             self.show_land_resize_confirm_panel(player)
+            return
+        if not self._ensure_land_claim_allowed(player):
+            self.clear_new_land_creation_info_memory(player)
             return
 
         dimension = info["dimension"]
@@ -11638,6 +11675,8 @@ class ARCCorePlugin(Plugin):
     def player_buy_new_land(self, player: Player, dimension: str,
                             min_x: int, max_x: int, min_y: int, max_y: int, min_z: int, max_z: int,
                             volume: int, money_cost: int, used_free_blocks: int = 0):
+        if not self._ensure_land_claim_allowed(player):
+            return
         if self.judge_if_player_has_enough_money(player, money_cost) or player.is_op:
             paid_money = float(money_cost) if not player.is_op else 0.0
             land_id = self.create_land(
@@ -11694,6 +11733,8 @@ class ARCCorePlugin(Plugin):
         default_allow_non_public: bool = False,
     ) -> None:
         """创建公共领地前选择优先级（1/2/3）及是否允许私人/公会覆盖。"""
+        if not self._ensure_land_claim_allowed(player):
+            return
         if not player.is_op:
             player.send_message(
                 self.language_manager.GetText("LAND_CREATE_PUBLIC_NEED_OP")
@@ -11782,6 +11823,8 @@ class ARCCorePlugin(Plugin):
         allow_non_public_land: bool = False,
     ) -> None:
         """圈地确认：创建公共领地（仅 OP，不扣款）。"""
+        if not self._ensure_land_claim_allowed(player):
+            return
         if not player.is_op:
             player.send_message(
                 self.language_manager.GetText("LAND_CREATE_PUBLIC_NEED_OP")
@@ -11874,6 +11917,8 @@ class ARCCorePlugin(Plugin):
         contrib_cost: int,
     ) -> None:
         """圈地确认：创建公会领地，消耗公会公共贡献点（会长/管理者）。"""
+        if not self._ensure_land_claim_allowed(player):
+            return
         mem = self.guild_system.get_membership(str(player.xuid))
         if not mem:
             player.send_message(self._guild_err("GUILD_NOT_IN_GUILD"))

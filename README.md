@@ -3,7 +3,7 @@
 # EndStone ARC Core Plugin / EndStone弧光核心
 
 [![Codacy Grade](https://app.codacy.com/project/badge/Grade/2f830615baf347258558dcc2a5ab85a1)](https://app.codacy.com/gh/DEVILENMO/EndstoneMC-ARC-Core-Plugin/dashboard?utm_source=gh&utm_medium=referral&utm_content=&utm_campaign=Badge_grade)
-[![Version](https://img.shields.io/badge/version-v0.9.4-blue)](https://github.com/ARC-Minecraft/EndstoneMC-ARC-Core-Plugin)
+[![Version](https://img.shields.io/badge/version-v0.9.5-blue)](https://github.com/ARC-Minecraft/EndstoneMC-ARC-Core-Plugin)
 [![Python](https://img.shields.io/badge/python-3.13+-blue?logo=python&logoColor=white)](https://www.python.org/)
 [![EndStone API](https://img.shields.io/badge/EndStone_API-0.7+-black)](https://github.com/EndstoneMC/endstone)
 [![License](https://img.shields.io/github/license/ARC-Minecraft/EndstoneMC-ARC-Core-Plugin)](LICENSE)
@@ -19,7 +19,7 @@ EndStone ARC Core 是一个功能完整的 EndStone (Minecraft 基岩版服务�
 
 - **作者**: DEVILENMO
 - **邮箱**: DEVILENMO@gmail.com
-- **版本**: 0.9.4
+- **版本**: 0.9.5
 - **API 版本**: 0.7+
 - **推荐 Python 版本**: 3.13
 
@@ -323,6 +323,7 @@ IF_PROTECT_SPAWN=True                # 是否保护出生点
 SPAWN_PROTECT_RANGE=8                # 出生点保护范围
 
 # 领地系统
+ALLOW_LAND_CLAIM=True                # 是否允许圈地（本服独立，不跨服同步；False 时无法新建领地，管理/调整范围仍可用）
 MIN_LAND_DISTANCE=1                  # 领地最小距离
 LAND_PRICE=100                       # 领地价格 (每格)
 LAND_SELL_REFUND_COEFFICIENT=0.9     # 领地出售退款系数
@@ -772,7 +773,11 @@ arc.api_sidebar_set_values(
 
 ## 📋 近期更新日志
 
-### v0.9.4（当前版本）
+### v0.9.5（当前版本）
+
+- ✅ **允许圈地开关**：新增本服独立配置 `ALLOW_LAND_CLAIM`（默认 `True`，不随主服同步）；关闭后隐藏「创建新领地」并拦截 `/land` 与新建确认，管理与调整已有领地范围不受影响
+
+### v0.9.4
 
 - ✅ **侧边栏灰橙配色**：重点色由 §b 改为 §6（橙金）；标题/TPS 等强调项同步
 

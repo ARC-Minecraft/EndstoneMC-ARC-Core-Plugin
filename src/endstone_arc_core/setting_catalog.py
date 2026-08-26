@@ -106,6 +106,7 @@ SETTING_GROUPS: List[Dict[str, object]] = [
         "id": "land",
         "title": "领地",
         "items": [
+            _s("ALLOW_LAND_CLAIM", "允许圈地", "bool", choices=BOOL_CHOICES),
             _s("MIN_LAND_DISTANCE", "领地最小间距", "int", placeholder="1"),
             _s("LAND_PRICE", "领地单价", "int", placeholder="50"),
             _s("LAND_SELL_REFUND_COEFFICIENT", "删除领地退款系数", "float", placeholder="0.9"),
