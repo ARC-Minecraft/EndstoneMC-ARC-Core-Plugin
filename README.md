@@ -111,11 +111,17 @@ EndStone ARC Core 是一个功能完整的 EndStone (Minecraft 基岩版服务�
 - 智能传送命令生成（自动处理包含空格的玩家名）
 
 ### 🎯 成就系统（已拆至独立插件）
-- **独立插件**：`endstone_arc_achievement` / plugin id **`arc_achievement`**，仓库目录 `EndstoneMC-ARC-Achievement-Plugin`，数据目录 `plugins/ARCAchievement/`
+- **独立插件**：`endstone_arc_achievement` / plugin id **`arc_achievement`**，仓库目录 `EndstoneMC-ARC-Achievement`，数据目录 `plugins/ARCAchievement/`
 - **核心职责**：菜单入口转发（检测到插件时显示「我的成就」「成就管理」，执行 `/ach`、`/achop`）；头衔解锁与发奖仍走本核心 API
-- **进度库**：`player_achievement_stats` 仍使用 arc_core 的 SQLite（与拆分前同一库）
+- **活动统计（v0.9.11）**：击杀 / 破坏 / 放置累计写入本服表 **`player_activity_stats`**；对外只读 API（见下文）。成就插件经 API 查询，**不得直写核心库**
 - **定义文件**：`plugins/ARCAchievement/achievements.json`（首次启用时若仅有旧版 `plugins/ARCCore/achievements.json` 会自动复制）
-- **说明**：未安装 `arc_achievement` 时，核心不显示成就入口、不统计击杀成就
+- **说明**：未安装 `arc_achievement` 时，核心仍统计活动数据，但不显示成就入口
+
+### 📊 玩家活动统计（v0.9.11）
+- 表 **`player_activity_stats`**：`kill_total` / `kill:{entity_id}`（含 `minecraft:player`）、`break_total` / `break:{block_id}`、`place_total` / `place:{block_id}`
+- 生物击杀在 `ActorDeathEvent` 记账；玩家击杀在 `PlayerDeathEvent` 记账；方块破坏/放置仅在事件**未取消**时记账
+- 本服独立，不跨服同步；旧表 `player_achievement_stats` 中的 `kill_*` 键会一次性迁移
+- API：`api_get_player_stat` / `api_get_player_stats` / `api_get_player_kill_count` / `api_get_player_block_break_count` / `api_get_player_block_place_count`
 
 ### 📅 每日签到（v0.4.0 起，v0.4.2 / v0.6.0 增强）
 - **可签到条件**：本服 `player_local_info.last_checkin_date` 与服务器本地日期（YYYY-MM-DD）不同即可在主菜单 **每日签到**（**每服独立**，不跨服共享）
@@ -533,7 +539,8 @@ give {player} krep:acp45 42
 - **经济数据**: 玩家余额、交易记录
 - **领地信息**: 领地坐标、拥有者、传送点、共享用户、爆炸保护设置、方块互动开放设置、生物保护设置、展示框权限设置
 - **传送点**: 私人传送点、公共传送点坐标信息
-- **成就进度表（可选，由 arc_achievement 写入）**: **`player_achievement_stats`** — 击杀进度与完成标记；定义 JSON 在 **`plugins/ARCAchievement/achievements.json`**
+- **玩家活动统计（v0.9.11）**: **`player_activity_stats`** — 击杀 / 破坏 / 放置累计（只读 API）；成就解锁标记由成就插件本地库维护
+- **成就定义**: JSON 在 **`plugins/ARCAchievement/achievements.json`**（独立插件）
 - **服务器配置**: 出生点坐标、系统设置
 - **天眼审计（v0.8.8）**：独立 SQLite **`plugins/ARCCore/sky_eye/skyeye.db`**，按 `SKY_EYE_MAX_RETENTION_DAYS` 滚动删除；见「天眼系统」
 
@@ -647,6 +654,11 @@ class MyPlugin(Plugin):
 | 函数 | 参数 | 返回值 |
 |------|------|--------|
 | `api_get_player_money` | `player_name=""`，`xuid=""` | `float`：余额；找不到为 `0.0` |
+| `api_get_player_stat` | `stat_key`，`player_name=""`，`xuid=""` | `int`：单项活动统计（如 `kill_total`、`kill:minecraft:player`） |
+| `api_get_player_stats` | `prefix=""`，`player_name=""`，`xuid=""` | `dict[str,int]`：按前缀筛选；空前缀返回全部 |
+| `api_get_player_kill_count` | `entity_id="*"`，`player_name=""`，`xuid=""` | `int`：`*` 为总击杀，否则指定生物 |
+| `api_get_player_block_break_count` | `block_id="*"`，`player_name=""`，`xuid=""` | `int`：破坏方块累计 |
+| `api_get_player_block_place_count` | `block_id="*"`，`player_name=""`，`xuid=""` | `int`：放置方块累计 |
 | `api_change_player_money` | `player_name=""`，`money_to_change=0`，`xuid=""`，`notify=True` | `bool`：是否成功。正加负减；`notify=False` 不发余额提示 |
 | `api_adjust_player_money` | `delta`，`player_name=""`，`xuid=""`，`notify=True` | `dict`：`ok`，`error`，`xuid`，`money`（变动后），`delta`。错误码：`PLAYER_NOT_FOUND` / `MONEY_INVALID_AMOUNT` / `MONEY_DB_ERROR` |
 | `api_get_player_money_rank` | `player_name=""`，`xuid=""` | `int`：财富排名（从 1 起）；找不到为 `0` |
@@ -776,7 +788,11 @@ arc.api_sidebar_set_values(
 
 ## 📋 近期更新日志
 
-### v0.9.10（当前版本）
+### v0.9.11（当前版本）
+
+- ✅ **玩家活动统计**：本服表 `player_activity_stats` 记录击杀（含玩家）、破坏/放置方块累计；只读 API 供成就等插件查询；旧 `player_achievement_stats` 的 `kill_*` 自动迁移
+
+### v0.9.10
 
 - ✅ **天眼战斗留档增强**：攻击记录伤害量、受击前/后血量、最大血量、伤害类型；PvP 附带被打方装备与附魔；死亡记录全身装备与背包摘要；主手物品格式含附魔（如 `netherite_sword{sharpness:5}x1`）
 

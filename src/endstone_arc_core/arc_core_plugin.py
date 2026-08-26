@@ -42,6 +42,7 @@ from endstone_arc_core.GuildSystem import (
 )
 from endstone_arc_core.EntityDisplayNameManager import EntityDisplayNameManager
 from endstone_arc_core.KillRewardConfig import KillRewardConfig, normalize_entity_type_id
+from endstone_arc_core.PlayerActivityStats import PlayerActivityStats
 from endstone_arc_core.arc_error_log import append_arc_error_log, format_context_lines
 from endstone_arc_core.sky_eye_log import SkyEyeStore, format_sky_eye_records, prune_sky_eye_logs
 from endstone_arc_core.sync_server import SyncServer
@@ -196,6 +197,7 @@ class ARCCorePlugin(Plugin):
         self.entity_display_name_manager = EntityDisplayNameManager(Path(MAIN_PATH), logger=None)
         self.kill_reward_config = KillRewardConfig(Path(MAIN_PATH), logger=None)
         self.kill_reward_guild_contrib_ratio = self._load_kill_reward_guild_contrib_ratio()
+        self.activity_stats = PlayerActivityStats(self.database_manager, logger=None)
         self.guild_system = GuildSystem(
             self.database_manager,
             self.setting_manager,
@@ -467,6 +469,7 @@ class ARCCorePlugin(Plugin):
         self.land_system.reload_config()
         self.entity_display_name_manager.logger = self.logger
         self.kill_reward_config.logger = self.logger
+        self.activity_stats.logger = self.logger
 
         # 初始化公告系统和清道夫系统
         self._load_broadcast_messages()
@@ -1337,10 +1340,12 @@ class ARCCorePlugin(Plugin):
             get_dimension_id(block_loc.dimension), block_loc.x, block_loc.y, block_loc.z
         )
         if event.player.is_op:
+            self._activity_record_block_break(event.player, target_desc)
             return
 
         if self.dtwt_plugin is not None and self.dtwt_plugin.api_judge_if_start_block(event.block.location.x, event.block.location.y, event.block.location.z, get_dimension_id(event.block.dimension)):
             # print('DTWT block break, ignore')
+            self._activity_record_block_break(event.player, target_desc)
             return
 
         if not self.land_operation_check(event.player, get_dimension_id(event.block.location.dimension),
@@ -1374,6 +1379,8 @@ class ARCCorePlugin(Plugin):
                                     (event.block.location.x, event.block.location.y, event.block.location.z)):
             event.is_cancelled = True
 
+        if not getattr(event, "is_cancelled", False):
+            self._activity_record_block_break(event.player, target_desc)
         return
 
     def _is_frame_block(self, block) -> bool:
@@ -1487,6 +1494,7 @@ class ARCCorePlugin(Plugin):
             get_dimension_id(block_loc.dimension), block_loc.x, block_loc.y, block_loc.z
         )
         if event.player.is_op:
+            self._activity_record_block_place(event.player, target_desc)
             return
         dimension_name = get_dimension_id(block_loc.dimension)
         place_pos = (block_loc.x, block_loc.y, block_loc.z)
@@ -1505,6 +1513,8 @@ class ARCCorePlugin(Plugin):
             event.is_cancelled = True
         if not self.spawn_protect_check(event.player, dimension_name, place_pos):
             event.is_cancelled = True
+        if not getattr(event, "is_cancelled", False):
+            self._activity_record_block_place(event.player, target_desc)
         return
     
     @event_handler
@@ -1570,6 +1580,19 @@ class ARCCorePlugin(Plugin):
         
         # 发送死亡播报
         self._send_death_broadcast(event)
+
+        # 玩家击杀玩家：计入活动统计（含 kill:minecraft:player）
+        try:
+            killer = self._sky_eye_resolve_killer_actor(event)
+            if killer is not None and (
+                isinstance(killer, Player)
+                or getattr(killer, "type", None) == "minecraft:player"
+            ):
+                kxuid = str(getattr(killer, "xuid", "") or "").strip()
+                if kxuid:
+                    self.activity_stats.record_kill(kxuid, "minecraft:player")
+        except Exception:
+            pass
 
     @event_handler
     def on_player_interact(self, event: PlayerInteractEvent):
@@ -1995,7 +2018,7 @@ class ARCCorePlugin(Plugin):
 
     @event_handler
     def on_actor_death(self, event: ActorDeathEvent):
-        """统计玩家击杀生物：击杀总数 + 按生物类型击杀数。"""
+        """统计玩家击杀生物：击杀总数 + 按生物类型击杀数；并发放击杀赏金。"""
         try:
             damage_source = getattr(event, "damage_source", None)
             killer = getattr(damage_source, "actor", None) if damage_source is not None else None
@@ -2015,6 +2038,12 @@ class ARCCorePlugin(Plugin):
                 return
 
             dead_type_key = normalize_entity_type_id(str(dead_type))
+            try:
+                kxuid = str(getattr(killer, "xuid", "") or "").strip()
+                if kxuid:
+                    self.activity_stats.record_kill(kxuid, dead_type_key)
+            except Exception:
+                pass
 
             reward = self.kill_reward_config.get_reward_and_ensure_key(dead_type_key)
             if reward > 0:
@@ -2030,8 +2059,23 @@ class ARCCorePlugin(Plugin):
         except Exception:
             return
 
+    def _activity_record_block_break(self, player: Player, block_desc) -> None:
+        try:
+            xuid = str(getattr(player, "xuid", "") or "").strip()
+            if not xuid:
+                return
+            self.activity_stats.record_block_break(xuid, str(block_desc or ""))
         except Exception:
-            return
+            pass
+
+    def _activity_record_block_place(self, player: Player, block_desc) -> None:
+        try:
+            xuid = str(getattr(player, "xuid", "") or "").strip()
+            if not xuid:
+                return
+            self.activity_stats.record_block_place(xuid, str(block_desc or ""))
+        except Exception:
+            pass
 
     @event_handler
     def on_player_drop_item(self, event: PlayerDropItemEvent):
@@ -3105,6 +3149,7 @@ class ARCCorePlugin(Plugin):
         self.guild_system.ensure_tables()
         self.conditional_titles.ensure_tables()
         self.sidebar_system.init_pref_table()
+        self.activity_stats.ensure_tables()
 
     def _can_compute_conditional_titles(self) -> bool:
         """跨服从服不计算条件头衔；主服与单机计算。"""
@@ -15361,6 +15406,67 @@ class ARCCorePlugin(Plugin):
         if not resolved:
             return 0.0
         return self.economy.get_player_money_by_xuid(resolved)
+
+    # ------------------------------------------------------------------ 玩家活动统计 API（只读）
+    def api_get_player_stat(
+        self, stat_key: str, player_name: str = "", xuid: str = ""
+    ) -> int:
+        """查询玩家单项活动统计。stat_key 如 kill_total、kill:minecraft:zombie、break_total。"""
+        resolved = self._api_resolve_player_xuid(player_name, xuid)
+        if not resolved:
+            return 0
+        try:
+            return int(self.activity_stats.get_stat(resolved, str(stat_key or "")))
+        except Exception:
+            return 0
+
+    def api_get_player_stats(
+        self, prefix: str = "", player_name: str = "", xuid: str = ""
+    ) -> dict:
+        """查询玩家活动统计字典。prefix 如 \"kill:\" / \"break:\" / \"place:\"；空则全部。"""
+        resolved = self._api_resolve_player_xuid(player_name, xuid)
+        if not resolved:
+            return {}
+        try:
+            return dict(self.activity_stats.get_stats(resolved, str(prefix or "")))
+        except Exception:
+            return {}
+
+    def api_get_player_kill_count(
+        self, entity_id: str = "*", player_name: str = "", xuid: str = ""
+    ) -> int:
+        """击杀数。entity_id=\"*\" 为总击杀；否则为指定生物（含 minecraft:player）。"""
+        resolved = self._api_resolve_player_xuid(player_name, xuid)
+        if not resolved:
+            return 0
+        try:
+            return int(self.activity_stats.get_kill_count(resolved, entity_id))
+        except Exception:
+            return 0
+
+    def api_get_player_block_break_count(
+        self, block_id: str = "*", player_name: str = "", xuid: str = ""
+    ) -> int:
+        """破坏方块数。block_id=\"*\" 为总数。"""
+        resolved = self._api_resolve_player_xuid(player_name, xuid)
+        if not resolved:
+            return 0
+        try:
+            return int(self.activity_stats.get_block_break_count(resolved, block_id))
+        except Exception:
+            return 0
+
+    def api_get_player_block_place_count(
+        self, block_id: str = "*", player_name: str = "", xuid: str = ""
+    ) -> int:
+        """放置方块数。block_id=\"*\" 为总数。"""
+        resolved = self._api_resolve_player_xuid(player_name, xuid)
+        if not resolved:
+            return 0
+        try:
+            return int(self.activity_stats.get_block_place_count(resolved, block_id))
+        except Exception:
+            return 0
 
     # ------------------------------------------------------------------ 侧边栏 API
     def api_sidebar_register_page(
