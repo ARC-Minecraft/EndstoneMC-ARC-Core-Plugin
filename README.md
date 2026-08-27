@@ -3,7 +3,7 @@
 # EndStone ARC Core Plugin / EndStone弧光核心
 
 [![Codacy Grade](https://app.codacy.com/project/badge/Grade/2f830615baf347258558dcc2a5ab85a1)](https://app.codacy.com/gh/DEVILENMO/EndstoneMC-ARC-Core-Plugin/dashboard?utm_source=gh&utm_medium=referral&utm_content=&utm_campaign=Badge_grade)
-[![Version](https://img.shields.io/badge/version-v0.9.26-blue)](https://github.com/ARC-Minecraft/EndstoneMC-ARC-Core-Plugin)
+[![Version](https://img.shields.io/badge/version-v0.9.27-blue)](https://github.com/ARC-Minecraft/EndstoneMC-ARC-Core-Plugin)
 [![Python](https://img.shields.io/badge/python-3.13+-blue?logo=python&logoColor=white)](https://www.python.org/)
 [![EndStone API](https://img.shields.io/badge/EndStone_API-0.7+-black)](https://github.com/EndstoneMC/endstone)
 [![License](https://img.shields.io/github/license/ARC-Minecraft/EndstoneMC-ARC-Core-Plugin)](LICENSE)
@@ -19,7 +19,7 @@ EndStone ARC Core 是一个功能完整的 EndStone (Minecraft 基岩版服务�
 
 - **作者**: DEVILENMO
 - **邮箱**: DEVILENMO@gmail.com
-- **版本**: 0.9.26
+- **版本**: 0.9.27
 - **API 版本**: 0.7+
 - **推荐 Python 版本**: 3.13
 
@@ -168,10 +168,10 @@ EndStone ARC Core 是一个功能完整的 EndStone (Minecraft 基岩版服务�
 - 在主菜单中新增"证券交易所"按钮，玩家可直接访问股票交易功能
 - 提供便捷的股票系统入口，简化玩家投资操作流程
 
-### 🏹 猎手榜系统
-- **arc_hunter插件适配** - 安装 `arc_hunter`（弧光猎手榜，仓库 `EndstoneMC-ARC-Hunter-Ranking`）后，主菜单显示「猎手榜」按钮
-- 点击按钮委托执行 `/hunter`，由猎手榜插件向该玩家单独弹出 Form 榜单（不全服广播）
-- 未安装 `arc_hunter` 时不显示该入口
+### 🏹 PvP KD 排行榜
+- **arc_pvp_kd 插件适配** - 安装 `arc_pvp_kd`（弧光 PvP KD 排行榜插件，仓库 `EndstoneMC-ARC-PvP-KD-Ranking`）后，主菜单显示「PvP KD 排行榜」按钮
+- 点击按钮委托执行 `/kd`，由 PvP KD 排行榜插件向该玩家单独弹出 Form 榜单（不全服广播）
+- 未安装 `arc_pvp_kd` 时不显示该入口
 
 ### 📢 公告系统 (v0.1.2新增)
 - 定时循环播放公告消息
@@ -801,7 +801,11 @@ arc.api_sidebar_set_values(
 
 ## 📋 近期更新日志
 
-### v0.9.26（当前版本）
+### v0.9.27（当前版本）
+
+- ✅ **PvP KD 排行榜插件适配**：检测到 `arc_pvp_kd` 时在主菜单显示「PvP KD 排行榜」入口，委托 `/kd` 打开玩家个人榜单 Form（原 `arc_hunter` / `/hunter` 已弃用）
+
+### v0.9.26
 
 - ✅ **修复侧边栏崩溃服务器**：`Objective.setDisplay` 改为每个 objective 只调一次；标题变化改 `display_name` 不再 `unregister` 重建；看板对象全程强引用，仅下线释放；进服延迟 `SIDEBAR_JOIN_DELAY_TICKS`（默认 40）后再写显示槽
 

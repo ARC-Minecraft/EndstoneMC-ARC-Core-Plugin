@@ -4587,8 +4587,8 @@ class ARCCorePlugin(Plugin):
             arc_menu.add_button(self.language_manager.GetText('BUTTON_SHOP_MENU_NAME'), on_click=self.show_button_shop_menu)
         if self.server.plugin_manager.get_plugin('arc_dtwt'):
             arc_menu.add_button(self.language_manager.GetText('DTWT_MENU_NAME'), on_click=self.show_dtwt_panel)
-        if self.server.plugin_manager.get_plugin('arc_hunter'):
-            arc_menu.add_button(self.language_manager.GetText('HUNTER_MENU_NAME'), on_click=self.show_arc_hunter_menu)
+        if self.server.plugin_manager.get_plugin('arc_pvp_kd'):
+            arc_menu.add_button(self.language_manager.GetText('PVP_KD_MENU_NAME'), on_click=self.show_arc_pvp_kd_menu)
         if self.server.plugin_manager.get_plugin('up_and_down'):
             arc_menu.add_button(self.language_manager.GetText('STOCK_MARKET_NAME'), on_click=self.show_stock_ui)
         if player.is_op:
@@ -9097,9 +9097,9 @@ class ARCCorePlugin(Plugin):
         """委托弧光成就插件打开玩家成就菜单。"""
         player.perform_command('ach')
 
-    def show_arc_hunter_menu(self, player: Player):
-        """委托弧光猎手榜插件打开 KD 榜单。"""
-        player.perform_command('hunter')
+    def show_arc_pvp_kd_menu(self, player: Player):
+        """委托弧光 PvP KD 排行榜插件打开 KD 榜单。"""
+        player.perform_command('kd')
 
     def show_arc_achievement_op_menu(self, player: Player):
         """委托弧光成就插件打开 OP 成就管理。"""
