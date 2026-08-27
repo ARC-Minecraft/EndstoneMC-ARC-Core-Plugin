@@ -16476,9 +16476,15 @@ class ARCCorePlugin(Plugin):
         radius: Any = 8,
         combat_role: str = "",
         in_land: Optional[bool] = None,
+        name_fuzzy: bool = True,
         limit: int = 40,
     ) -> list:
-        """查询天眼 SQLite。返回事件字典列表（新→旧）。ENABLE_SKY_EYE 关闭时仍可读历史。"""
+        """查询天眼 SQLite。返回事件字典列表（新→旧）。ENABLE_SKY_EYE 关闭时仍可读历史。
+
+        action 支持精确名（PlayerDeath）或类别别名（death/pvp/死亡/打怪 等）。
+        player_name 默认模糊匹配（子串，忽略大小写）；传 name_fuzzy=False 可改精确。
+        可不传玩家名，仅按 action / 时间 / 坐标筛选（如「最近谁死了」）。
+        """
         try:
             from endstone_arc_core.dimension_utils import normalize_dimension_id
 
@@ -16487,6 +16493,11 @@ class ARCCorePlugin(Plugin):
             py = None if y in (None, "") else float(y)
             pz = None if z in (None, "") else float(z)
             rad = None if radius in (None, "") else float(radius)
+            fuzzy_raw = name_fuzzy
+            if isinstance(fuzzy_raw, str):
+                fuzzy = fuzzy_raw.strip().lower() not in ("0", "false", "no", "exact", "off")
+            else:
+                fuzzy = bool(fuzzy_raw)
             return self.sky_eye_store.query(
                 player_name=str(player_name or "").strip(),
                 player_xuid=str(xuid or "").strip(),
@@ -16501,6 +16512,7 @@ class ARCCorePlugin(Plugin):
                 radius=rad,
                 combat_role=str(combat_role or ""),
                 in_land=in_land,
+                name_fuzzy=fuzzy,
                 limit=int(limit or 40),
             )
         except Exception:
@@ -16509,11 +16521,15 @@ class ARCCorePlugin(Plugin):
     def api_sky_eye_query_text(self, **kwargs) -> str:
         """天眼查询的纯文本，供弧光天星 / AstrBot 工具直接阅读。"""
         heading = str(kwargs.pop("heading", "") or "")
+        name_hint = str(kwargs.get("player_name") or "")
         records = self.api_sky_eye_query(**kwargs)
-        return format_sky_eye_records(records, heading=heading)
+        return format_sky_eye_records(records, heading=heading, name_hint=name_hint)
 
     def api_sky_eye_player_now(self, player_name: str = "", xuid: str = "") -> dict:
-        """在线则返回实时坐标与是否在领地；离线则返回最近一条天眼记录。"""
+        """在线则返回实时坐标与是否在领地；离线则返回最近一条天眼记录。
+
+        玩家名支持模糊：在线列表先精确再子串匹配；离线走天眼模糊查询。
+        """
         result = {
             "online": False,
             "player_name": str(player_name or "").strip(),
@@ -16527,6 +16543,7 @@ class ARCCorePlugin(Plugin):
             "land_name": "",
             "land_owner": "",
             "source": "",
+            "name_matches": [],
         }
         resolved_name = result["player_name"]
         player = None
@@ -16540,10 +16557,22 @@ class ARCCorePlugin(Plugin):
                 player = self.server.get_player(resolved_name)
                 if player is None:
                     lowered = resolved_name.lower()
+                    fuzzy_hits = []
                     for online in list(self.server.online_players or []):
-                        if str(getattr(online, "name", "") or "").lower() == lowered:
+                        oname = str(getattr(online, "name", "") or "")
+                        if oname.lower() == lowered:
                             player = online
                             break
+                        if lowered in oname.lower():
+                            fuzzy_hits.append(online)
+                    if player is None and len(fuzzy_hits) == 1:
+                        player = fuzzy_hits[0]
+                    elif player is None and fuzzy_hits:
+                        result["name_matches"] = [
+                            str(getattr(p, "name", "") or "") for p in fuzzy_hits
+                        ]
+                        result["source"] = "ambiguous_online"
+                        return result
         except Exception:
             player = None
         if player is not None:
@@ -16562,8 +16591,23 @@ class ARCCorePlugin(Plugin):
                 result.update(land)
             return result
         records = self.api_sky_eye_query(
-            player_name=resolved_name, xuid=result["xuid"], minutes=24 * 60, limit=1
+            player_name=resolved_name,
+            xuid=result["xuid"],
+            minutes=24 * 60,
+            name_fuzzy=True,
+            limit=1,
         )
+        if not records and resolved_name:
+            try:
+                matches = self.sky_eye_store.distinct_player_names(
+                    hint=resolved_name, minutes=24 * 60, limit=10
+                )
+            except Exception:
+                matches = []
+            if matches:
+                result["name_matches"] = matches
+                result["source"] = "name_suggestions"
+                return result
         if not records:
             result["source"] = "none"
             return result

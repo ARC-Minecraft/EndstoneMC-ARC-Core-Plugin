@@ -3,7 +3,7 @@
 # EndStone ARC Core Plugin / EndStone弧光核心
 
 [![Codacy Grade](https://app.codacy.com/project/badge/Grade/2f830615baf347258558dcc2a5ab85a1)](https://app.codacy.com/gh/DEVILENMO/EndstoneMC-ARC-Core-Plugin/dashboard?utm_source=gh&utm_medium=referral&utm_content=&utm_campaign=Badge_grade)
-[![Version](https://img.shields.io/badge/version-v0.9.27-blue)](https://github.com/ARC-Minecraft/EndstoneMC-ARC-Core-Plugin)
+[![Version](https://img.shields.io/badge/version-v0.9.28-blue)](https://github.com/ARC-Minecraft/EndstoneMC-ARC-Core-Plugin)
 [![Python](https://img.shields.io/badge/python-3.13+-blue?logo=python&logoColor=white)](https://www.python.org/)
 [![EndStone API](https://img.shields.io/badge/EndStone_API-0.7+-black)](https://github.com/EndstoneMC/endstone)
 [![License](https://img.shields.io/github/license/ARC-Minecraft/EndstoneMC-ARC-Core-Plugin)](LICENSE)
@@ -19,7 +19,7 @@ EndStone ARC Core 是一个功能完整的 EndStone (Minecraft 基岩版服务�
 
 - **作者**: DEVILENMO
 - **邮箱**: DEVILENMO@gmail.com
-- **版本**: 0.9.27
+- **版本**: 0.9.28
 - **API 版本**: 0.7+
 - **推荐 Python 版本**: 3.13
 
@@ -62,7 +62,8 @@ EndStone ARC Core 是一个功能完整的 EndStone (Minecraft 基岩版服务�
 - **记录字段**：时间、行为、玩家名、XUID、维度、坐标、主手物品（含附魔摘要）、`detail`、**是否在领地内**、领地 ID/名称/主人、攻击对象（打了谁 / 被谁打）
 - **战斗增强（v0.9.10）**：每次玩家攻击记录 `damage` / `hp_before` / `hp_after` / `max_hp` / `cause`；PvP 另记 `victim_armor`（被打方当时装备+附魔）；死亡记录 `armor`（头盔/胸甲/护腿/靴子/副手）与 `inv`（背包格子摘要）
 - **已挂钩行为**：进服 / 离服、方块破坏与放置、对方块交互与无方块交互、与实体交互、**玩家造成的伤害（含 PvP）**、玩家死亡（含击杀者与死亡时装备/背包）；关闭开关时不写盘
-- **对外查询 API**（其它插件 / 天星）：`api_sky_eye_query`、`api_sky_eye_query_text`、`api_sky_eye_player_now`。天星工具：`mc_skyeye_player` / `mc_skyeye_combat` / `mc_skyeye_location`（仅 OP / QQ 管理）
+- **对外查询 API**（其它插件 / 天星）：`api_sky_eye_query`、`api_sky_eye_query_text`、`api_sky_eye_player_now`。天星工具：`mc_skyeye_player` / `mc_skyeye_combat` / `mc_skyeye_events` / `mc_skyeye_location`（仅 OP / QQ 管理）
+- **查询增强（v0.9.28）**：玩家名默认**模糊匹配**（子串、忽略大小写）；`action` 支持类别别名（`death`/`pvp`/`pve`/`combat`/`死亡`/`打怪` 等）及 PvP/PvE 细分；可不传玩家名仅按事件类型+时间查全服（如「最近 24 小时谁死了」）
 
 ### 💰 银行经济系统
 - 完整的货币管理系统，**金钱精确到分**（float 存储，两位小数）
@@ -801,7 +802,11 @@ arc.api_sidebar_set_values(
 
 ## 📋 近期更新日志
 
-### v0.9.27（当前版本）
+### v0.9.28（当前版本）
+
+- ✅ **天眼查询增强**：玩家名默认模糊匹配；`action` 支持 `death`/`pvp`/`pve`/`combat` 等别名与 PvP 细分；可不传玩家名按事件类型查全服；展示区分 PvP 攻击/死亡与攻击生物
+
+### v0.9.27
 
 - ✅ **PvP KD 排行榜插件适配**：检测到 `arc_pvp_kd` 时在主菜单显示「PvP KD 排行榜」入口，委托 `/kd` 打开玩家个人榜单 Form（原 `arc_hunter` / `/hunter` 已弃用）
 
