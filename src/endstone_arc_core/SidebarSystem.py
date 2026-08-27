@@ -4,8 +4,10 @@ from __future__ import annotations
 
 import re
 import time
+from collections import deque
 from dataclasses import dataclass, field
 from datetime import datetime
+from pathlib import Path
 from typing import Any, Dict, List, Optional, Set
 
 from endstone import Player
@@ -51,6 +53,9 @@ _STABLE_OBJECTIVE = "arc_sb"
 # 低频定时默认：60 tick ≈ 3 秒（TPS / 延迟 / 现实时间）
 _DEFAULT_REFRESH_TICKS = 60
 _LEGACY_REFRESH_TICKS = 20  # 旧默认 1 秒，启动时自动迁到 60
+_DEFAULT_JOIN_DELAY_TICKS = 40  # 进服后延迟再写显示槽，避开未 spawn
+_RENDER_RING_MAX = 32
+_RENDER_STATE_FILE = Path("plugins/ARCCore/sidebar_render_state.txt")
 
 # 侧边栏假名过长会踢客户端（历史包长上限约 40）
 _MAX_ENTRY_LEN = 40
@@ -107,6 +112,8 @@ class PlayerSidebarState:
     display_title: str = ""
     last_entries: Set[str] = field(default_factory=set)
     last_render_sig: str = ""
+    display_set: bool = False
+    join_at_mono: float = 0.0
 
 
 class SidebarSystem:
@@ -118,6 +125,10 @@ class SidebarSystem:
         # page_id -> key -> value
         self._global_values: Dict[str, Dict[str, Any]] = {}
         self._player_state: Dict[str, PlayerSidebarState] = {}
+        # xuid -> Scoreboard 强引用，避免 player_boards_ 被抹掉后 Python GC 析构原生对象
+        self._boards: Dict[str, Any] = {}
+        self._render_ring: deque = deque(maxlen=_RENDER_RING_MAX)
+        self._render_open_xuid: str = ""
         # 低频缓存：定时器更新 time/tps/ping；事件更新 money/online
         self._cached_time: str = ""
         self._cached_date: str = ""
@@ -132,10 +143,12 @@ class SidebarSystem:
         self.sidebar_title = "§6弧光服务器"
         self.switch_interval = 10.0
         self.refresh_ticks = _DEFAULT_REFRESH_TICKS
+        self.join_delay_ticks = _DEFAULT_JOIN_DELAY_TICKS
         self.max_lines = 15
         self.main_line_templates: List[str] = list(DEFAULT_MAIN_LINES)
         self.reload_config()
         self._ensure_main_page()
+        self._check_stale_render_state()
 
     # ------------------------------------------------------------------ config
     def reload_config(self) -> None:
@@ -172,6 +185,12 @@ class SidebarSystem:
             except Exception:
                 pass
         self.refresh_ticks = max(1, refresh)
+        self.join_delay_ticks = max(
+            0,
+            _setting_int(
+                sm.GetSetting("SIDEBAR_JOIN_DELAY_TICKS"), _DEFAULT_JOIN_DELAY_TICKS
+            ),
+        )
         self.max_lines = max(1, min(15, _setting_int(sm.GetSetting("SIDEBAR_MAX_LINES"), 15)))
         raw_lines = sm.GetSetting("SIDEBAR_MAIN_LINES")
         if raw_lines and str(raw_lines).strip():
@@ -467,13 +486,36 @@ class SidebarSystem:
                 enabled=bool(pref.get("enabled", self.default_on)),
                 locked_page=str(pref.get("locked_page") or ""),
                 last_switch_ts=time.time(),
+                join_at_mono=time.monotonic(),
             )
             self._player_state[xuid] = st
             self._seed_money_cache(xuid)
             self._update_online_cache()
             if st.enabled:
-                self._ensure_player_scoreboard(player, st)
-                self.refresh_player(player, force=True)
+                # 不在 join 同帧写显示槽；等 SIDEBAR_JOIN_DELAY_TICKS 后再绑看板
+                delay = max(1, int(self.join_delay_ticks))
+
+                def _later() -> None:
+                    try:
+                        p = self._find_online(xuid)
+                        if p is None:
+                            return
+                        st2 = self._player_state.get(xuid)
+                        if st2 is None or not st2.enabled:
+                            return
+                        if not self._is_render_ready(p):
+                            return
+                        self._ensure_player_scoreboard(p, st2)
+                        self.refresh_player(p, force=True)
+                    except Exception as e:
+                        self._log_error(f"join_delayed_render: {e}")
+
+                try:
+                    self.plugin.server.scheduler.run_task(
+                        self.plugin, _later, delay=delay
+                    )
+                except Exception:
+                    self._run_on_main(_later)
             # 其它已开启侧边栏的玩家：刷新在线人数
             self._refresh_all_enabled(exclude_xuid=xuid)
         except Exception as e:
@@ -484,12 +526,13 @@ class SidebarSystem:
             xuid = str(getattr(player, "xuid", "") or "").strip()
             if not xuid:
                 return
-            st = self._player_state.pop(xuid, None)
+            st = self._player_state.get(xuid)
+            if st is not None:
+                self._release_player_board(player, st, xuid)
+            self._player_state.pop(xuid, None)
             self._values.pop(xuid, None)
             self._ping_cache.pop(xuid, None)
             self._money_cache.pop(xuid, None)
-            if st is not None:
-                self._clear_sidebar_display(player, st)
             self._update_online_cache()
             self._refresh_all_enabled()
         except Exception as e:
@@ -497,12 +540,18 @@ class SidebarSystem:
 
     def shutdown(self) -> None:
         try:
+            if self._render_open_xuid:
+                self._log_warn(
+                    f"shutdown with unclosed render xuid={self._render_open_xuid}"
+                )
             for player in list(getattr(self.plugin.server, "online_players", []) or []):
                 xuid = str(getattr(player, "xuid", "") or "").strip()
                 st = self._player_state.get(xuid)
                 if st is not None:
-                    self._clear_sidebar_display(player, st)
+                    self._release_player_board(player, st, xuid)
             self._player_state.clear()
+            self._boards.clear()
+            self._mark_render_exit(self._render_open_xuid)
         except Exception as e:
             self._log_error(f"shutdown: {e}")
 
@@ -519,7 +568,7 @@ class SidebarSystem:
                 self._ensure_player_scoreboard(player, st)
                 self.refresh_player(player, force=True)
             else:
-                self._clear_sidebar_display(player, st)
+                self._hide_sidebar_display(st)
             return True
         except Exception as e:
             self._log_error(f"set_enabled: {e}")
@@ -697,12 +746,14 @@ class SidebarSystem:
         if not xuid:
             return
         st = self._ensure_state(xuid)
+        if not self._is_render_ready(player):
+            return
         if not st.enabled:
-            self._clear_sidebar_display(player, st)
+            self._hide_sidebar_display(st)
             return
         pages = self._visible_pages_for(xuid)
         if not pages:
-            self._clear_sidebar_display(player, st)
+            self._hide_sidebar_display(st)
             return
         page = self._resolve_current_page(st, pages)
         self._render_to_player(player, st, page, pages, force=force)
@@ -717,10 +768,13 @@ class SidebarSystem:
             st = self._player_state.get(xuid)
             if st is None:
                 return
+        if not self._is_render_ready(player):
+            return
         if not st.enabled:
             return
         pages = self._visible_pages_for(xuid)
         if not pages:
+            self._hide_sidebar_display(st)
             return
         # 每人延迟随定时器取样；金钱顺带从库重读（跨服共享库无本地事件时兜底）
         self._sample_player_ping(player, xuid)
@@ -769,56 +823,66 @@ class SidebarSystem:
         return st
 
     def _ensure_player_scoreboard(self, player: Player, st: PlayerSidebarState) -> Any:
-        if st.scoreboard is not None:
+        xuid = str(getattr(player, "xuid", "") or "").strip()
+        sb = st.scoreboard
+        if sb is None and xuid:
+            sb = self._boards.get(xuid)
+            if sb is not None:
+                st.scoreboard = sb
+        if sb is not None:
+            if xuid:
+                self._boards[xuid] = sb
             try:
-                player.scoreboard = st.scoreboard
+                player.scoreboard = sb
             except Exception:
                 pass
-            return st.scoreboard
+            return sb
         try:
             sb = self.plugin.server.create_scoreboard()
             st.scoreboard = sb
+            if xuid:
+                self._boards[xuid] = sb
             player.scoreboard = sb
             return sb
         except Exception as e:
             self._log_error(f"create_scoreboard: {e}")
-            # 回退：使用服务器主计分板（多玩家可能互相覆盖标题，但至少能显示）
-            try:
-                sb = self.plugin.server.scoreboard
-                st.scoreboard = sb
-                return sb
-            except Exception:
-                return None
+            return None
 
-    def _clear_sidebar_display(self, player: Player, st: PlayerSidebarState) -> None:
-        try:
-            sb = st.scoreboard
-            if sb is not None:
-                try:
-                    sb.clear_slot(DisplaySlot.SIDE_BAR)
-                except Exception:
-                    pass
-                obj_name = st.current_objective_name or _STABLE_OBJECTIVE
-                try:
-                    obj = sb.get_objective(obj_name)
-                    if obj is not None:
-                        obj.unregister()
-                except Exception:
-                    pass
-            st.current_objective_name = ""
-            st.display_title = ""
-            st.last_entries = set()
-            st.last_render_sig = ""
-            # 恢复默认计分板
+    def _hide_sidebar_display(self, st: PlayerSidebarState) -> None:
+        """关掉显示槽但不销毁看板/objective（/sidebar off、无可见页）。"""
+        sb = st.scoreboard
+        if sb is not None:
             try:
-                primary = self.plugin.server.scoreboard
-                if primary is not None:
-                    player.scoreboard = primary
+                sb.clear_slot(DisplaySlot.SIDE_BAR)
             except Exception:
                 pass
-            st.scoreboard = None
-        except Exception as e:
-            self._log_error(f"clear_sidebar: {e}")
+        st.display_set = False
+        st.last_render_sig = ""
+
+    def _release_player_board(
+        self, player: Optional[Player], st: PlayerSidebarState, xuid: str
+    ) -> None:
+        """仅下线/shutdown：先交还主计分板，再丢掉 Python 强引用。"""
+        try:
+            primary = self.plugin.server.scoreboard
+            if primary is not None and player is not None:
+                player.scoreboard = primary
+        except Exception:
+            pass
+        sb = st.scoreboard or (self._boards.get(xuid) if xuid else None)
+        if sb is not None:
+            try:
+                sb.clear_slot(DisplaySlot.SIDE_BAR)
+            except Exception:
+                pass
+        st.scoreboard = None
+        st.current_objective_name = ""
+        st.display_title = ""
+        st.last_entries = set()
+        st.last_render_sig = ""
+        st.display_set = False
+        if xuid:
+            self._boards.pop(xuid, None)
 
     def _dummy_criteria(self):
         criteria = getattr(Criteria, "DUMMY", None)
@@ -848,42 +912,98 @@ class SidebarSystem:
     def _get_or_create_objective(
         self, sb: Any, st: PlayerSidebarState, display_title: str
     ) -> Any:
-        """复用稳定 objective；仅标题变化时重建（避免每秒销毁重建打崩客户端）。"""
+        """复用稳定 objective；标题变化只改 display_name，不 unregister。"""
         title = _sanitize_entry_name(display_title)[:32] or " "
         obj_name = _STABLE_OBJECTIVE
-        need_new = (
-            not st.current_objective_name
-            or st.current_objective_name != obj_name
-            or st.display_title != title
-        )
-        if not need_new:
+        obj = None
+        try:
+            obj = sb.get_objective(obj_name)
+        except Exception:
+            obj = None
+
+        if obj is not None:
+            if st.display_title != title:
+                try:
+                    obj.display_name = title
+                except Exception as e:
+                    self._log_error(f"set display_name: {e}")
+                st.display_title = title
+            st.current_objective_name = obj_name
+            return obj
+
+        if st.current_objective_name and st.current_objective_name != obj_name:
+            try:
+                old2 = sb.get_objective(st.current_objective_name)
+                if old2 is not None:
+                    old2.unregister()
+            except Exception:
+                pass
+            st.display_set = False
+
+        try:
+            obj = sb.add_objective(obj_name, self._dummy_criteria(), title)
+        except Exception as e:
             try:
                 obj = sb.get_objective(obj_name)
-                if obj is not None:
-                    return obj
             except Exception:
-                pass
-            need_new = True
+                obj = None
+            if obj is None:
+                self._log_error(f"add_objective: {e}")
+                return None
+        st.current_objective_name = obj_name
+        st.display_title = title
+        st.last_entries = set()
+        st.display_set = False
+        return obj
 
-        if need_new:
+    def _rebuild_objective(
+        self, sb: Any, st: PlayerSidebarState, display_title: str
+    ) -> Any:
+        """无法逐条删行时：先 clear_slot，再重建 objective。"""
+        try:
+            sb.clear_slot(DisplaySlot.SIDE_BAR)
+        except Exception:
+            pass
+        st.display_set = False
+        obj_name = st.current_objective_name or _STABLE_OBJECTIVE
+        try:
+            old = sb.get_objective(obj_name)
+            if old is not None:
+                old.unregister()
+        except Exception:
+            pass
+        st.current_objective_name = ""
+        st.display_title = ""
+        st.last_entries = set()
+        return self._get_or_create_objective(sb, st, display_title)
+
+    def _ensure_display_slot(self, obj: Any, st: PlayerSidebarState) -> None:
+        """每个 objective 生命周期只调一次 set_display；用 is_displayed 兜底校正。"""
+        need = not st.display_set
+        if not need:
             try:
-                old = sb.get_objective(obj_name)
-                if old is not None:
-                    old.unregister()
+                displayed = getattr(obj, "is_displayed", None)
+                if callable(displayed):
+                    displayed = displayed()
+                if displayed is False:
+                    need = True
             except Exception:
                 pass
-            if st.current_objective_name and st.current_objective_name != obj_name:
+            if not need:
                 try:
-                    old2 = sb.get_objective(st.current_objective_name)
-                    if old2 is not None:
-                        old2.unregister()
+                    slot = getattr(obj, "display_slot", None)
+                    if slot is not None and slot != DisplaySlot.SIDE_BAR:
+                        need = True
                 except Exception:
                     pass
-            obj = sb.add_objective(obj_name, self._dummy_criteria(), title)
-            st.current_objective_name = obj_name
-            st.display_title = title
-            st.last_entries = set()
-            return obj
+        if not need:
+            return
+        try:
+            obj.set_display(DisplaySlot.SIDE_BAR, ObjectiveSortOrder.DESCENDING)
+            st.display_set = True
+        except Exception as e:
+            self._log_error(f"set_display: {e}")
+            st.display_set = False
 
     def _render_to_player(
         self,
@@ -893,6 +1013,8 @@ class SidebarSystem:
         pages: List[SidebarPage],
         force: bool = False,
     ) -> None:
+        if not self._is_render_ready(player):
+            return
         xuid = str(getattr(player, "xuid", "") or "").strip()
         rendered = self._render_lines(page, player, xuid, pages, st)
         display_title = self._render_text(
@@ -913,18 +1035,16 @@ class SidebarSystem:
         if not entries:
             entries = [" "]
 
+        self._mark_render_enter(xuid)
         try:
             obj = self._get_or_create_objective(sb, st, display_title)
             if obj is None:
                 return
 
             new_set = set(entries)
-            # 先清掉不再使用的旧行，再写入/更新当前行（原地刷新，不双缓冲拆 objective）
             for old_entry in list(st.last_entries - new_set):
                 if not self._reset_score_entry(sb, obj, old_entry):
-                    # 无法逐条删除时重建一次 objective
-                    st.display_title = ""
-                    obj = self._get_or_create_objective(sb, st, display_title)
+                    obj = self._rebuild_objective(sb, st, display_title)
                     if obj is None:
                         return
                     st.last_entries = set()
@@ -935,15 +1055,14 @@ class SidebarSystem:
                 sc = obj.get_score(entry)
                 sc.value = score_base - i
 
-            try:
-                obj.set_display(DisplaySlot.SIDE_BAR, ObjectiveSortOrder.DESCENDING)
-            except Exception:
-                pass
+            self._ensure_display_slot(obj, st)
 
             st.last_entries = new_set
             st.last_render_sig = sig
         except Exception as e:
             self._log_error(f"render_to_player: {e}")
+        finally:
+            self._mark_render_exit(xuid)
 
     def _render_lines(
         self,
@@ -1240,6 +1359,73 @@ class SidebarSystem:
         except Exception:
             pass
         return None
+
+    def _is_render_ready(self, player: Player) -> bool:
+        if player is None:
+            return False
+        xuid = str(getattr(player, "xuid", "") or "").strip()
+        if not xuid:
+            return False
+        if self._find_online(xuid) is None:
+            return False
+        try:
+            iv = getattr(player, "is_valid", None)
+            if callable(iv):
+                if not iv():
+                    return False
+            elif isinstance(iv, bool) and not iv:
+                return False
+        except Exception:
+            return False
+        st = self._player_state.get(xuid)
+        if st is not None and st.join_at_mono > 0:
+            need = max(0, int(self.join_delay_ticks)) / 20.0
+            if time.monotonic() - st.join_at_mono < need:
+                return False
+        return True
+
+    def _ring_note(self, msg: str) -> None:
+        ts = datetime.now().strftime("%H:%M:%S")
+        self._render_ring.append(f"{ts} {msg}")
+
+    def _write_render_state(self, line: str) -> None:
+        try:
+            _RENDER_STATE_FILE.parent.mkdir(parents=True, exist_ok=True)
+            _RENDER_STATE_FILE.write_text(line, encoding="utf-8")
+        except Exception:
+            pass
+
+    def _check_stale_render_state(self) -> None:
+        try:
+            if not _RENDER_STATE_FILE.exists():
+                return
+            raw = _RENDER_STATE_FILE.read_text(encoding="utf-8").strip()
+        except Exception:
+            return
+        if raw.startswith("open"):
+            self._log_warn(f"previous crash during sidebar render: {raw}")
+            self._write_render_state("")
+
+    def _mark_render_enter(self, xuid: str) -> None:
+        xs = str(xuid or "").strip() or "?"
+        self._render_open_xuid = xs
+        self._ring_note(f"ENTER {xs}")
+        self._write_render_state(f"open {xs} {time.time():.3f}")
+
+    def _mark_render_exit(self, xuid: str) -> None:
+        xs = str(xuid or "").strip()
+        self._ring_note(f"EXIT {xs or self._render_open_xuid}")
+        if not xs or self._render_open_xuid == xs:
+            self._render_open_xuid = ""
+            self._write_render_state("")
+
+    def _log_warn(self, msg: str) -> None:
+        try:
+            logger = getattr(self.plugin, "logger", None)
+            if logger:
+                logger.warning(f"[ARC Core][Sidebar] {msg}")
+        except Exception:
+            pass
 
     def _log_error(self, msg: str) -> None:
         try:

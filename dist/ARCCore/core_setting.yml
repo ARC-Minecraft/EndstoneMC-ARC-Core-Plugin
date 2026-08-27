@@ -198,6 +198,8 @@ SIDEBAR_TITLE=§6弧光服务器
 SIDEBAR_SWITCH_INTERVAL=10
 # 刷新周期（tick，20=1秒）；影响时间/生命等内置变量的更新频率
 SIDEBAR_REFRESH_TICKS=60
+# 进服后延迟再写侧边栏显示槽（tick，20=1秒）；避开玩家未完全 spawn 时的原生崩溃
+SIDEBAR_JOIN_DELAY_TICKS=40
 SIDEBAR_MAX_LINES=15
 # 主页面行模板，用 \n 分隔；留空则使用内置默认
 # 配色约定：§8 分割/弱化，§7 标签，§f 主要数字，§6 标题/重点（灰橙）

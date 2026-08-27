@@ -3,7 +3,7 @@
 # EndStone ARC Core Plugin / EndStone弧光核心
 
 [![Codacy Grade](https://app.codacy.com/project/badge/Grade/2f830615baf347258558dcc2a5ab85a1)](https://app.codacy.com/gh/DEVILENMO/EndstoneMC-ARC-Core-Plugin/dashboard?utm_source=gh&utm_medium=referral&utm_content=&utm_campaign=Badge_grade)
-[![Version](https://img.shields.io/badge/version-v0.9.25-blue)](https://github.com/ARC-Minecraft/EndstoneMC-ARC-Core-Plugin)
+[![Version](https://img.shields.io/badge/version-v0.9.26-blue)](https://github.com/ARC-Minecraft/EndstoneMC-ARC-Core-Plugin)
 [![Python](https://img.shields.io/badge/python-3.13+-blue?logo=python&logoColor=white)](https://www.python.org/)
 [![EndStone API](https://img.shields.io/badge/EndStone_API-0.7+-black)](https://github.com/EndstoneMC/endstone)
 [![License](https://img.shields.io/github/license/ARC-Minecraft/EndstoneMC-ARC-Core-Plugin)](LICENSE)
@@ -19,7 +19,7 @@ EndStone ARC Core 是一个功能完整的 EndStone (Minecraft 基岩版服务�
 
 - **作者**: DEVILENMO
 - **邮箱**: DEVILENMO@gmail.com
-- **版本**: 0.9.25
+- **版本**: 0.9.26
 - **API 版本**: 0.7+
 - **推荐 Python 版本**: 3.13
 
@@ -80,7 +80,7 @@ EndStone ARC Core 是一个功能完整的 EndStone (Minecraft 基岩版服务�
 - **其它插件注册页面**：`api_sidebar_register_page` + 行模板 `{key}`，数值变更用 `api_sidebar_set_value(s)` 推送（会触发刷新）
 - **玩家命令**：`/sidebar`（别名 `/sb`）支持 `on` / `off` / `next` / `prev` / `lock` / `unlock` / `list`；开关与锁定偏好持久化到 SQLite
 - **刷新策略（v0.9.25）**：约 3 秒定时只更新时间/TPS/延迟；金钱变动、进出服（在线人数）、插件推送值为事件触发
-- **配置**：`SIDEBAR_ENABLE`、`SIDEBAR_DEFAULT_ON`、`SIDEBAR_TITLE`、`SIDEBAR_SWITCH_INTERVAL`、`SIDEBAR_REFRESH_TICKS`（默认 60）、`SIDEBAR_MAIN_LINES`、`SIDEBAR_MAX_LINES`（亦可在 OP 面板「侧边栏」分组修改）
+- **配置**：`SIDEBAR_ENABLE`、`SIDEBAR_DEFAULT_ON`、`SIDEBAR_TITLE`、`SIDEBAR_SWITCH_INTERVAL`、`SIDEBAR_REFRESH_TICKS`（默认 60）、`SIDEBAR_JOIN_DELAY_TICKS`（默认 40）、`SIDEBAR_MAIN_LINES`、`SIDEBAR_MAX_LINES`（亦可在 OP 面板「侧边栏」分组修改）
 
 ### 🏠 领地管理系统
 - **三维领地** - 按 min/max X/Y/Z 圈地，按体积计价；粒子显示立方体边界（与「进入领地」时边界粒子一致）
@@ -801,7 +801,11 @@ arc.api_sidebar_set_values(
 
 ## 📋 近期更新日志
 
-### v0.9.25（当前版本）
+### v0.9.26（当前版本）
+
+- ✅ **修复侧边栏崩溃服务器**：`Objective.setDisplay` 改为每个 objective 只调一次；标题变化改 `display_name` 不再 `unregister` 重建；看板对象全程强引用，仅下线释放；进服延迟 `SIDEBAR_JOIN_DELAY_TICKS`（默认 40）后再写显示槽
+
+### v0.9.25
 
 - ✅ **侧边栏事件驱动刷新**：默认去掉生命/饱食；`SIDEBAR_REFRESH_TICKS` 默认 60（约 3 秒）只刷时间/TPS/延迟；金钱写库成功、进出服更新在线、插件 `set_value` 时触发刷新（旧配置 20 自动迁到 60）
 

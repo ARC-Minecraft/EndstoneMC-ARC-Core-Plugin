@@ -598,7 +598,8 @@ class ARCCorePlugin(Plugin):
                 )
                 self.logger.info(
                     f"[ARC Core]Sidebar system started, refresh={period} ticks, "
-                    f"switch={self.sidebar_system.switch_interval}s"
+                    f"switch={self.sidebar_system.switch_interval}s, "
+                    f"join_delay={self.sidebar_system.join_delay_ticks} ticks"
                 )
                 # 热重载时给已在线玩家补建侧边栏
                 for online in list(self.server.online_players or []):
