@@ -231,6 +231,7 @@ SETTING_GROUPS: List[Dict[str, object]] = [
         "title": "天眼",
         "items": [
             _s("ENABLE_SKY_EYE", "启用天眼", "bool", choices=BOOL_CHOICES),
+            _s("SKY_EYE_LOG_ACTOR_DAMAGE", "记录生物/玩家攻击天眼", "bool", choices=BOOL_CHOICES),
             _s("SKY_EYE_MAX_RETENTION_DAYS", "天眼保留天数", "int", placeholder="7"),
         ],
     },

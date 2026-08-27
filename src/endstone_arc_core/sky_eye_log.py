@@ -6,11 +6,19 @@ import threading
 from contextlib import suppress
 from datetime import date, datetime, timedelta
 from pathlib import Path
-from typing import Any, Dict, List, Optional, Sequence
+from typing import Any, Dict, List, Optional, Sequence, Tuple
 
 _file_lock = threading.Lock()
 _last_txt_prune_date: Optional[date] = None
 _date_filename_re = re.compile(r"^(\d{8})\.txt$")
+
+_INSERT_SQL = """
+INSERT INTO sky_eye_events (
+    ts, ts_unix, action, player_name, player_xuid, dimension,
+    x, y, z, hand, detail, in_land, land_id, land_name, land_owner,
+    target_name, target_xuid, target_type
+) VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)
+"""
 
 ACTION_LABELS = {
     "PlayerJoin": "进服",
@@ -98,11 +106,14 @@ def _parse_time_point(raw: str, *, end_of_day: bool = False) -> Optional[int]:
 class SkyEyeStore:
     """独立天眼 SQLite：写入事件、按保留天数滚动删除、提供查询。"""
 
+    _FLUSH_BATCH = 16
+
     def __init__(self, db_path: Path):
         self.db_path = Path(db_path)
         self._lock = threading.Lock()
         self._conn: Optional[sqlite3.Connection] = None
         self._last_prune_date: Optional[date] = None
+        self._pending: List[Tuple[Any, ...]] = []
         self._ensure_schema()
 
     def _connect(self) -> sqlite3.Connection:
@@ -167,12 +178,40 @@ class SkyEyeStore:
             )
             conn.commit()
 
+    def flush(self) -> None:
+        """将内存队列中的事件批量写入 SQLite。"""
+        with self._lock:
+            if not self._pending:
+                return
+            rows = self._pending
+            self._pending = []
+            conn = self._connect()
+            conn.executemany(_INSERT_SQL, rows)
+            conn.commit()
+
     def close(self) -> None:
         with self._lock:
+            try:
+                if self._pending:
+                    conn = self._connect()
+                    conn.executemany(_INSERT_SQL, self._pending)
+                    conn.commit()
+                    self._pending = []
+            except Exception:
+                pass
             if self._conn is not None:
                 with suppress(sqlite3.Error):
                     self._conn.close()
                 self._conn = None
+
+    def maybe_prune(self, retention_days: int) -> None:
+        """若尚未在今天执行过清理，则滚动删除旧事件。"""
+        today = date.today()
+        with self._lock:
+            if self._last_prune_date == today:
+                return
+        self.flush()
+        self.prune(retention_days)
 
     def prune(self, retention_days: int) -> None:
         """删除早于保留天数的 SQLite 行，并清理旧 txt。"""
@@ -211,8 +250,8 @@ class SkyEyeStore:
         target_xuid: str = "",
         target_type: str = "",
     ) -> None:
+        _ = retention_days  # 保留参数以兼容调用方；滚动清理改由定时任务触发
         now = datetime.now()
-        today = now.date()
         row = (
             now.strftime("%Y-%m-%d %H:%M:%S"),
             int(now.timestamp()),
@@ -233,26 +272,13 @@ class SkyEyeStore:
             _clean_text(target_xuid),
             _clean_text(target_type),
         )
+        should_flush = False
         with self._lock:
-            if self._last_prune_date != today:
-                self._last_prune_date = today
-                should_prune = True
-            else:
-                should_prune = False
-            conn = self._connect()
-            conn.execute(
-                """
-                INSERT INTO sky_eye_events (
-                    ts, ts_unix, action, player_name, player_xuid, dimension,
-                    x, y, z, hand, detail, in_land, land_id, land_name, land_owner,
-                    target_name, target_xuid, target_type
-                ) VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)
-                """,
-                row,
-            )
-            conn.commit()
-        if should_prune:
-            self.prune(retention_days)
+            self._pending.append(row)
+            if len(self._pending) >= self._FLUSH_BATCH:
+                should_flush = True
+        if should_flush:
+            self.flush()
 
     def query(
         self,
@@ -273,6 +299,7 @@ class SkyEyeStore:
         in_land: Optional[bool] = None,
         limit: int = 40,
     ) -> List[Dict[str, Any]]:
+        self.flush()
         clauses: List[str] = []
         params: List[Any] = []
         now_unix = int(datetime.now().timestamp())

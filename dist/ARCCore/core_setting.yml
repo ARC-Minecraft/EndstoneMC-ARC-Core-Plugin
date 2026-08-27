@@ -162,6 +162,8 @@ BLOCK_ALL_EXPLOSIONS=True
 
 # 天眼系统（Sky Eye）：玩家行为审计，日志目录 plugins/ARCCore/sky_eye/YYYYMMDD.txt（交互、放置、破坏、死亡、进出服、对实体交互等）
 ENABLE_SKY_EYE=True
+# 是否记录玩家攻击生物/玩家的天眼日志（False 仍保留领地保护判定，适合高 PvE 服）
+SKY_EYE_LOG_ACTOR_DAMAGE=True
 # 按自然日保留日志的最长天数，更早日期的 .txt 会被删除；0 表示不自动删除旧文件
 SKY_EYE_MAX_RETENTION_DAYS=7
 

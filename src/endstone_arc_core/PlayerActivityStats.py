@@ -200,12 +200,14 @@ class PlayerActivityStats:
             (int(count), xuid, stat_key),
         )
 
-    def inc_stat(self, xuid: str, stat_key: str, delta: int = 1) -> int:
+    def inc_stat(
+        self, xuid: str, stat_key: str, delta: int = 1, *, return_count: bool = True
+    ) -> int:
         xuid = str(xuid or "").strip()
         stat_key = str(stat_key or "").strip()
         delta = int(delta or 0)
         if not xuid or not stat_key or delta == 0:
-            return self.get_stat(xuid, stat_key) if xuid and stat_key else 0
+            return self.get_stat(xuid, stat_key) if (return_count and xuid and stat_key) else 0
         with self._lock:
             self.database_manager.execute(
                 f"INSERT OR IGNORE INTO {self.TABLE} (xuid, stat_key, count) VALUES (?, ?, 0)",
@@ -215,31 +217,33 @@ class PlayerActivityStats:
                 f"UPDATE {self.TABLE} SET count = count + ? WHERE xuid = ? AND stat_key = ?",
                 (delta, xuid, stat_key),
             )
-            return self.get_stat(xuid, stat_key)
+            if return_count:
+                return self.get_stat(xuid, stat_key)
+            return 0
 
     def record_kill(self, xuid: str, entity_type: str) -> None:
         xuid = str(xuid or "").strip()
         entity_type = normalize_entity_type_id(entity_type)
         if not xuid or not entity_type:
             return
-        self.inc_stat(xuid, "kill_total", 1)
-        self.inc_stat(xuid, f"kill:{entity_type}", 1)
+        self.inc_stat(xuid, "kill_total", 1, return_count=False)
+        self.inc_stat(xuid, f"kill:{entity_type}", 1, return_count=False)
 
     def record_block_break(self, xuid: str, block_id: str) -> None:
         xuid = str(xuid or "").strip()
         block_id = self.normalize_block_id(block_id)
         if not xuid or self._is_air_block(block_id):
             return
-        self.inc_stat(xuid, "break_total", 1)
-        self.inc_stat(xuid, f"break:{block_id}", 1)
+        self.inc_stat(xuid, "break_total", 1, return_count=False)
+        self.inc_stat(xuid, f"break:{block_id}", 1, return_count=False)
 
     def record_block_place(self, xuid: str, block_id: str) -> None:
         xuid = str(xuid or "").strip()
         block_id = self.normalize_block_id(block_id)
         if not xuid or self._is_air_block(block_id):
             return
-        self.inc_stat(xuid, "place_total", 1)
-        self.inc_stat(xuid, f"place:{block_id}", 1)
+        self.inc_stat(xuid, "place_total", 1, return_count=False)
+        self.inc_stat(xuid, f"place:{block_id}", 1, return_count=False)
 
     def get_kill_count(self, xuid: str, entity_id: str = "*") -> int:
         entity_id = str(entity_id or "*").strip()

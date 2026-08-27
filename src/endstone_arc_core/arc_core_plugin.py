@@ -552,6 +552,35 @@ class ARCCorePlugin(Plugin):
                 )
             except Exception:
                 pass
+            try:
+                def _sky_eye_flush_tick():
+                    try:
+                        if getattr(self, "sky_eye_store", None) is not None:
+                            self.sky_eye_store.flush()
+                    except Exception:
+                        pass
+
+                self.server.scheduler.run_task(
+                    self, _sky_eye_flush_tick, delay=20, period=20
+                )
+            except Exception:
+                pass
+            try:
+                def _sky_eye_prune_tick():
+                    try:
+                        if not self._sky_eye_setting_bool("ENABLE_SKY_EYE", True):
+                            return
+                        store = getattr(self, "sky_eye_store", None)
+                        if store is not None:
+                            store.maybe_prune(self._sky_eye_retention_days())
+                    except Exception:
+                        pass
+
+                self.server.scheduler.run_task(
+                    self, _sky_eye_prune_tick, delay=72000, period=72000
+                )
+            except Exception:
+                pass
             # 热重载后已在线玩家补标可追踪，避免指令漏记
             try:
                 for online in list(self.server.online_players or []):
@@ -1619,6 +1648,7 @@ class ARCCorePlugin(Plugin):
                 kxuid = str(getattr(killer, "xuid", "") or "").strip()
                 if kxuid:
                     self.activity_stats.record_kill(kxuid, "minecraft:player")
+                    self._notify_achievement_activity(kxuid, "kill", "minecraft:player")
         except Exception:
             pass
 
@@ -1916,58 +1946,59 @@ class ARCCorePlugin(Plugin):
         if attacker is None or attacker.type != "minecraft:player":
             return
 
-        actor_location = event.actor.location
-        target_name, target_xuid, target_type = self._sky_eye_identity(event.actor)
-        target_desc = target_type if target_type not in ("", "player") else (
-            getattr(event.actor, "identifier", getattr(event.actor, "type", "actor"))
-        )
-        if target_name:
-            target_desc = target_name if target_type == "player" else f"{target_name}"
-        detail_parts = [f"target={target_desc}"]
-        try:
-            damage = float(getattr(event, "damage", 0) or 0)
-            detail_parts.append(f"damage={damage:.2f}".rstrip("0").rstrip("."))
-        except Exception:
-            damage = None
-        hp_before, max_hp = self._sky_eye_read_health(event.actor)
-        if hp_before:
-            detail_parts.append(f"hp_before={hp_before}")
-            if damage is not None:
+        if self._sky_eye_setting_bool("SKY_EYE_LOG_ACTOR_DAMAGE", True):
+            actor_location = event.actor.location
+            target_name, target_xuid, target_type = self._sky_eye_identity(event.actor)
+            target_desc = target_type if target_type not in ("", "player") else (
+                getattr(event.actor, "identifier", getattr(event.actor, "type", "actor"))
+            )
+            if target_name:
+                target_desc = target_name if target_type == "player" else f"{target_name}"
+            detail_parts = [f"target={target_desc}"]
+            try:
+                damage = float(getattr(event, "damage", 0) or 0)
+                detail_parts.append(f"damage={damage:.2f}".rstrip("0").rstrip("."))
+            except Exception:
+                damage = None
+            hp_before, max_hp = self._sky_eye_read_health(event.actor)
+            if hp_before:
+                detail_parts.append(f"hp_before={hp_before}")
+                if damage is not None:
+                    try:
+                        hp_after_val = max(0.0, float(hp_before) - float(damage))
+                        hp_after = f"{hp_after_val:.1f}".rstrip("0").rstrip(".")
+                        detail_parts.append(f"hp_after={hp_after}")
+                    except Exception:
+                        pass
+            if max_hp:
+                detail_parts.append(f"max_hp={max_hp}")
+            cause = self._sky_eye_damage_cause(getattr(event, "damage_source", None))
+            if cause:
+                detail_parts.append(f"cause={cause}")
+            # PvP：附带被打方当时身上装备，便于核对「全套保护」是否属实
+            if target_type == "player":
                 try:
-                    hp_after_val = max(0.0, float(hp_before) - float(damage))
-                    hp_after = f"{hp_after_val:.1f}".rstrip("0").rstrip(".")
-                    detail_parts.append(f"hp_after={hp_after}")
+                    victim_armor = self._sky_eye_format_equipment(event.actor)
+                    if victim_armor and victim_armor != "-":
+                        detail_parts.append(f"victim_armor={victim_armor}")
                 except Exception:
                     pass
-        if max_hp:
-            detail_parts.append(f"max_hp={max_hp}")
-        cause = self._sky_eye_damage_cause(getattr(event, "damage_source", None))
-        if cause:
-            detail_parts.append(f"cause={cause}")
-        # PvP：附带被打方当时身上装备，便于核对「全套保护」是否属实
-        if target_type == "player":
-            try:
-                victim_armor = self._sky_eye_format_equipment(event.actor)
-                if victim_armor and victim_armor != "-":
-                    detail_parts.append(f"victim_armor={victim_armor}")
-            except Exception:
-                pass
-        self._sky_eye_append(
-            "ActorDamage",
-            attacker,
-            get_dimension_id(actor_location.dimension),
-            float(actor_location.x),
-            float(actor_location.y),
-            float(actor_location.z),
-            detail=";".join(detail_parts),
-            target_name=target_name,
-            target_xuid=target_xuid,
-            target_type=target_type if target_type else str(target_desc),
-        )
-        self._send_op_debug_message(
-            attacker, 'ActorDamage', str(target_desc),
-            get_dimension_id(actor_location.dimension), actor_location.x, actor_location.y, actor_location.z
-        )
+            self._sky_eye_append(
+                "ActorDamage",
+                attacker,
+                get_dimension_id(actor_location.dimension),
+                float(actor_location.x),
+                float(actor_location.y),
+                float(actor_location.z),
+                detail=";".join(detail_parts),
+                target_name=target_name,
+                target_xuid=target_xuid,
+                target_type=target_type if target_type else str(target_desc),
+            )
+            self._send_op_debug_message(
+                attacker, 'ActorDamage', str(target_desc),
+                get_dimension_id(actor_location.dimension), actor_location.x, actor_location.y, actor_location.z
+            )
         # 如果玩家是op则不判断
         if attacker.is_op:
             return
@@ -2065,18 +2096,59 @@ class ARCCorePlugin(Plugin):
             if not dead_type:
                 return
 
+            killer_xuid = str(getattr(killer, "xuid", "") or "").strip()
+            killer_name = str(getattr(killer, "name", "") or "").strip()
             dead_type_key = normalize_entity_type_id(str(dead_type))
+            if not killer_xuid:
+                return
+            self._schedule_actor_kill_processing(killer_xuid, killer_name, dead_type_key)
+        except Exception:
+            return
+
+    def _schedule_actor_kill_processing(
+        self, killer_xuid: str, killer_name: str, dead_type_key: str
+    ) -> None:
+        """延迟 1 tick 处理击杀统计与赏金，避免 Death 事件同 tick 阻塞主线程。"""
+        def _process():
+            self._process_actor_kill_reward(killer_xuid, killer_name, dead_type_key)
+
+        try:
+            self.server.scheduler.run_task(self, _process, delay=1)
+        except Exception:
             try:
-                kxuid = str(getattr(killer, "xuid", "") or "").strip()
-                if kxuid:
-                    self.activity_stats.record_kill(kxuid, dead_type_key)
+                _process()
             except Exception:
                 pass
 
+    def _process_actor_kill_reward(
+        self, killer_xuid: str, killer_name: str, dead_type_key: str
+    ) -> None:
+        try:
+            if killer_xuid:
+                self.activity_stats.record_kill(killer_xuid, dead_type_key)
+                self._notify_achievement_activity(killer_xuid, "kill", dead_type_key)
+        except Exception:
+            pass
+
+        try:
             reward = self.kill_reward_config.get_reward_and_ensure_key(dead_type_key)
-            if reward > 0:
-                if self.increase_player_money_by_name(killer.name, reward, notify=False):
-                    display_name = self.entity_display_name_manager.get_display_name_for_entity_type(dead_type_key)
+            if reward <= 0:
+                return
+            killer = self._find_online_player_by_xuid(killer_xuid)
+            if killer is None and killer_name:
+                killer = self.server.get_player(killer_name)
+            pay_name = killer_name
+            if killer is not None:
+                pay_name = str(getattr(killer, "name", "") or killer_name)
+            if not pay_name:
+                return
+            if self.increase_player_money_by_name(
+                pay_name, reward, notify=False, defer_richest=True
+            ):
+                display_name = self.entity_display_name_manager.get_display_name_for_entity_type(
+                    dead_type_key
+                )
+                if killer is not None:
                     killer.send_message(
                         self.language_manager.GetText("KILL_REWARD_MESSAGE").format(
                             display_name,
@@ -2085,14 +2157,18 @@ class ARCCorePlugin(Plugin):
                     )
                     self._grant_kill_guild_contribution(killer, reward)
         except Exception:
-            return
+            pass
 
     def _activity_record_block_break(self, player: Player, block_desc) -> None:
         try:
             xuid = str(getattr(player, "xuid", "") or "").strip()
             if not xuid:
                 return
-            self.activity_stats.record_block_break(xuid, str(block_desc or ""))
+            block_id = self.activity_stats.normalize_block_id(str(block_desc or ""))
+            if not block_id:
+                return
+            self.activity_stats.record_block_break(xuid, block_id)
+            self._notify_achievement_activity(xuid, "break", block_id)
         except Exception:
             pass
 
@@ -2101,9 +2177,42 @@ class ARCCorePlugin(Plugin):
             xuid = str(getattr(player, "xuid", "") or "").strip()
             if not xuid:
                 return
-            self.activity_stats.record_block_place(xuid, str(block_desc or ""))
+            block_id = self.activity_stats.normalize_block_id(str(block_desc or ""))
+            if not block_id:
+                return
+            self.activity_stats.record_block_place(xuid, block_id)
+            self._notify_achievement_activity(xuid, "place", block_id)
         except Exception:
             pass
+
+    def _notify_achievement_activity(
+        self, xuid: str, stat_kind: str, target_id: str
+    ) -> None:
+        """活动统计写入后通知 arc_achievement 检查相关成就（delay=0，不阻塞当前事件）。"""
+        xs = str(xuid or "").strip()
+        kind = str(stat_kind or "").strip().lower()
+        tid = str(target_id or "").strip()
+        if not xs or not kind or not tid:
+            return
+
+        def _run():
+            try:
+                plug = self.server.plugin_manager.get_plugin("arc_achievement")
+                if plug is None:
+                    return
+                fn = getattr(plug, "api_notify_activity_stat", None)
+                if callable(fn):
+                    fn(xs, kind, tid)
+            except Exception:
+                pass
+
+        try:
+            self.server.scheduler.run_task(self, _run, delay=0)
+        except Exception:
+            try:
+                _run()
+            except Exception:
+                pass
 
     @event_handler
     def on_player_drop_item(self, event: PlayerDropItemEvent):
@@ -5532,7 +5641,14 @@ class ARCCorePlugin(Plugin):
         sender.send_message(usage)
         return True
 
-    def increase_player_money_by_name(self, player_name: str, amount: float, notify: bool = True) -> bool:
+    def increase_player_money_by_name(
+        self,
+        player_name: str,
+        amount: float,
+        notify: bool = True,
+        *,
+        defer_richest: bool = False,
+    ) -> bool:
         player_xuid = self.get_player_xuid_by_name(player_name)
         if not player_xuid:
             online_player = self.server.get_player(player_name)
@@ -5564,7 +5680,10 @@ class ARCCorePlugin(Plugin):
                 )
         if success:
             try:
-                self._update_richest_title_if_needed()
+                if defer_richest:
+                    self._schedule_richest_title_refresh()
+                else:
+                    self._update_richest_title_if_needed()
             except Exception:
                 pass
             try:
@@ -5581,7 +5700,14 @@ class ARCCorePlugin(Plugin):
                 pass
         return success
 
-    def increase_player_money_by_xuid(self, xuid: str, amount: float, notify: bool = True) -> bool:
+    def increase_player_money_by_xuid(
+        self,
+        xuid: str,
+        amount: float,
+        notify: bool = True,
+        *,
+        defer_richest: bool = False,
+    ) -> bool:
         """按 XUID 增加余额（用于 OP 退款等不依赖在线游戏名的场景）。"""
         xuid_s = str(xuid or "").strip()
         if not xuid_s or amount <= 0:
@@ -5607,7 +5733,10 @@ class ARCCorePlugin(Plugin):
                 )
         if success:
             try:
-                self._update_richest_title_if_needed()
+                if defer_richest:
+                    self._schedule_richest_title_refresh()
+                else:
+                    self._update_richest_title_if_needed()
             except Exception:
                 pass
             try:
