@@ -1,7 +1,8 @@
 # -*- coding: utf-8 -*-
 """领地系统：建表、区块索引、CRUD、子领地、权限设置的全部数据/逻辑层"""
 import json
-from typing import Any, Callable, Dict, List, Optional, Set
+from collections import OrderedDict
+from typing import Any, Callable, Dict, List, Optional, Set, Tuple
 
 
 class LandSystem:
@@ -169,6 +170,10 @@ class LandSystem:
         self._block_actor_spawn_list: frozenset = frozenset()
         self._block_actor_spawn_mode: str = LandSystem.BLOCK_ACTOR_SPAWN_MODE_WHITELIST
         self._block_actor_spawn_scope: str = LandSystem.BLOCK_ACTOR_SPAWN_SCOPE_PUBLIC
+        self._chunk_lands_lru: OrderedDict[Tuple[str, str], List[dict]] = OrderedDict()
+        self._land_info_cache: Dict[int, dict] = {}
+        self._CHUNK_LRU_MAX = 256
+        self._LAND_INFO_CACHE_MAX = 512
         self._load_config()
 
     def set_persistent_error_callback(
@@ -310,6 +315,51 @@ class LandSystem:
     def _get_chunk_key(self, x: int, z: int) -> str:
         return f"{x >> 4}_{z >> 4}"
 
+    def _invalidate_land_caches(self) -> None:
+        self._chunk_lands_lru.clear()
+        self._land_info_cache.clear()
+
+    def _cache_put_chunk_lands(self, dimension: str, chunk_key: str, lands: List[dict]) -> None:
+        key = (dimension, chunk_key)
+        self._chunk_lands_lru[key] = lands
+        self._chunk_lands_lru.move_to_end(key)
+        while len(self._chunk_lands_lru) > self._CHUNK_LRU_MAX:
+            self._chunk_lands_lru.popitem(last=False)
+
+    def _load_chunk_lands(self, dimension: str, chunk_key: str) -> List[dict]:
+        key = (dimension, chunk_key)
+        cached = self._chunk_lands_lru.get(key)
+        if cached is not None:
+            self._chunk_lands_lru.move_to_end(key)
+            return cached
+        if not self._ensure_dimension_table(dimension):
+            return []
+        table = self._get_dimension_table(dimension)
+        chunk_data = self.db.query_one(
+            f"SELECT land_ids FROM {table} WHERE chunk_key = ?", (chunk_key,)
+        )
+        if not chunk_data:
+            self._cache_put_chunk_lands(dimension, chunk_key, [])
+            return []
+        lands: List[dict] = []
+        try:
+            land_ids = json.loads(chunk_data["land_ids"])
+        except Exception:
+            land_ids = []
+        for land_id in land_ids:
+            land = self.db.query_one(
+                "SELECT * FROM lands WHERE land_id = ?", (land_id,)
+            )
+            if not land:
+                continue
+            if str(land.get("dimension") or "") != dimension:
+                continue
+            parsed = self._parse_land_row(land)
+            parsed["land_id"] = int(land_id)
+            lands.append(parsed)
+        self._cache_put_chunk_lands(dimension, chunk_key, lands)
+        return lands
+
     def _get_affected_chunks(
         self, min_x: int, max_x: int, min_z: int, max_z: int
     ) -> Set[str]:
@@ -341,6 +391,7 @@ class LandSystem:
         max_z: int,
     ) -> bool:
         try:
+            self._invalidate_land_caches()
             table = self._get_dimension_table(dimension)
             for chunk_key in self._get_affected_chunks(min_x, max_x, min_z, max_z):
                 existing = self.db.query_one(
@@ -499,6 +550,7 @@ class LandSystem:
     def rebuild_chunk_land_mapping(self) -> tuple:
         """重建所有区块-领地映射表。返回 (success, num_dims, num_lands, error_str)"""
         try:
+            self._invalidate_land_caches()
             tables = self.db.query_all(
                 "SELECT name FROM sqlite_master WHERE type='table' AND name LIKE 'chunk_lands_%'"
             )
@@ -597,32 +649,20 @@ class LandSystem:
             if not dimension:
                 return None
             x, z = int(x), int(z)
-            if not self._ensure_dimension_table(dimension):
-                return None
-            table = self._get_dimension_table(dimension)
             chunk_key = self._get_chunk_key(x, z)
-            chunk_data = self.db.query_one(
-                f"SELECT land_ids FROM {table} WHERE chunk_key = ?", (chunk_key,)
-            )
-            if not chunk_data:
+            lands = self._load_chunk_lands(dimension, chunk_key)
+            if not lands:
                 return None
-            land_ids = json.loads(chunk_data["land_ids"])
             best_public_id = None
             best_public_priority = -1
-            for land_id in land_ids:
-                land = self.db.query_one(
-                    "SELECT * FROM lands WHERE land_id = ?", (land_id,)
-                )
-                if not land:
-                    continue
-                if str(land.get("dimension") or "") != dimension:
-                    continue
+            for land in lands:
+                land_id = int(land.get("land_id") or 0)
                 if not (land["min_x"] <= x <= land["max_x"] and land["min_z"] <= z <= land["max_z"]):
                     continue
                 if y is not None:
                     if not (land.get("min_y", 0) <= int(y) <= land.get("max_y", 255)):
                         continue
-                if not self.is_public_land_owner(land["owner_xuid"]):
+                if not self.is_public_land_owner(land.get("owner_xuid")):
                     return land_id
                 priority = self.clamp_public_priority(land.get("public_priority", 1))
                 if (
@@ -647,33 +687,17 @@ class LandSystem:
             if not dimension:
                 return []
             x, z = int(x), int(z)
-            if not self._ensure_dimension_table(dimension):
-                return []
-            table = self._get_dimension_table(dimension)
             chunk_key = self._get_chunk_key(x, z)
-            chunk_data = self.db.query_one(
-                f"SELECT land_ids FROM {table} WHERE chunk_key = ?", (chunk_key,)
-            )
-            if not chunk_data:
-                return []
             private_rows: List[dict] = []
             public_rows: List[dict] = []
-            for land_id in json.loads(chunk_data["land_ids"]):
-                land = self.db.query_one(
-                    "SELECT * FROM lands WHERE land_id = ?", (land_id,)
-                )
-                if not land:
-                    continue
-                if str(land.get("dimension") or "") != dimension:
-                    continue
+            for land in self._load_chunk_lands(dimension, chunk_key):
                 if not (land["min_x"] <= x <= land["max_x"] and land["min_z"] <= z <= land["max_z"]):
                     continue
                 if y is not None:
                     if not (land.get("min_y", 0) <= int(y) <= land.get("max_y", 255)):
                         continue
-                parsed = self._parse_land_row(land)
-                parsed["land_id"] = int(land_id)
-                if self.is_public_land_owner(land["owner_xuid"]):
+                parsed = dict(land)
+                if self.is_public_land_owner(land.get("owner_xuid")):
                     public_rows.append(parsed)
                 else:
                     private_rows.append(parsed)
@@ -701,6 +725,7 @@ class LandSystem:
     ) -> None:
         """从 chunk_lands_* 索引中移除该领地 ID（不删除 lands 表行）。"""
         try:
+            self._invalidate_land_caches()
             table = self._get_dimension_table(dimension)
             for chunk_key in self._get_affected_chunks(min_x, max_x, min_z, max_z):
                 row = self.db.query_one(
@@ -935,24 +960,35 @@ class LandSystem:
 
     def get_land_info(self, land_id: int) -> dict:
         try:
-            row = self.db.query_one("SELECT * FROM lands WHERE land_id = ?", (land_id,))
-            return self._parse_land_row(row)
+            lid = int(land_id)
+            cached = self._land_info_cache.get(lid)
+            if cached is not None:
+                return dict(cached)
+            row = self.db.query_one("SELECT * FROM lands WHERE land_id = ?", (lid,))
+            parsed = self._parse_land_row(row)
+            if parsed:
+                parsed["land_id"] = lid
+                self._land_info_cache[lid] = parsed
+                if len(self._land_info_cache) > self._LAND_INFO_CACHE_MAX:
+                    self._land_info_cache.clear()
+                    self._land_info_cache[lid] = parsed
+            return dict(parsed) if parsed else {}
         except Exception as e:
             self._log("error", f"Get land info error: {str(e)}")
             return {}
 
     def get_land_owner(self, land_id: int) -> str:
         try:
-            row = self.db.query_one("SELECT owner_xuid FROM lands WHERE land_id = ?", (land_id,))
-            return row["owner_xuid"] if row else ""
+            info = self.get_land_info(land_id)
+            return str(info.get("owner_xuid") or "") if info else ""
         except Exception as e:
             self._log("error", f"Get land owner error: {str(e)}")
             return ""
 
     def get_land_name(self, land_id: int) -> str:
         try:
-            row = self.db.query_one("SELECT land_name FROM lands WHERE land_id = ?", (land_id,))
-            return row["land_name"] if row else ""
+            info = self.get_land_info(land_id)
+            return str(info.get("land_name") or "") if info else ""
         except Exception as e:
             self._log("error", f"Get land name error: {str(e)}")
             return ""
@@ -1017,6 +1053,7 @@ class LandSystem:
                 "UPDATE lands SET tp_x = ?, tp_y = ?, tp_z = ? WHERE land_id = ?",
                 (x, y, z, land_id),
             )
+            self._invalidate_land_caches()
             return True, None
         except Exception as e:
             self._log("error", f"Set land teleport point error: {str(e)}")
@@ -1030,6 +1067,7 @@ class LandSystem:
             self.db.execute(
                 "UPDATE lands SET land_name = ? WHERE land_id = ?", (new_name, land_id)
             )
+            self._invalidate_land_caches()
             return True, None
         except Exception as e:
             self._log("error", f"Rename land error: {str(e)}")
@@ -1049,7 +1087,7 @@ class LandSystem:
                 if public_priority is None
                 else public_priority
             )
-            return self.db.execute(
+            ok = self.db.execute(
                 "UPDATE lands SET owner_xuid = ?, owner_paid_money = 0, "
                 "for_sale = 0, sale_price = 0, "
                 "public_priority = ?, "
@@ -1057,6 +1095,9 @@ class LandSystem:
                 "WHERE land_id = ?",
                 (self.LAND_OWNER_PUBLIC, priority, land_id),
             )
+            if ok:
+                self._invalidate_land_caches()
+            return ok
         except Exception as e:
             self._log("error", f"Set land as public error: {str(e)}")
             return False
@@ -1067,12 +1108,15 @@ class LandSystem:
             if not self.get_land_info(land_id):
                 return False
             p = self.clamp_public_priority(priority)
-            return bool(
+            ok = bool(
                 self.db.execute(
                     "UPDATE lands SET public_priority = ? WHERE land_id = ?",
                     (p, land_id),
                 )
             )
+            if ok:
+                self._invalidate_land_caches()
+            return ok
         except Exception as e:
             self._log("error", f"Set land public priority error: {str(e)}")
             return False
@@ -1088,6 +1132,7 @@ class LandSystem:
                 "UPDATE lands SET owner_xuid = ?, for_sale = 0, sale_price = 0 WHERE land_id = ?",
                 (new_key, land_id),
             )
+            self._invalidate_land_caches()
             return True
         except Exception as e:
             self._log("error", f"Transfer land error: {str(e)}")
@@ -1106,12 +1151,15 @@ class LandSystem:
                     return False
             else:
                 sp = 0.0
-            return bool(
+            ok = bool(
                 self.db.execute(
                     "UPDATE lands SET for_sale = ?, sale_price = ? WHERE land_id = ?",
                     (1 if for_sale else 0, sp, land_id),
                 )
             )
+            if ok:
+                self._invalidate_land_caches()
+            return ok
         except Exception as e:
             self._log("error", f"Set land sale listing error: {str(e)}")
             return False
@@ -1147,7 +1195,7 @@ class LandSystem:
             listed = float(row.get("sale_price") or 0)
             if abs(listed - fp) > 1e-6:
                 return False
-            return bool(
+            ok = bool(
                 self.db.execute(
                     "UPDATE lands SET owner_xuid = ?, for_sale = 0, sale_price = 0, "
                     "shared_users = '[]', owner_paid_money = ? "
@@ -1156,6 +1204,9 @@ class LandSystem:
                     (new_key, fp, land_id, seller_owner_key, fp),
                 )
             )
+            if ok:
+                self._invalidate_land_caches()
+            return ok
         except Exception as e:
             self._log("error", f"Transfer land purchase error: {str(e)}")
             return False
@@ -1243,7 +1294,10 @@ class LandSystem:
             "block_actor_spawn": "UPDATE lands SET block_actor_spawn = ? WHERE land_id = ?",
         }[col]
         try:
-            return bool(self.db.execute(sql, (1 if value else 0, land_id)))
+            ok = bool(self.db.execute(sql, (1 if value else 0, land_id)))
+            if ok:
+                self._invalidate_land_caches()
+            return ok
         except Exception as e:
             self._log("error", f"Set land flag {col} error: {str(e)}")
             return False
@@ -1327,10 +1381,13 @@ class LandSystem:
             if xuid in shared:
                 return False
             shared.append(xuid)
-            return bool(self.db.execute(
+            ok = bool(self.db.execute(
                 "UPDATE lands SET shared_users = ? WHERE land_id = ?",
                 (json.dumps(shared), land_id),
             ))
+            if ok:
+                self._invalidate_land_caches()
+            return ok
         except Exception as e:
             self._log("error", f"Add land shared user error: {str(e)}")
             return False
@@ -1345,10 +1402,13 @@ class LandSystem:
             if xuid not in shared:
                 return False
             shared.remove(xuid)
-            return bool(self.db.execute(
+            ok = bool(self.db.execute(
                 "UPDATE lands SET shared_users = ? WHERE land_id = ?",
                 (json.dumps(shared), land_id),
             ))
+            if ok:
+                self._invalidate_land_caches()
+            return ok
         except Exception as e:
             self._log("error", f"Remove land shared user error: {str(e)}")
             return False

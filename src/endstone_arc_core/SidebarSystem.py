@@ -2,13 +2,15 @@
 """弧光核心侧边栏总控：多页面注册、键值对模板、定时翻页、每玩家独立计分板。"""
 from __future__ import annotations
 
+import heapq
 import re
+import threading
 import time
 from collections import deque
 from dataclasses import dataclass, field
 from datetime import datetime
 from pathlib import Path
-from typing import Any, Dict, List, Optional, Set
+from typing import Any, Dict, List, Optional, Set, Tuple
 
 from endstone import Player
 from endstone.scoreboard import Criteria, DisplaySlot, ObjectiveSortOrder
@@ -53,6 +55,9 @@ _STABLE_OBJECTIVE = "arc_sb"
 # 单人刷新周期默认：60 tick ≈ 3 秒
 _DEFAULT_REFRESH_TICKS = 60
 _DEFAULT_JOIN_DELAY_TICKS = 40  # 进服后延迟再写显示槽，避开未 spawn
+# 调度器唤醒间隔：每 5 tick 一次，避免每 tick 进 Python
+TICK_PERIOD = 5
+_CACHE_WORKER_INTERVAL = 2.0
 _RENDER_RING_MAX = 32
 _RENDER_STATE_FILE = Path("plugins/ARCCore/sidebar_render_state.txt")
 
@@ -138,6 +143,14 @@ class SidebarSystem:
         self._cached_max_players: Optional[int] = None
         self._ping_cache: Dict[str, Optional[int]] = {}
         self._money_cache: Dict[str, str] = {}
+        self._title_cache: Dict[str, str] = {}
+        self._guild_cache: Dict[str, str] = {}
+        self._cache_lock = threading.Lock()
+        self._cache_stop = threading.Event()
+        self._cache_thread: Optional[threading.Thread] = None
+        self._online_by_xuid: Dict[str, Player] = {}
+        self._due_heap: List[Tuple[int, str]] = []
+        self._due_at: Dict[str, int] = {}
         self._game_tick: int = 0
         self.enabled = True
         self.default_on = True
@@ -477,6 +490,9 @@ class SidebarSystem:
                 join_tick=int(self._game_tick),
             )
             self._player_state[xuid] = st
+            self._online_by_xuid[xuid] = player
+            delay = max(0, int(self.join_delay_ticks))
+            self._schedule_due(xuid, int(self._game_tick) + max(1, delay))
             self._seed_money_cache(xuid)
             self._update_online_cache()
             if st.enabled:
@@ -516,25 +532,37 @@ class SidebarSystem:
             if st is not None:
                 self._release_player_board(player, st, xuid)
             self._player_state.pop(xuid, None)
+            self._online_by_xuid.pop(xuid, None)
+            self._due_at.pop(xuid, None)
             self._values.pop(xuid, None)
             self._ping_cache.pop(xuid, None)
-            self._money_cache.pop(xuid, None)
+            with self._cache_lock:
+                self._money_cache.pop(xuid, None)
+                self._title_cache.pop(xuid, None)
+                self._guild_cache.pop(xuid, None)
             self._update_online_cache()
         except Exception as e:
             self._log_error(f"on_player_quit: {e}")
 
+    def start(self) -> None:
+        """启动后台数据缓存线程（金钱/头衔/公会）。"""
+        self._start_cache_worker()
+
     def shutdown(self) -> None:
         try:
+            self._stop_cache_worker()
             if self._render_open_xuid:
                 self._log_warn(
                     f"shutdown with unclosed render xuid={self._render_open_xuid}"
                 )
-            for player in list(getattr(self.plugin.server, "online_players", []) or []):
-                xuid = str(getattr(player, "xuid", "") or "").strip()
+            for xuid, player in list(self._online_by_xuid.items()):
                 st = self._player_state.get(xuid)
                 if st is not None:
                     self._release_player_board(player, st, xuid)
             self._player_state.clear()
+            self._online_by_xuid.clear()
+            self._due_heap.clear()
+            self._due_at.clear()
             self._boards.clear()
             self._mark_render_exit(self._render_open_xuid)
         except Exception as e:
@@ -661,35 +689,43 @@ class SidebarSystem:
         return pages[idx]
 
     # ------------------------------------------------------------------ tick / render
+    def _schedule_due(self, xuid: str, due_tick: int) -> None:
+        xs = str(xuid or "").strip()
+        if not xs:
+            return
+        due = max(int(due_tick), int(self._game_tick))
+        self._due_at[xs] = due
+        heapq.heappush(self._due_heap, (due, xs))
+
     def tick(self) -> None:
-        """每游戏 tick 调用；按进服 tick 错峰，仅刷新到期玩家。"""
+        """由调度器每 TICK_PERIOD tick 调用；只处理到期玩家，不扫全员。"""
         if not self.enabled:
             return
         try:
-            self._game_tick += 1
+            self._game_tick += int(TICK_PERIOD)
             rt = max(1, int(self.refresh_ticks))
-            delay = max(0, int(self.join_delay_ticks))
-            if self._game_tick % rt == 0:
+            if self._game_tick % rt < TICK_PERIOD:
                 self._refresh_timed_cache()
             now = time.time()
-            for player in list(getattr(self.plugin.server, "online_players", []) or []):
+            due_xuids: List[str] = []
+            while self._due_heap and self._due_heap[0][0] <= self._game_tick:
+                due_tick, xuid = heapq.heappop(self._due_heap)
+                if self._due_at.get(xuid) != due_tick:
+                    continue
+                due_xuids.append(xuid)
+            for xuid in due_xuids:
                 try:
-                    xuid = str(getattr(player, "xuid", "") or "").strip()
-                    if not xuid:
-                        continue
+                    player = self._online_by_xuid.get(xuid)
                     st = self._player_state.get(xuid)
-                    if st is None or not st.enabled:
+                    if player is None or st is None:
+                        self._due_at.pop(xuid, None)
                         continue
-                    if not self._is_render_ready(player):
-                        continue
-                    elapsed = self._game_tick - int(st.join_tick)
-                    if elapsed < delay:
-                        continue
-                    if elapsed % rt != 0:
-                        continue
-                    self._tick_player(player, now)
+                    if st.enabled:
+                        self._tick_player(player, now)
+                    self._schedule_due(xuid, self._game_tick + rt)
                 except Exception as e:
                     self._log_error(f"tick player: {e}")
+                    self._schedule_due(xuid, self._game_tick + rt)
         except Exception as e:
             self._log_error(f"tick: {e}")
 
@@ -720,7 +756,7 @@ class SidebarSystem:
                 if player is not None:
                     self.refresh_player(player, force=True)
                 return
-            for player in list(getattr(self.plugin.server, "online_players", []) or []):
+            for player in list(self._online_by_xuid.values()):
                 self.refresh_player(player, force=True)
         except Exception as e:
             self._log_error(f"refresh: {e}")
@@ -762,9 +798,8 @@ class SidebarSystem:
         if not pages:
             self._hide_sidebar_display(st)
             return
-        # 每人延迟随定时器取样；金钱顺带从库重读（跨服共享库无本地事件时兜底）
+        # 每人延迟随定时器取样；金钱/头衔/公会由后台线程刷新缓存
         self._sample_player_ping(player, xuid)
-        self._seed_money_cache(xuid)
         if not st.locked_page and len(pages) >= 2:
             if now - st.last_switch_ts >= self.switch_interval:
                 st.page_index = (st.page_index + 1) % len(pages)
@@ -1148,8 +1183,7 @@ class SidebarSystem:
 
     def _refresh_all_enabled(self, exclude_xuid: str = "") -> None:
         ex = str(exclude_xuid or "").strip()
-        for player in list(getattr(self.plugin.server, "online_players", []) or []):
-            xuid = str(getattr(player, "xuid", "") or "").strip()
+        for xuid, player in list(self._online_by_xuid.items()):
             if not xuid or xuid == ex:
                 continue
             st = self._player_state.get(xuid)
@@ -1162,9 +1196,7 @@ class SidebarSystem:
 
     def _update_online_cache(self) -> None:
         try:
-            self._cached_online = len(
-                list(getattr(self.plugin.server, "online_players", []) or [])
-            )
+            self._cached_online = len(self._online_by_xuid)
         except Exception:
             self._cached_online = 0
         try:
@@ -1208,11 +1240,11 @@ class SidebarSystem:
         except Exception:
             money = 0.0
         if isinstance(money, float):
-            self._money_cache[xs] = (
-                f"{money:.2f}".rstrip("0").rstrip(".")
-            )
+            text = f"{money:.2f}".rstrip("0").rstrip(".")
         else:
-            self._money_cache[xs] = str(money)
+            text = str(money)
+        with self._cache_lock:
+            self._money_cache[xs] = text
 
     def _sample_player_ping(self, player: Player, xuid: str) -> Optional[int]:
         ping = None
@@ -1230,10 +1262,10 @@ class SidebarSystem:
         pages: List[SidebarPage],
         st: PlayerSidebarState,
     ) -> Dict[str, Any]:
-        # 金钱：缓存未命中时补一次（进服/事件应已写入）
-        if xuid and xuid not in self._money_cache:
-            self._seed_money_cache(xuid)
-        money_str = self._money_cache.get(xuid, "0")
+        with self._cache_lock:
+            money_str = self._money_cache.get(xuid, "0")
+            title = self._title_cache.get(xuid, "")
+            guild = self._guild_cache.get(xuid, "")
 
         # 生命/饱食仅在自定义模板仍引用时现场读取（默认模板已去掉）
         hp = None
@@ -1245,22 +1277,6 @@ class SidebarSystem:
             hp = None
             max_hp = None
         food = self._get_food(player)
-
-        title = ""
-        try:
-            title = self.plugin.title_system.get_equipped_title(player) or ""
-        except Exception:
-            title = ""
-
-        guild = ""
-        try:
-            mem = self.plugin.guild_system.get_membership(xuid)
-            if mem:
-                g = self.plugin.guild_system.get_guild(int(mem.get("guild_id") or 0))
-                if g:
-                    guild = str(g.get("name") or "")
-        except Exception:
-            guild = ""
 
         mc_time = None
         try:
@@ -1333,16 +1349,19 @@ class SidebarSystem:
         return None
 
     def _find_online(self, xuid: str) -> Optional[Player]:
+        xs = str(xuid or "").strip()
+        if not xs:
+            return None
+        player = self._online_by_xuid.get(xs)
+        if player is not None:
+            return player
         try:
             fn = getattr(self.plugin, "_find_online_player_by_xuid", None)
             if callable(fn):
-                return fn(xuid)
-        except Exception:
-            pass
-        try:
-            for p in list(self.plugin.server.online_players or []):
-                if str(getattr(p, "xuid", "") or "") == xuid:
-                    return p
+                found = fn(xs)
+                if found is not None:
+                    self._online_by_xuid[xs] = found
+                    return found
         except Exception:
             pass
         return None
@@ -1353,7 +1372,7 @@ class SidebarSystem:
         xuid = str(getattr(player, "xuid", "") or "").strip()
         if not xuid:
             return False
-        if self._find_online(xuid) is None:
+        if xuid not in self._online_by_xuid and self._find_online(xuid) is None:
             return False
         try:
             iv = getattr(player, "is_valid", None)
@@ -1397,14 +1416,72 @@ class SidebarSystem:
         xs = str(xuid or "").strip() or "?"
         self._render_open_xuid = xs
         self._ring_note(f"ENTER {xs}")
-        self._write_render_state(f"open {xs} {time.time():.3f}")
 
     def _mark_render_exit(self, xuid: str) -> None:
         xs = str(xuid or "").strip()
         self._ring_note(f"EXIT {xs or self._render_open_xuid}")
         if not xs or self._render_open_xuid == xs:
             self._render_open_xuid = ""
-            self._write_render_state("")
+
+    def _start_cache_worker(self) -> None:
+        if self._cache_thread is not None and self._cache_thread.is_alive():
+            return
+        self._cache_stop.clear()
+        self._cache_thread = threading.Thread(
+            target=self._cache_worker_loop,
+            name="ARCCore-SidebarCache",
+            daemon=True,
+        )
+        self._cache_thread.start()
+
+    def _stop_cache_worker(self) -> None:
+        self._cache_stop.set()
+        thread = self._cache_thread
+        if thread is not None and thread.is_alive() and threading.current_thread() is not thread:
+            thread.join(timeout=1.5)
+        self._cache_thread = None
+
+    def _cache_worker_loop(self) -> None:
+        while not self._cache_stop.wait(_CACHE_WORKER_INTERVAL):
+            try:
+                self._refresh_player_data_caches()
+            except Exception as e:
+                self._log_error(f"cache_worker: {e}")
+
+    def _refresh_player_data_caches(self) -> None:
+        xuids = list(self._player_state.keys())
+        money: Dict[str, str] = {}
+        titles: Dict[str, str] = {}
+        guilds: Dict[str, str] = {}
+        for xuid in xuids:
+            try:
+                raw = self.plugin.economy.get_player_money_by_xuid(xuid)
+            except Exception:
+                raw = None
+            if isinstance(raw, float):
+                money[xuid] = f"{raw:.2f}".rstrip("0").rstrip(".")
+            elif raw is None:
+                money[xuid] = "0"
+            else:
+                money[xuid] = str(raw)
+            try:
+                titles[xuid] = self.plugin.title_system.get_equipped_title_by_xuid(xuid) or ""
+            except Exception:
+                titles[xuid] = ""
+            try:
+                mem = self.plugin.guild_system.get_membership(xuid)
+                gname = ""
+                if mem:
+                    g = self.plugin.guild_system.get_guild(int(mem.get("guild_id") or 0))
+                    if g:
+                        gname = str(g.get("name") or "")
+                guilds[xuid] = gname
+            except Exception:
+                guilds[xuid] = ""
+        with self._cache_lock:
+            self._money_cache.update(money)
+            self._title_cache.update(titles)
+            self._guild_cache.update(guilds)
 
     def _log_warn(self, msg: str) -> None:
         try:

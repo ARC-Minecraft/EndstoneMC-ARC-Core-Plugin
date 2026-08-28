@@ -166,6 +166,8 @@ class ARCCorePlugin(Plugin):
         self.language_manager = LanguageManager(default_language_dode if default_language_dode is not None else 'ZH-CN')
         self.database_manager = DatabaseManager(Path(MAIN_PATH) / self.setting_manager.GetSetting('DATABASE_PATH'))
         self.sky_eye_store = SkyEyeStore(Path(MAIN_PATH) / SKY_EYE_LOG_DIR_NAME / SKY_EYE_DB_NAME)
+        self._sky_eye_hand_cache: dict[str, str] = {}
+        self._sky_eye_land_meta: dict[int, tuple] = {}
 
         # 跨服数据消费方式：远程客户端 与 共享文件路径 互斥
         self._sync_consumer_mode, self._sync_mode_conflict = resolve_sync_consumer_mode(self.setting_manager)
@@ -498,6 +500,10 @@ class ARCCorePlugin(Plugin):
         self.entity_display_name_manager.logger = self.logger
         self.kill_reward_config.logger = self.logger
         self.activity_stats.logger = self.logger
+        try:
+            self.activity_stats.start_writer()
+        except Exception:
+            pass
 
         # 初始化公告系统和清道夫系统
         self._load_broadcast_messages()
@@ -553,19 +559,6 @@ class ARCCorePlugin(Plugin):
             except Exception:
                 pass
             try:
-                def _sky_eye_flush_tick():
-                    try:
-                        if getattr(self, "sky_eye_store", None) is not None:
-                            self.sky_eye_store.flush()
-                    except Exception:
-                        pass
-
-                self.server.scheduler.run_task(
-                    self, _sky_eye_flush_tick, delay=20, period=20
-                )
-            except Exception:
-                pass
-            try:
                 def _sky_eye_prune_tick():
                     try:
                         if not self._sky_eye_setting_bool("ENABLE_SKY_EYE", True):
@@ -592,12 +585,14 @@ class ARCCorePlugin(Plugin):
         try:
             self.sidebar_system.reload_config()
             if self.sidebar_system.enabled:
+                self.sidebar_system.start()
+                period = max(1, int(getattr(self.sidebar_system, "TICK_PERIOD", 5)))
                 self.server.scheduler.run_task(
-                    self, self.sidebar_system.tick, delay=1, period=1
+                    self, self.sidebar_system.tick, delay=period, period=period
                 )
                 self.logger.info(
                     f"[ARC Core]Sidebar system started, refresh={self.sidebar_system.refresh_ticks} ticks/player "
-                    f"(join-staggered, scheduler every 1 tick), "
+                    f"(join-staggered, scheduler every {period} ticks), "
                     f"switch={self.sidebar_system.switch_interval}s, "
                     f"join_delay={self.sidebar_system.join_delay_ticks} ticks"
                 )
@@ -697,6 +692,11 @@ class ARCCorePlugin(Plugin):
         if self.sync_server and self.sync_server.is_running():
             self.sync_server.stop()
             self.logger.info("[ARC Core] Sync server stopped.")
+        try:
+            if getattr(self, "activity_stats", None) is not None:
+                self.activity_stats.stop_writer()
+        except Exception:
+            pass
         try:
             if getattr(self, "sky_eye_store", None) is not None:
                 self.sky_eye_store.close()
@@ -1410,6 +1410,12 @@ class ARCCorePlugin(Plugin):
         try:
             if getattr(self, "sidebar_system", None) is not None:
                 self.sidebar_system.on_player_quit(player)
+        except Exception:
+            pass
+        try:
+            xuid = str(getattr(player, "xuid", "") or "").strip()
+            if xuid:
+                self._sky_eye_hand_cache.pop(xuid, None)
         except Exception:
             pass
 
@@ -2263,6 +2269,7 @@ class ARCCorePlugin(Plugin):
                 y,
                 z,
                 detail=f"slot {prev_slot}->{new_slot};item={item_text}",
+                hand=item_text,
             )
         except Exception:
             pass
@@ -2916,12 +2923,20 @@ class ARCCorePlugin(Plugin):
             return empty
         if land_id is None:
             return empty
-        try:
-            land_name = self.get_land_name(land_id) or f"#{land_id}"
-            land_owner = self.get_land_display_owner_name(land_id) or ""
-        except Exception:
-            land_name = f"#{land_id}"
-            land_owner = ""
+        meta = self._sky_eye_land_meta.get(int(land_id))
+        if meta is not None:
+            land_name, land_owner = meta
+        else:
+            try:
+                info = self.get_land_info(land_id) or {}
+                land_name = str(info.get("land_name") or "") or f"#{land_id}"
+                land_owner = self.get_land_display_owner_name(land_id) or ""
+            except Exception:
+                land_name = f"#{land_id}"
+                land_owner = ""
+            if len(self._sky_eye_land_meta) >= 256:
+                self._sky_eye_land_meta.clear()
+            self._sky_eye_land_meta[int(land_id)] = (land_name, land_owner)
         return {
             "in_land": True,
             "land_id": int(land_id),
@@ -2941,6 +2956,7 @@ class ARCCorePlugin(Plugin):
         target_name: str = "",
         target_xuid: str = "",
         target_type: str = "",
+        hand: Optional[str] = None,
     ) -> None:
         if not self._sky_eye_setting_bool("ENABLE_SKY_EYE", True):
             return
@@ -2949,10 +2965,18 @@ class ARCCorePlugin(Plugin):
         try:
             player_name = getattr(player, "name", "") or "?"
             player_xuid = str(getattr(player, "xuid", "") or "")
-            try:
-                hand = self._sky_eye_format_main_hand(player)
-            except Exception:
-                hand = "-"
+            if hand is None:
+                if player_xuid and player_xuid in self._sky_eye_hand_cache:
+                    hand = self._sky_eye_hand_cache[player_xuid]
+                else:
+                    try:
+                        hand = self._sky_eye_format_main_hand(player)
+                    except Exception:
+                        hand = "-"
+                    if player_xuid:
+                        self._sky_eye_hand_cache[player_xuid] = hand
+            elif player_xuid:
+                self._sky_eye_hand_cache[player_xuid] = hand
             land = self._sky_eye_land_snapshot(dimension or "-", pos_x, pos_y, pos_z)
             self.sky_eye_store.append(
                 self._sky_eye_retention_days(),
@@ -12159,7 +12183,7 @@ class ARCCorePlugin(Plugin):
             )
 
     def display_land_particle_boundary(self, player: Player, land_info: dict, y_coord: float = None):
-        """显示三维领地粒子边界（立方体12条棱）"""
+        """显示三维领地粒子边界（立方体12条棱），分 tick 发送避免单帧 100+ 次 spawn。"""
         try:
             min_x = land_info['min_x']
             max_x = land_info['max_x']
@@ -12168,25 +12192,16 @@ class ARCCorePlugin(Plugin):
             min_z = land_info['min_z']
             max_z = land_info['max_z']
 
-            STEPS = 8  # 每条棱的插值段数（含端点共9个点）
+            STEPS = 4  # 每条棱 5 个点；12 棱共 60 点
+            BATCH = 20
 
-            def emit(x, y, z):
-                # 用 Player API，避免 /particle 经控制台 dispatch 刷屏
-                # （“创建 … 的请求已发送给所有玩家”）
-                player.spawn_particle(
-                    "minecraft:crop_growth_emitter", float(x), float(y), float(z)
+            def lerp(p1, p2, t):
+                return (
+                    p1[0] + (p2[0] - p1[0]) * t,
+                    p1[1] + (p2[1] - p1[1]) * t,
+                    p1[2] + (p2[2] - p1[2]) * t,
                 )
 
-            def draw_edge(p1, p2):
-                """在两点之间均匀生成粒子"""
-                for i in range(STEPS + 1):
-                    t = i / STEPS
-                    x = p1[0] + (p2[0] - p1[0]) * t
-                    y = p1[1] + (p2[1] - p1[1]) * t
-                    z = p1[2] + (p2[2] - p1[2]) * t
-                    emit(x, y, z)
-
-            # 立方体8个顶点
             corners = [
                 (min_x, min_y, min_z),
                 (max_x, min_y, min_z),
@@ -12197,22 +12212,36 @@ class ARCCorePlugin(Plugin):
                 (max_x, max_y, max_z),
                 (min_x, max_y, max_z),
             ]
+            edges = (
+                (0, 1), (1, 2), (2, 3), (3, 0),
+                (4, 5), (5, 6), (6, 7), (7, 4),
+                (0, 4), (1, 5), (2, 6), (3, 7),
+            )
+            points = []
+            for a, b in edges:
+                for i in range(STEPS + 1):
+                    points.append(lerp(corners[a], corners[b], i / STEPS))
 
-            # 底面4条棱
-            draw_edge(corners[0], corners[1])
-            draw_edge(corners[1], corners[2])
-            draw_edge(corners[2], corners[3])
-            draw_edge(corners[3], corners[0])
-            # 顶面4条棱
-            draw_edge(corners[4], corners[5])
-            draw_edge(corners[5], corners[6])
-            draw_edge(corners[6], corners[7])
-            draw_edge(corners[7], corners[4])
-            # 4条竖直棱
-            draw_edge(corners[0], corners[4])
-            draw_edge(corners[1], corners[5])
-            draw_edge(corners[2], corners[6])
-            draw_edge(corners[3], corners[7])
+            def spawn_batch(start: int = 0):
+                try:
+                    if player is None:
+                        return
+                    iv = getattr(player, "is_valid", None)
+                    if callable(iv) and not iv():
+                        return
+                    end = min(start + BATCH, len(points))
+                    for x, y, z in points[start:end]:
+                        player.spawn_particle(
+                            "minecraft:crop_growth_emitter", float(x), float(y), float(z)
+                        )
+                    if end < len(points):
+                        self.server.scheduler.run_task(
+                            self, lambda: spawn_batch(end), delay=1
+                        )
+                except Exception as inner:
+                    self.logger.error(f"Display land particle batch error: {str(inner)}")
+
+            spawn_batch(0)
 
         except Exception as e:
             self.logger.error(f"Display land particle boundary error: {str(e)}")

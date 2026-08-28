@@ -3,7 +3,7 @@
 from __future__ import annotations
 
 import threading
-from typing import Dict, Optional
+from typing import Dict, Optional, Tuple
 
 from endstone_arc_core.KillRewardConfig import normalize_entity_type_id
 
@@ -25,6 +25,11 @@ class PlayerActivityStats:
         self.database_manager = database_manager
         self.logger = logger
         self._lock = threading.Lock()
+        self._pending: Dict[Tuple[str, str], int] = {}
+        self._known: Dict[Tuple[str, str], int] = {}
+        self._stop = threading.Event()
+        self._writer: Optional[threading.Thread] = None
+        self._FLUSH_INTERVAL = 5.0
 
     def ensure_tables(self) -> bool:
         try:
@@ -147,6 +152,17 @@ class PlayerActivityStats:
         stat_key = str(stat_key or "").strip()
         if not xuid or not stat_key:
             return 0
+        key = (xuid, stat_key)
+        with self._lock:
+            if key in self._known:
+                return int(self._known[key])
+        db_count = self._read_stat_from_db(xuid, stat_key)
+        with self._lock:
+            total = db_count + int(self._pending.get(key, 0))
+            self._known[key] = total
+            return total
+
+    def _read_stat_from_db(self, xuid: str, stat_key: str) -> int:
         try:
             row = self.database_manager.query_one(
                 f"SELECT count FROM {self.TABLE} WHERE xuid = ? AND stat_key = ?",
@@ -186,6 +202,20 @@ class PlayerActivityStats:
                     count = int(row[1] or 0)
                 if key:
                     out[key] = count
+            with self._lock:
+                for (pxuid, pkey), delta in self._pending.items():
+                    if pxuid != xuid or not delta:
+                        continue
+                    if prefix and not pkey.startswith(prefix):
+                        continue
+                    out[pkey] = int(out.get(pkey, 0)) + int(delta)
+                for (pxuid, pkey), total in self._known.items():
+                    if pxuid != xuid:
+                        continue
+                    if prefix and not pkey.startswith(prefix):
+                        continue
+                    if pkey not in out:
+                        out[pkey] = int(total)
             return out
         except Exception:
             return {}
@@ -208,18 +238,72 @@ class PlayerActivityStats:
         delta = int(delta or 0)
         if not xuid or not stat_key or delta == 0:
             return self.get_stat(xuid, stat_key) if (return_count and xuid and stat_key) else 0
+        key = (xuid, stat_key)
         with self._lock:
-            self.database_manager.execute(
-                f"INSERT OR IGNORE INTO {self.TABLE} (xuid, stat_key, count) VALUES (?, ?, 0)",
-                (xuid, stat_key),
-            )
-            self.database_manager.execute(
-                f"UPDATE {self.TABLE} SET count = count + ? WHERE xuid = ? AND stat_key = ?",
-                (delta, xuid, stat_key),
-            )
-            if return_count:
-                return self.get_stat(xuid, stat_key)
+            self._pending[key] = int(self._pending.get(key, 0)) + delta
+            if key in self._known:
+                self._known[key] = int(self._known[key]) + delta
+                current = int(self._known[key])
+            else:
+                current = None
+        if not return_count:
             return 0
+        if current is not None:
+            return current
+        return self.get_stat(xuid, stat_key)
+
+    def start_writer(self) -> None:
+        if self._writer is not None and self._writer.is_alive():
+            return
+        self._stop.clear()
+        self._writer = threading.Thread(
+            target=self._writer_loop, name="ARCCore-ActivityStats", daemon=True
+        )
+        self._writer.start()
+
+    def stop_writer(self) -> None:
+        self._stop.set()
+        writer = self._writer
+        if writer is not None and writer.is_alive() and threading.current_thread() is not writer:
+            writer.join(timeout=3)
+        self._writer = None
+        self.flush()
+
+    def _writer_loop(self) -> None:
+        while not self._stop.wait(self._FLUSH_INTERVAL):
+            try:
+                self.flush()
+            except Exception as e:
+                self._log("warning", f"[ARC Core]PlayerActivityStats flush error: {e}")
+        try:
+            self.flush()
+        except Exception:
+            pass
+
+    def flush(self) -> None:
+        with self._lock:
+            items = list(self._pending.items())
+            self._pending.clear()
+        if not items:
+            return
+        for (xuid, stat_key), delta in items:
+            if not delta:
+                continue
+            try:
+                self.database_manager.execute(
+                    f"INSERT OR IGNORE INTO {self.TABLE} (xuid, stat_key, count) VALUES (?, ?, 0)",
+                    (xuid, stat_key),
+                )
+                self.database_manager.execute(
+                    f"UPDATE {self.TABLE} SET count = count + ? WHERE xuid = ? AND stat_key = ?",
+                    (int(delta), xuid, stat_key),
+                )
+            except Exception as e:
+                with self._lock:
+                    self._pending[(xuid, stat_key)] = int(
+                        self._pending.get((xuid, stat_key), 0)
+                    ) + int(delta)
+                self._log("warning", f"[ARC Core]PlayerActivityStats write failed: {e}")
 
     def record_kill(self, xuid: str, entity_type: str) -> None:
         xuid = str(xuid or "").strip()

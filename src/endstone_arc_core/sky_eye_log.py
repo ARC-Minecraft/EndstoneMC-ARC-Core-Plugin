@@ -288,7 +288,8 @@ def _parse_time_point(raw: str, *, end_of_day: bool = False) -> Optional[int]:
 class SkyEyeStore:
     """独立天眼 SQLite：写入事件、按保留天数滚动删除、提供查询。"""
 
-    _FLUSH_BATCH = 16
+    _FLUSH_BATCH = 64
+    _FLUSH_INTERVAL = 0.5
 
     def __init__(self, db_path: Path):
         self.db_path = Path(db_path)
@@ -296,7 +297,13 @@ class SkyEyeStore:
         self._conn: Optional[sqlite3.Connection] = None
         self._last_prune_date: Optional[date] = None
         self._pending: List[Tuple[Any, ...]] = []
+        self._stop = threading.Event()
+        self._wake = threading.Event()
         self._ensure_schema()
+        self._writer = threading.Thread(
+            target=self._writer_loop, name="ARCCore-SkyEyeWriter", daemon=True
+        )
+        self._writer.start()
 
     def _connect(self) -> sqlite3.Connection:
         if self._conn is not None:
@@ -360,8 +367,21 @@ class SkyEyeStore:
             )
             conn.commit()
 
+    def _writer_loop(self) -> None:
+        while not self._stop.is_set():
+            self._wake.wait(self._FLUSH_INTERVAL)
+            self._wake.clear()
+            try:
+                self.flush()
+            except Exception:
+                pass
+        try:
+            self.flush()
+        except Exception:
+            pass
+
     def flush(self) -> None:
-        """将内存队列中的事件批量写入 SQLite。"""
+        """将内存队列中的事件批量写入 SQLite。可在后台线程调用。"""
         with self._lock:
             if not self._pending:
                 return
@@ -372,6 +392,11 @@ class SkyEyeStore:
             conn.commit()
 
     def close(self) -> None:
+        self._stop.set()
+        self._wake.set()
+        writer = getattr(self, "_writer", None)
+        if writer is not None and writer.is_alive() and threading.current_thread() is not writer:
+            writer.join(timeout=3)
         with self._lock:
             try:
                 if self._pending:
@@ -460,7 +485,7 @@ class SkyEyeStore:
             if len(self._pending) >= self._FLUSH_BATCH:
                 should_flush = True
         if should_flush:
-            self.flush()
+            self._wake.set()
 
     def query(
         self,

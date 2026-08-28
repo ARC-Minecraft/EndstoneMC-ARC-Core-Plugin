@@ -3,7 +3,7 @@
 # EndStone ARC Core Plugin / EndStone弧光核心
 
 [![Codacy Grade](https://app.codacy.com/project/badge/Grade/2f830615baf347258558dcc2a5ab85a1)](https://app.codacy.com/gh/DEVILENMO/EndstoneMC-ARC-Core-Plugin/dashboard?utm_source=gh&utm_medium=referral&utm_content=&utm_campaign=Badge_grade)
-[![Version](https://img.shields.io/badge/version-v0.9.33-blue)](https://github.com/ARC-Minecraft/EndstoneMC-ARC-Core-Plugin)
+[![Version](https://img.shields.io/badge/version-v0.9.34-blue)](https://github.com/ARC-Minecraft/EndstoneMC-ARC-Core-Plugin)
 [![Python](https://img.shields.io/badge/python-3.13+-blue?logo=python&logoColor=white)](https://www.python.org/)
 [![EndStone API](https://img.shields.io/badge/EndStone_API-0.7+-black)](https://github.com/EndstoneMC/endstone)
 [![License](https://img.shields.io/github/license/ARC-Minecraft/EndstoneMC-ARC-Core-Plugin)](LICENSE)
@@ -19,7 +19,7 @@ EndStone ARC Core 是一个功能完整的 EndStone (Minecraft 基岩版服务�
 
 - **作者**: DEVILENMO
 - **邮箱**: DEVILENMO@gmail.com
-- **版本**: 0.9.29
+- **版本**: 0.9.34
 - **API 版本**: 0.7+
 - **推荐 Python 版本**: 3.13
 
@@ -803,7 +803,14 @@ arc.api_sidebar_set_values(
 
 ## 📋 近期更新日志
 
-### v0.9.33（当前版本）
+### v0.9.34（当前版本）
+
+- ✅ **主线程减负**：侧边栏调度改为每 5 tick，到期玩家小顶堆取代全员扫描；金钱/头衔/公会改后台缓存
+- ✅ **天眼异步落库**：事件只入内存队列，SQLite 由后台线程写入；主手物品按玩家缓存，避免反复 `item_in_main_hand`
+- ✅ **活动统计批量写库**：方块破坏/放置先内存累加，定时刷盘
+- ✅ **领地 chunk LRU 缓存**：`get_land_at_pos` / 爆炸判定复用区块结果；领地粒子边界分 tick 发送
+
+### v0.9.33
 
 - ✅ **统一领地权限检查** `check_land_permission`：破坏/放置/方块交互/实体交互/攻击/展示框/爆炸共用；`ENABLE_LAND_SYSTEM=False` 或坐标无领地时直接跳过领地部分
 - ✅ **领地系统关闭时**不再做爆炸拦截、生物生成拦截、仅领地可放置方块等领地相关判定
