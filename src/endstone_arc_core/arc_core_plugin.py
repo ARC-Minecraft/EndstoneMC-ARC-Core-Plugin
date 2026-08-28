@@ -592,12 +592,13 @@ class ARCCorePlugin(Plugin):
         try:
             self.sidebar_system.reload_config()
             if self.sidebar_system.enabled:
-                period = max(1, int(self.sidebar_system.refresh_ticks))
+                sched = max(1, int(self.sidebar_system.sched_period_ticks))
                 self.server.scheduler.run_task(
-                    self, self.sidebar_system.tick, delay=period, period=period
+                    self, self.sidebar_system.tick, delay=sched, period=sched
                 )
                 self.logger.info(
-                    f"[ARC Core]Sidebar system started, refresh={period} ticks, "
+                    f"[ARC Core]Sidebar system started, refresh={self.sidebar_system.refresh_ticks} ticks "
+                    f"({self.sidebar_system.shard_buckets} shards x {sched} tick), "
                     f"switch={self.sidebar_system.switch_interval}s, "
                     f"join_delay={self.sidebar_system.join_delay_ticks} ticks"
                 )

@@ -52,7 +52,8 @@ def _setting_int(raw: Any, default: int) -> int:
 _STABLE_OBJECTIVE = "arc_sb"
 # 低频定时默认：60 tick ≈ 3 秒（TPS / 延迟 / 现实时间）
 _DEFAULT_REFRESH_TICKS = 60
-_LEGACY_REFRESH_TICKS = 20  # 旧默认 1 秒，启动时自动迁到 60
+# 调度器固定每 10 tick（0.5 秒）跑一次 tick；分片桶数 = refresh_ticks / 此值
+_SCHED_PERIOD_TICKS = 10
 _DEFAULT_JOIN_DELAY_TICKS = 40  # 进服后延迟再写显示槽，避开未 spawn
 _RENDER_RING_MAX = 32
 _RENDER_STATE_FILE = Path("plugins/ARCCore/sidebar_render_state.txt")
@@ -144,6 +145,8 @@ class SidebarSystem:
         self.sidebar_title = "§6弧光服务器"
         self.switch_interval = 10.0
         self.refresh_ticks = _DEFAULT_REFRESH_TICKS
+        self.sched_period_ticks = _SCHED_PERIOD_TICKS
+        self.shard_buckets = max(1, round(_DEFAULT_REFRESH_TICKS / _SCHED_PERIOD_TICKS))
         self.join_delay_ticks = _DEFAULT_JOIN_DELAY_TICKS
         self.max_lines = 15
         self.main_line_templates: List[str] = list(DEFAULT_MAIN_LINES)
@@ -176,16 +179,10 @@ class SidebarSystem:
         self.switch_interval = float(
             max(1, _setting_int(sm.GetSetting("SIDEBAR_SWITCH_INTERVAL"), 10))
         )
-        raw_refresh = sm.GetSetting("SIDEBAR_REFRESH_TICKS")
-        refresh = _setting_int(raw_refresh, _DEFAULT_REFRESH_TICKS)
-        # 旧默认 20（每秒）迁到 60（约 3 秒低频定时）
-        if raw_refresh is not None and refresh == _LEGACY_REFRESH_TICKS:
-            refresh = _DEFAULT_REFRESH_TICKS
-            try:
-                sm.SetSetting("SIDEBAR_REFRESH_TICKS", str(_DEFAULT_REFRESH_TICKS))
-            except Exception:
-                pass
-        self.refresh_ticks = max(1, refresh)
+        refresh = max(1, _setting_int(sm.GetSetting("SIDEBAR_REFRESH_TICKS"), _DEFAULT_REFRESH_TICKS))
+        self.refresh_ticks = refresh
+        self.sched_period_ticks = _SCHED_PERIOD_TICKS
+        self.shard_buckets = max(1, round(refresh / _SCHED_PERIOD_TICKS))
         self.join_delay_ticks = max(
             0,
             _setting_int(
@@ -382,8 +379,10 @@ class SidebarSystem:
             xs = str(xuid or "").strip()
             if xs:
                 self._values.setdefault(xs, {}).setdefault(pid, {})[k] = value
+                self._schedule_refresh_xuid(xs)
             else:
                 self._global_values.setdefault(pid, {})[k] = value
+                self._schedule_refresh_all_enabled()
             return True
         except Exception as e:
             self._log_error(f"set_value: {e}")
@@ -407,6 +406,10 @@ class SidebarSystem:
                     self._values.setdefault(xs, {}).setdefault(pid, {})[kk] = v
                 else:
                     self._global_values.setdefault(pid, {})[kk] = v
+            if xs:
+                self._schedule_refresh_xuid(xs)
+            elif ok and values:
+                self._schedule_refresh_all_enabled()
             return ok
         except Exception as e:
             self._log_error(f"set_values: {e}")
@@ -669,21 +672,22 @@ class SidebarSystem:
 
     # ------------------------------------------------------------------ tick / render
     def tick(self) -> None:
-        """低频定时：刷新时间/TPS/MSPT/延迟，并按 xuid 分批重绘已开启侧边栏的玩家。"""
+        """每 sched_period_ticks 调用一次；按 shard_buckets 分片重绘，单人周期 ≈ refresh_ticks。"""
         if not self.enabled:
             return
         try:
-            self._refresh_timed_cache()
+            buckets = max(1, int(self.shard_buckets))
+            slot = self._tick_counter % buckets
+            self._tick_counter = (self._tick_counter + 1) % buckets
+            if slot == 0:
+                self._refresh_timed_cache()
             now = time.time()
-            period = max(1, int(self.refresh_ticks))
-            slot = self._tick_counter % period
-            self._tick_counter = (self._tick_counter + 1) % period
             for player in list(getattr(self.plugin.server, "online_players", []) or []):
                 try:
                     xuid = str(getattr(player, "xuid", "") or "").strip()
                     if not xuid:
                         continue
-                    if (hash(xuid) % period) != slot:
+                    if (hash(xuid) % buckets) != slot:
                         continue
                     self._tick_player(player, now)
                 except Exception as e:

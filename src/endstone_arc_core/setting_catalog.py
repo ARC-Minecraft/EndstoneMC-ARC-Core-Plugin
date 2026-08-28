@@ -258,7 +258,7 @@ SETTING_GROUPS: List[Dict[str, object]] = [
             _s("SIDEBAR_DEFAULT_ON", "新玩家默认开启", "bool", choices=BOOL_CHOICES),
             _s("SIDEBAR_TITLE", "侧边栏标题", "string", placeholder="§6弧光服务器"),
             _s("SIDEBAR_SWITCH_INTERVAL", "翻页间隔（秒）", "int", placeholder="10"),
-            _s("SIDEBAR_REFRESH_TICKS", "低频刷新周期（tick，默认60≈3秒）", "int", placeholder="60"),
+            _s("SIDEBAR_REFRESH_TICKS", "刷新周期（tick；20=1秒，默认60≈3秒）", "int", placeholder="60"),
             _s("SIDEBAR_JOIN_DELAY_TICKS", "进服后延迟显示（tick，默认40）", "int", placeholder="40"),
             _s("SIDEBAR_MAX_LINES", "最大行数", "int", placeholder="15"),
             _s(
