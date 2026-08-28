@@ -65,6 +65,8 @@ IF_PROTECT_SPAWN=False
 SPAWN_PROTECT_RANGE=8
 
 # 领地设置
+# 领地系统总开关；False 时不启位置追踪线程（无进出领地提示），方块保护等事件逻辑仍生效
+ENABLE_LAND_SYSTEM=True
 # 是否允许圈地（新建私人/公会/公共领地）；本服独立，不随跨服设置同步；默认 True
 ALLOW_LAND_CLAIM=True
 MIN_LAND_DISTANCE=1

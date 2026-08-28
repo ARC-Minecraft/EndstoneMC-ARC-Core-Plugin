@@ -504,8 +504,8 @@ class ARCCorePlugin(Plugin):
         self._init_cleaner_system()
         self._init_mspt_emergency_shutdown_settings()
 
-        # 启动多线程位置检测系统
-        self.start_position_thread()
+        # 启动多线程位置检测系统（领地系统开启时）
+        self._sync_land_position_thread()
 
         # Scheduler tasks
         # 移除了原有的 player_position_listener，现在使用多线程方式
@@ -592,13 +592,12 @@ class ARCCorePlugin(Plugin):
         try:
             self.sidebar_system.reload_config()
             if self.sidebar_system.enabled:
-                sched = max(1, int(self.sidebar_system.sched_period_ticks))
                 self.server.scheduler.run_task(
-                    self, self.sidebar_system.tick, delay=sched, period=sched
+                    self, self.sidebar_system.tick, delay=1, period=1
                 )
                 self.logger.info(
-                    f"[ARC Core]Sidebar system started, refresh={self.sidebar_system.refresh_ticks} ticks "
-                    f"({self.sidebar_system.shard_buckets} shards x {sched} tick), "
+                    f"[ARC Core]Sidebar system started, refresh={self.sidebar_system.refresh_ticks} ticks/player "
+                    f"(join-staggered, scheduler every 1 tick), "
                     f"switch={self.sidebar_system.switch_interval}s, "
                     f"join_delay={self.sidebar_system.join_delay_ticks} ticks"
                 )
@@ -2544,6 +2543,18 @@ class ARCCorePlugin(Plugin):
         """本服是否允许圈地（新建领地）；配置 ALLOW_LAND_CLAIM，默认 True，不跨服同步。"""
         return self._sky_eye_setting_bool("ALLOW_LAND_CLAIM", True)
 
+    def _is_land_system_enabled(self) -> bool:
+        """领地系统总开关；关闭时不启位置追踪线程（进出领地提示）。"""
+        return self._sky_eye_setting_bool("ENABLE_LAND_SYSTEM", True)
+
+    def _sync_land_position_thread(self) -> None:
+        if self._is_land_system_enabled():
+            self.start_position_thread()
+        else:
+            self.stop_position_thread()
+            if self.logger:
+                self.logger.info("[ARC Core]Land system disabled, position thread not started")
+
     def _notify_land_claim_disabled(self, player: Player) -> None:
         msg = self.language_manager.GetText("LAND_CLAIM_DISABLED")
         if not msg or not str(msg).strip():
@@ -3292,6 +3303,8 @@ class ARCCorePlugin(Plugin):
 
     def start_position_thread(self):
         """启动位置检测线程"""
+        if not self._is_land_system_enabled():
+            return
         if self.position_thread is None or not self.position_thread.is_alive():
             self.position_thread_running = True
             self.position_thread = threading.Thread(
@@ -14618,6 +14631,7 @@ class ARCCorePlugin(Plugin):
                 self.land_min_distance = 0
             self.teleport_system.reload_config()
             self.land_system.reload_config()
+            self._sync_land_position_thread()
             self._refresh_disabled_blocks()
             self._refresh_land_only_place_blocks()
             self.hide_op_in_money_ranking = self.setting_manager.GetSetting('HIDE_OP_IN_MONEY_RANKING')

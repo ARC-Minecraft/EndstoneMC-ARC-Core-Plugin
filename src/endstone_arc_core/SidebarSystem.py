@@ -50,10 +50,8 @@ def _setting_int(raw: Any, default: int) -> int:
 
 # 个人计分板上的稳定 objective 名（短于 Bedrock 16 字符上限）
 _STABLE_OBJECTIVE = "arc_sb"
-# 低频定时默认：60 tick ≈ 3 秒（TPS / 延迟 / 现实时间）
+# 单人刷新周期默认：60 tick ≈ 3 秒
 _DEFAULT_REFRESH_TICKS = 60
-# 调度器固定每 10 tick（0.5 秒）跑一次 tick；分片桶数 = refresh_ticks / 此值
-_SCHED_PERIOD_TICKS = 10
 _DEFAULT_JOIN_DELAY_TICKS = 40  # 进服后延迟再写显示槽，避开未 spawn
 _RENDER_RING_MAX = 32
 _RENDER_STATE_FILE = Path("plugins/ARCCore/sidebar_render_state.txt")
@@ -115,6 +113,7 @@ class PlayerSidebarState:
     last_render_sig: str = ""
     display_set: bool = False
     join_at_mono: float = 0.0
+    join_tick: int = 0
 
 
 class SidebarSystem:
@@ -139,14 +138,12 @@ class SidebarSystem:
         self._cached_max_players: Optional[int] = None
         self._ping_cache: Dict[str, Optional[int]] = {}
         self._money_cache: Dict[str, str] = {}
-        self._tick_counter: int = 0
+        self._game_tick: int = 0
         self.enabled = True
         self.default_on = True
         self.sidebar_title = "§6弧光服务器"
         self.switch_interval = 10.0
         self.refresh_ticks = _DEFAULT_REFRESH_TICKS
-        self.sched_period_ticks = _SCHED_PERIOD_TICKS
-        self.shard_buckets = max(1, round(_DEFAULT_REFRESH_TICKS / _SCHED_PERIOD_TICKS))
         self.join_delay_ticks = _DEFAULT_JOIN_DELAY_TICKS
         self.max_lines = 15
         self.main_line_templates: List[str] = list(DEFAULT_MAIN_LINES)
@@ -181,8 +178,6 @@ class SidebarSystem:
         )
         refresh = max(1, _setting_int(sm.GetSetting("SIDEBAR_REFRESH_TICKS"), _DEFAULT_REFRESH_TICKS))
         self.refresh_ticks = refresh
-        self.sched_period_ticks = _SCHED_PERIOD_TICKS
-        self.shard_buckets = max(1, round(refresh / _SCHED_PERIOD_TICKS))
         self.join_delay_ticks = max(
             0,
             _setting_int(
@@ -479,6 +474,7 @@ class SidebarSystem:
                 locked_page=str(pref.get("locked_page") or ""),
                 last_switch_ts=time.time(),
                 join_at_mono=time.monotonic(),
+                join_tick=int(self._game_tick),
             )
             self._player_state[xuid] = st
             self._seed_money_cache(xuid)
@@ -666,14 +662,14 @@ class SidebarSystem:
 
     # ------------------------------------------------------------------ tick / render
     def tick(self) -> None:
-        """每 sched_period_ticks 调用一次；按 shard_buckets 分片重绘，单人周期 ≈ refresh_ticks。"""
+        """每游戏 tick 调用；按进服 tick 错峰，仅刷新到期玩家。"""
         if not self.enabled:
             return
         try:
-            buckets = max(1, int(self.shard_buckets))
-            slot = self._tick_counter % buckets
-            self._tick_counter = (self._tick_counter + 1) % buckets
-            if slot == 0:
+            self._game_tick += 1
+            rt = max(1, int(self.refresh_ticks))
+            delay = max(0, int(self.join_delay_ticks))
+            if self._game_tick % rt == 0:
                 self._refresh_timed_cache()
             now = time.time()
             for player in list(getattr(self.plugin.server, "online_players", []) or []):
@@ -681,7 +677,15 @@ class SidebarSystem:
                     xuid = str(getattr(player, "xuid", "") or "").strip()
                     if not xuid:
                         continue
-                    if (hash(xuid) % buckets) != slot:
+                    st = self._player_state.get(xuid)
+                    if st is None or not st.enabled:
+                        continue
+                    if not self._is_render_ready(player):
+                        continue
+                    elapsed = self._game_tick - int(st.join_tick)
+                    if elapsed < delay:
+                        continue
+                    if elapsed % rt != 0:
                         continue
                     self._tick_player(player, now)
                 except Exception as e:
@@ -800,6 +804,7 @@ class SidebarSystem:
                 enabled=bool(pref.get("enabled", self.default_on)),
                 locked_page=str(pref.get("locked_page") or ""),
                 last_switch_ts=time.time(),
+                join_tick=int(self._game_tick),
             )
             self._player_state[xuid] = st
         return st

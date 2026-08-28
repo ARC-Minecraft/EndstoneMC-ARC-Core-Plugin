@@ -3,7 +3,7 @@
 # EndStone ARC Core Plugin / EndStone弧光核心
 
 [![Codacy Grade](https://app.codacy.com/project/badge/Grade/2f830615baf347258558dcc2a5ab85a1)](https://app.codacy.com/gh/DEVILENMO/EndstoneMC-ARC-Core-Plugin/dashboard?utm_source=gh&utm_medium=referral&utm_content=&utm_campaign=Badge_grade)
-[![Version](https://img.shields.io/badge/version-v0.9.31-blue)](https://github.com/ARC-Minecraft/EndstoneMC-ARC-Core-Plugin)
+[![Version](https://img.shields.io/badge/version-v0.9.32-blue)](https://github.com/ARC-Minecraft/EndstoneMC-ARC-Core-Plugin)
 [![Python](https://img.shields.io/badge/python-3.13+-blue?logo=python&logoColor=white)](https://www.python.org/)
 [![EndStone API](https://img.shields.io/badge/EndStone_API-0.7+-black)](https://github.com/EndstoneMC/endstone)
 [![License](https://img.shields.io/github/license/ARC-Minecraft/EndstoneMC-ARC-Core-Plugin)](LICENSE)
@@ -80,7 +80,7 @@ EndStone ARC Core 是一个功能完整的 EndStone (Minecraft 基岩版服务�
 - **核心主页面 `arc_core_main`**：现实时间、金钱、**TPS**、在线人数、**玩家延迟**等（模板可配；默认不含生命/饱食）
 - **其它插件注册页面**：`api_sidebar_register_page` + 行模板 `{key}`，数值变更用 `api_sidebar_set_value(s)` 推送（等定时 tick 渲染）
 - **玩家命令**：`/sidebar`（别名 `/sb`）支持 `on` / `off` / `next` / `prev` / `lock` / `unlock` / `list`；开关与锁定偏好持久化到 SQLite
-- **刷新策略（v0.9.30+）**：调度每 10 tick（0.5 秒）分片重绘，单人周期 = `SIDEBAR_REFRESH_TICKS`（默认 60≈3 秒，可设 20=1 秒）；插件 `set_value`/`set_values` 只写缓存，等定时 tick 渲染；`/sidebar on|off|next|prev|lock` 仍即时刷新
+- **刷新策略（v0.9.32+）**：调度每 1 tick 检查到期玩家；进服时记录 `join_tick`，`(当前tick - join_tick) % SIDEBAR_REFRESH_TICKS == 0` 时重绘，自然错峰；TPS/时间等缓存在整服周期 tick 更新；插件 `set_value` 只写缓存；`/sidebar` 命令仍即时刷新
 - **配置**：`SIDEBAR_ENABLE`、`SIDEBAR_DEFAULT_ON`、`SIDEBAR_TITLE`、`SIDEBAR_SWITCH_INTERVAL`、`SIDEBAR_REFRESH_TICKS`（20=1秒，默认 60≈3秒）、`SIDEBAR_JOIN_DELAY_TICKS`（默认 40）、`SIDEBAR_MAIN_LINES`、`SIDEBAR_MAX_LINES`（亦可在 OP 面板「侧边栏」分组修改）
 
 ### 🏠 领地管理系统
@@ -344,6 +344,7 @@ IF_PROTECT_SPAWN=True                # 是否保护出生点
 SPAWN_PROTECT_RANGE=8                # 出生点保护范围
 
 # 领地系统
+ENABLE_LAND_SYSTEM=True              # 领地系统总开关；False 时不启位置追踪线程（无进出领地提示）
 ALLOW_LAND_CLAIM=True                # 是否允许圈地（本服独立，不跨服同步；False 时无法新建领地，管理/调整范围仍可用）
 MIN_LAND_DISTANCE=1                  # 领地最小距离
 LAND_PRICE=100                       # 领地价格 (每格)
@@ -802,9 +803,14 @@ arc.api_sidebar_set_values(
 
 ## 📋 近期更新日志
 
-### v0.9.31（当前版本）
+### v0.9.32（当前版本）
 
-- ✅ **侧边栏键值不再即时重绘**：`set_value` / `set_values` 恢复为只写缓存，由定时 tick 按 `SIDEBAR_REFRESH_TICKS` 渲染（v0.9.30 曾加过即时刷新，已撤回）
+- ✅ **侧边栏进服 tick 错峰**：记录玩家进服 tick，调度每 1 tick 仅刷新到期玩家，自然分散负载；单人周期仍为 `SIDEBAR_REFRESH_TICKS`
+- ✅ **领地系统总开关**：新增 `ENABLE_LAND_SYSTEM`；关闭时不启位置追踪线程（无进出领地提示），OP 面板可配
+
+### v0.9.31
+
+- ✅ **侧边栏键值不再即时重绘**：`set_value` / `set_values` 恢复为只写缓存，由定时 tick 按 `SIDEBAR_REFRESH_TICKS` 渲染
 
 ### v0.9.30
 
