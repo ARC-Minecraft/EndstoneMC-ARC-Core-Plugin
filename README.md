@@ -3,7 +3,7 @@
 # EndStone ARC Core Plugin / EndStone弧光核心
 
 [![Codacy Grade](https://app.codacy.com/project/badge/Grade/2f830615baf347258558dcc2a5ab85a1)](https://app.codacy.com/gh/DEVILENMO/EndstoneMC-ARC-Core-Plugin/dashboard?utm_source=gh&utm_medium=referral&utm_content=&utm_campaign=Badge_grade)
-[![Version](https://img.shields.io/badge/version-v0.9.30-blue)](https://github.com/ARC-Minecraft/EndstoneMC-ARC-Core-Plugin)
+[![Version](https://img.shields.io/badge/version-v0.9.31-blue)](https://github.com/ARC-Minecraft/EndstoneMC-ARC-Core-Plugin)
 [![Python](https://img.shields.io/badge/python-3.13+-blue?logo=python&logoColor=white)](https://www.python.org/)
 [![EndStone API](https://img.shields.io/badge/EndStone_API-0.7+-black)](https://github.com/EndstoneMC/endstone)
 [![License](https://img.shields.io/github/license/ARC-Minecraft/EndstoneMC-ARC-Core-Plugin)](LICENSE)
@@ -80,7 +80,7 @@ EndStone ARC Core 是一个功能完整的 EndStone (Minecraft 基岩版服务�
 - **核心主页面 `arc_core_main`**：现实时间、金钱、**TPS**、在线人数、**玩家延迟**等（模板可配；默认不含生命/饱食）
 - **其它插件注册页面**：`api_sidebar_register_page` + 行模板 `{key}`，数值变更用 `api_sidebar_set_value(s)` 推送（等定时 tick 渲染）
 - **玩家命令**：`/sidebar`（别名 `/sb`）支持 `on` / `off` / `next` / `prev` / `lock` / `unlock` / `list`；开关与锁定偏好持久化到 SQLite
-- **刷新策略（v0.9.30）**：调度每 10 tick（0.5 秒）分片重绘，单人周期 = `SIDEBAR_REFRESH_TICKS`（默认 60≈3 秒，可设 20=1 秒）；插件 `set_value`/`set_values` 写入后即时重绘该玩家；`/sidebar on|off|next|prev|lock` 仍即时刷新
+- **刷新策略（v0.9.30+）**：调度每 10 tick（0.5 秒）分片重绘，单人周期 = `SIDEBAR_REFRESH_TICKS`（默认 60≈3 秒，可设 20=1 秒）；插件 `set_value`/`set_values` 只写缓存，等定时 tick 渲染；`/sidebar on|off|next|prev|lock` 仍即时刷新
 - **配置**：`SIDEBAR_ENABLE`、`SIDEBAR_DEFAULT_ON`、`SIDEBAR_TITLE`、`SIDEBAR_SWITCH_INTERVAL`、`SIDEBAR_REFRESH_TICKS`（20=1秒，默认 60≈3秒）、`SIDEBAR_JOIN_DELAY_TICKS`（默认 40）、`SIDEBAR_MAIN_LINES`、`SIDEBAR_MAX_LINES`（亦可在 OP 面板「侧边栏」分组修改）
 
 ### 🏠 领地管理系统
@@ -802,11 +802,14 @@ arc.api_sidebar_set_values(
 
 ## 📋 近期更新日志
 
-### v0.9.30（当前版本）
+### v0.9.31（当前版本）
 
-- ✅ **修复侧边栏数值延迟十几秒才更新**：分片桶数与调度周期叠乘导致单人刷新周期被平方（60×3秒≈3分钟）；调度固定每 10 tick，桶数 = refresh_ticks/10，单人周期恢复为配置的 refresh_ticks
+- ✅ **侧边栏键值不再即时重绘**：`set_value` / `set_values` 恢复为只写缓存，由定时 tick 按 `SIDEBAR_REFRESH_TICKS` 渲染（v0.9.30 曾加过即时刷新，已撤回）
+
+### v0.9.30
+
+- ✅ **修复侧边栏数值延迟十几秒才更新**：分片桶数与调度周期叠乘导致单人刷新周期被平方；调度固定每 10 tick，桶数 = refresh_ticks/10
 - ✅ **刷新周期可配 1 秒**：移除 `SIDEBAR_REFRESH_TICKS=20` 被静默改回 60 的限制；OP 面板改配置后热重载即生效
-- ✅ **键值即时刷新**：插件 `set_value` / `set_values` 写入后立刻调度该玩家重绘，喝水/营养等变动不再等定时 tick
 
 ### v0.9.29
 

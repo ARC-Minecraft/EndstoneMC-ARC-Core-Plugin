@@ -379,10 +379,8 @@ class SidebarSystem:
             xs = str(xuid or "").strip()
             if xs:
                 self._values.setdefault(xs, {}).setdefault(pid, {})[k] = value
-                self._schedule_refresh_xuid(xs)
             else:
                 self._global_values.setdefault(pid, {})[k] = value
-                self._schedule_refresh_all_enabled()
             return True
         except Exception as e:
             self._log_error(f"set_value: {e}")
@@ -406,10 +404,6 @@ class SidebarSystem:
                     self._values.setdefault(xs, {}).setdefault(pid, {})[kk] = v
                 else:
                     self._global_values.setdefault(pid, {})[kk] = v
-            if xs:
-                self._schedule_refresh_xuid(xs)
-            elif ok and values:
-                self._schedule_refresh_all_enabled()
             return ok
         except Exception as e:
             self._log_error(f"set_values: {e}")
