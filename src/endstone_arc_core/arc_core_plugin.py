@@ -17489,7 +17489,7 @@ class ARCCorePlugin(Plugin):
                 or getattr(entity, "name", None)
             )
             raw = str(raw).strip() if raw else str(type(entity).__name__)
-            if ":" in raw:
+            if ":" in raw or (raw.startswith("entity.") and raw.endswith(".name")):
                 return self.entity_display_name_manager.get_display_name(raw)
             return raw
         except Exception as e:

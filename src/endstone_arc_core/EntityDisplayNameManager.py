@@ -22,6 +22,7 @@ class EntityDisplayNameManager:
             self._file_path.touch()
             with self._file_path.open("w", encoding="utf-8") as f:
                 f.write("# 生物显示名翻译：每行 原始名称=显示名\n")
+                f.write("# 支持：entity.minecraft.zombie.name=僵尸  或  minecraft:zombie=僵尸\n")
                 f.write("# 当死亡播报等处的生物名称含有 ':' 时会在此查找；未找到的键会自动追加到文件末尾，请补写显示名。\n")
             return
         with self._file_path.open("r", encoding="utf-8") as f:
@@ -32,22 +33,77 @@ class EntityDisplayNameManager:
                 key, value = line.split("=", 1)
                 self._cache[key.strip()] = value.strip()
 
+    @staticmethod
+    def _alternate_keys(raw_name: str) -> list[str]:
+        """为同一生物生成可互换的查找键。
+
+        常见原始值：
+        - minecraft:skeleton
+        - entity.minecraft.skeleton.name
+        - entity.ns_ab:vfx_dragon_fire.name（MC 未翻译键，冒号在命名空间与 ID 之间）
+        """
+        keys: list[str] = []
+        # minecraft:skeleton → entity.minecraft.skeleton.name
+        if raw_name.count(":") == 1 and not raw_name.startswith("entity."):
+            ns, short = raw_name.split(":", 1)
+            if ns and short:
+                keys.append(f"entity.{ns}.{short}.name")
+        # entity.ns:id.name → entity.ns.id.name 以及 ns:id
+        if raw_name.startswith("entity.") and ":" in raw_name:
+            mid = raw_name[len("entity.") :]
+            ns, rest = mid.split(":", 1)
+            if ns and rest:
+                dotted = f"entity.{ns}.{rest}"
+                keys.append(dotted)
+                short = rest[:-5] if rest.endswith(".name") else rest
+                if short:
+                    keys.append(f"{ns}:{short}")
+        # entity.minecraft.skeleton.name → minecraft:skeleton
+        if (
+            raw_name.startswith("entity.")
+            and raw_name.endswith(".name")
+            and ":" not in raw_name
+        ):
+            body = raw_name[len("entity.") : -len(".name")]
+            if "." in body:
+                ns, short = body.split(".", 1)
+                if ns and short:
+                    keys.append(f"{ns}:{short}")
+        return keys
+
+    def _lookup(self, key: str) -> Optional[str]:
+        """按键及其等价形式查找非空翻译。"""
+        if not key:
+            return None
+        seen: set[str] = set()
+        for candidate in [key, *self._alternate_keys(key)]:
+            if candidate in seen:
+                continue
+            seen.add(candidate)
+            translated = self._cache.get(candidate)
+            if translated:
+                return translated
+        return None
+
     def get_display_name(self, raw_name: str) -> str:
         """
-        获取生物显示名。若 raw_name 中含 ':'，则从 entity_display_name.txt 查找；
-        若文件中有非空翻译则返回翻译，否则将键追加到文件中并返回 raw_name。
+        获取生物显示名。若 raw_name 中含 ':'，或为 entity.*.*.name 键，则从文件查找；
+        支持类型 ID（minecraft:skeleton）与 entity.ns:id.name / entity.ns.id.name 互通；
+        若文件中有非空翻译则返回翻译，否则将含 ':' 的未配置键追加到文件并返回 raw_name。
         """
         if not raw_name:
             return ""
         raw_name = str(raw_name).strip()
-        if ":" not in raw_name:
+        needs_lookup = (":" in raw_name) or (
+            raw_name.startswith("entity.") and raw_name.endswith(".name")
+        )
+        if not needs_lookup:
             return raw_name
-        if raw_name in self._cache:
-            translated = self._cache[raw_name]
-            if translated:
-                return translated
-            return raw_name
-        self._append_key(raw_name)
+        found = self._lookup(raw_name)
+        if found:
+            return found
+        if ":" in raw_name and raw_name not in self._cache:
+            self._append_key(raw_name)
         return raw_name
 
     def _append_key(self, key: str) -> None:
@@ -74,19 +130,9 @@ class EntityDisplayNameManager:
         if not entity_type_id:
             return ""
         et = str(entity_type_id).strip()
-        if ":" in et:
-            ns, short = et.split(":", 1)
-            key = f"entity.{ns}.{short}.name"
-        else:
-            short = et
-            key = f"entity.minecraft.{short}.name"
-        if key in self._cache and self._cache[key]:
-            return self._cache[key]
-        et_lower = et.lower()
-        if et_lower in self._cache and self._cache[et_lower]:
-            return self._cache[et_lower]
-        if et in self._cache and self._cache[et]:
-            return self._cache[et]
+        found = self._lookup(et)
+        if found:
+            return found
         if ":" in et:
             return et.split(":", 1)[1]
         return et
@@ -100,17 +146,7 @@ class EntityDisplayNameManager:
         et = str(entity_type_id).strip()
         if et == "*":
             return "*"
-        if ":" in et:
-            ns, short = et.split(":", 1)
-            key = f"entity.{ns}.{short}.name"
-        else:
-            short = et
-            key = f"entity.minecraft.{short}.name"
-        if key in self._cache and self._cache[key]:
-            return self._cache[key]
-        et_lower = et.lower()
-        if et_lower in self._cache and self._cache[et_lower]:
-            return self._cache[et_lower]
-        if et in self._cache and self._cache[et]:
-            return self._cache[et]
+        found = self._lookup(et)
+        if found:
+            return found
         return et
