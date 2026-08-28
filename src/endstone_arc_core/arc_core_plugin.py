@@ -15070,10 +15070,14 @@ class ARCCorePlugin(Plugin):
                     rx = self.current_richest_xuid
                     equipped_before = self.title_system.get_equipped_title_by_xuid(rx)
                     online_player = self._find_online_player_by_xuid(rx)
-                    ok, was_new = self.title_system.unlock_title_by_xuid(rx, grant_title)
+                    ok, was_new = self.title_system.unlock_title_by_xuid(
+                        rx, grant_title, rarity="传奇"
+                    )
                     _ = was_new
                     if ok and not equipped_before:
-                        self.title_system.set_equipped_title_by_xuid(rx, grant_title)
+                        self.title_system.set_equipped_title_by_xuid(
+                            rx, grant_title, "传奇"
+                        )
                     if online_player is not None:
                         self._update_player_name_tag(online_player)
                 except Exception:

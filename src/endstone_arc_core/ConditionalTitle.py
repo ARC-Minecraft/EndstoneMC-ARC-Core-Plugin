@@ -21,6 +21,9 @@ class ConditionalTitleProvider(Protocol):
     def query_holder_xuid(self) -> Optional[str]:
         ...
 
+    def get_title_rarity(self) -> str:
+        ...
+
 
 class ConditionalTitleManager:
     """条件头衔迁移管理：同持有者零 revoke；跨服计算权由 can_compute 门闩控制。"""
@@ -143,6 +146,41 @@ class ConditionalTitleManager:
             except Exception:
                 pass
 
+    def _provider_rarity(self, provider: ConditionalTitleProvider, title: str) -> str:
+        fn = getattr(provider, "get_title_rarity", None)
+        if callable(fn):
+            try:
+                raw = fn()
+                if raw is not None and str(raw).strip():
+                    return str(raw).strip()
+            except Exception:
+                pass
+        try:
+            return self.title_system.preferred_grant_rarity(title)
+        except Exception:
+            return "普通"
+
+    def _ensure_holder_has_rarity(self, xuid: str, title: str, rarity: str) -> None:
+        """确保持有者解锁正确稀有度；若正佩戴同名错误稀有度则升级。"""
+        self.title_system.unlock_title_by_xuid(xuid, title, rarity=rarity)
+        equipped = None
+        try:
+            equipped = self.title_system.get_equipped_title_by_xuid(xuid)
+        except Exception:
+            equipped = None
+        if equipped and equipped.get("title") == title and equipped.get("rarity") != rarity:
+            self.title_system.set_equipped_title_by_xuid(xuid, title, rarity)
+        try:
+            canonical_rank = self.title_system.rarity_rank(rarity)
+            for defn in self.title_system.list_title_definitions_by_name(title):
+                alt = str(defn.get("rarity") or "").strip()
+                if not alt or alt == rarity:
+                    continue
+                if self.title_system.rarity_rank(alt) < canonical_rank:
+                    self.title_system.revoke_title_by_xuid(xuid, title, alt)
+        except Exception:
+            pass
+
     def _migrate(self, provider: ConditionalTitleProvider) -> None:
         title = (provider.get_title_name() or "").strip()
         if not title:
@@ -167,10 +205,12 @@ class ConditionalTitleManager:
             old_xuid = self._load_holder(pid)
             self._holders[pid] = old_xuid
 
+        rarity = self._provider_rarity(provider, title)
+
         if new_xuid == old_xuid:
             if new_xuid:
                 try:
-                    self.title_system.unlock_title_by_xuid(new_xuid, title)
+                    self._ensure_holder_has_rarity(new_xuid, title, rarity)
                 except Exception:
                     pass
             return
@@ -179,7 +219,7 @@ class ConditionalTitleManager:
             self._revoke_from_holder(old_xuid, title)
 
         if new_xuid:
-            self._grant_to_holder(new_xuid, title)
+            self._grant_to_holder(new_xuid, title, rarity)
 
         self._save_holder(pid, new_xuid)
 
@@ -214,7 +254,7 @@ class ConditionalTitleManager:
             except Exception:
                 pass
 
-    def _grant_to_holder(self, xuid: str, title: str) -> None:
+    def _grant_to_holder(self, xuid: str, title: str, rarity: str) -> None:
         equipped_before = None
         try:
             equipped_before = self.title_system.get_equipped_title_by_xuid(xuid)
@@ -223,7 +263,7 @@ class ConditionalTitleManager:
 
         was_new = False
         try:
-            _, was_new = self.title_system.unlock_title_by_xuid(xuid, title)
+            _, was_new = self.title_system.unlock_title_by_xuid(xuid, title, rarity=rarity)
         except Exception:
             return
 
@@ -242,7 +282,7 @@ class ConditionalTitleManager:
         # 新持有者当前无佩戴 → 自动佩戴；已戴其它头衔则不覆盖
         if not equipped_before:
             try:
-                self.title_system.set_equipped_title_by_xuid(xuid, title)
+                self.title_system.set_equipped_title_by_xuid(xuid, title, rarity)
             except Exception:
                 pass
 
@@ -283,6 +323,9 @@ class RichestTitleProvider:
             0.0,
             [],
         )
+
+    def get_title_rarity(self) -> str:
+        return "传奇"
 
     def query_holder_xuid(self) -> Optional[str]:
         """按金钱降序、xuid 升序取唯一榜一（同分稳定）。

@@ -518,6 +518,17 @@ class TitleSystem:
         """稀有度排序用权重，未知稀有度视为最低档。"""
         return RARITY_ORDER.get(normalize_rarity(rarity), RARITY_ORDER[DEFAULT_RARITY])
 
+    def preferred_grant_rarity(self, title: str, fallback: str = DEFAULT_RARITY) -> str:
+        """自动授予头衔时使用的稀有度：已定义时取最高档，否则 fallback。"""
+        title_s = str(title or "").strip()
+        if not title_s:
+            return normalize_rarity(fallback)
+        defs = self.list_title_definitions_by_name(title_s)
+        if not defs:
+            return normalize_rarity(fallback)
+        best = max(defs, key=lambda d: self.rarity_rank(d.get("rarity")))
+        return normalize_rarity(best.get("rarity") or fallback)
+
     def pick_highest_rarity_title(self, title_names: List[str]) -> Optional[str]:
         """从已解锁头衔名列表中选出稀有度最高的一条（按名称检索定义；同名多稀有度取最高）。"""
         if not title_names:
@@ -836,12 +847,16 @@ class TitleSystem:
         for t in to_ensure:
             if not t:
                 continue
-            self.ensure_title_definition(t, DEFAULT_RARITY, "", 0.0, [])
+            rarity = self.preferred_grant_rarity(t)
+            self.ensure_title_definition(t, rarity, "", 0.0, [])
             self.database_manager.execute(
                 "INSERT OR IGNORE INTO player_title_unlock_time "
                 "(xuid, title, rarity, unlocked_at) VALUES (?, ?, ?, ?)",
-                (xuid, t, DEFAULT_RARITY, now_iso),
+                (xuid, t, rarity, now_iso),
             )
+            equipped = self.get_equipped_title_entry(player)
+            if equipped and equipped.get("title") == t and equipped.get("rarity") != rarity:
+                self.set_equipped_title(player, t, rarity)
         if op_title and not getattr(player, "is_op", False):
             equipped = self.get_equipped_title_entry(player)
             if equipped and equipped.get("title") == op_title:
