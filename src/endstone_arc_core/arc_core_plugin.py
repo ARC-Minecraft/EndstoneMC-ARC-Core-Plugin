@@ -333,10 +333,13 @@ class ARCCorePlugin(Plugin):
         except (ValueError, TypeError):
             self.small_horn_price_per_hour = 60
 
-        # 新人欢迎系统
+        # 新人欢迎系统（文件只在启动/OP 重载时读入内存）
         self.newbie_welcome_file = Path(MAIN_PATH) / "newbie_welcome.txt"
         self.newbie_commands_file = Path(MAIN_PATH) / "newbie_commands.txt"
+        self.newbie_welcome_text = ""
+        self.newbie_command_lines: List[str] = []
         self._ensure_newbie_files_exist()
+        self._load_newbie_files()
 
         # 金钱排行榜设置
         self.hide_op_in_money_ranking = self.setting_manager.GetSetting('HIDE_OP_IN_MONEY_RANKING')
@@ -407,55 +410,77 @@ class ARCCorePlugin(Plugin):
             # 在__init__期间不能使用self.logger，使用print代替
             print(f"[ARC Core]Failed to create newbie files: {str(e)}")
 
-    def _send_newbie_welcome_message(self, player: Player):
-        """发送新人欢迎消息"""
+    def _load_newbie_files(self) -> None:
+        """把 newbie_welcome.txt / newbie_commands.txt 读进内存；OP 重载时再调一次。"""
         try:
             if self.newbie_welcome_file.exists():
-                welcome_content = self.newbie_welcome_file.read_text(encoding='utf-8').strip()
-                if welcome_content:
-                    # 将换行符分割成多条消息
-                    messages = welcome_content.split('\n')
-                    for message in messages:
-                        if message.strip():  # 跳过空行
-                            player.send_message(f"§e[欢迎] §f{message.strip()}")
-                    self.logger.info(f"[ARC Core]Sent welcome message to new player: {player.name}")
-                else:
-                    self.logger.warning(f"[ARC Core]Welcome file is empty: {self.newbie_welcome_file}")
+                self.newbie_welcome_text = self.newbie_welcome_file.read_text(
+                    encoding="utf-8"
+                )
             else:
-                self.logger.warning(f"[ARC Core]Welcome file not found: {self.newbie_welcome_file}")
+                self.newbie_welcome_text = ""
+        except Exception as e:
+            self.newbie_welcome_text = ""
+            self._safe_log("error", f"[ARC Core]Load newbie welcome error: {e}")
+
+        try:
+            if self.newbie_commands_file.exists():
+                raw = self.newbie_commands_file.read_text(encoding="utf-8")
+            else:
+                raw = ""
+            lines: List[str] = []
+            for line in raw.split("\n"):
+                line = line.strip()
+                if line and not line.startswith("#"):
+                    lines.append(line)
+            self.newbie_command_lines = lines
+        except Exception as e:
+            self.newbie_command_lines = []
+            self._safe_log("error", f"[ARC Core]Load newbie commands error: {e}")
+
+    def _send_newbie_welcome_message(self, player: Player):
+        """发送新人欢迎消息（使用内存缓存，不读盘）。"""
+        try:
+            welcome_content = (self.newbie_welcome_text or "").strip()
+            if welcome_content:
+                for message in welcome_content.split("\n"):
+                    if message.strip():
+                        player.send_message(f"§e[欢迎] §f{message.strip()}")
+                self.logger.info(f"[ARC Core]Sent welcome message to new player: {player.name}")
+            else:
+                self.logger.warning(
+                    f"[ARC Core]Welcome text is empty: {self.newbie_welcome_file}"
+                )
         except Exception as e:
             self.logger.error(f"[ARC Core]Failed to send welcome message to {player.name}: {str(e)}")
 
     def _execute_newbie_commands(self, player: Player):
-        """执行新人指令"""
+        """执行新人指令（使用内存缓存，不读盘）。"""
         try:
-            if self.newbie_commands_file.exists():
-                commands_content = self.newbie_commands_file.read_text(encoding='utf-8').strip()
-                if commands_content:
-                    lines = commands_content.split('\n')
-                    executed_count = 0
-                    for line in lines:
-                        line = line.strip()
-                        # 跳过空行和注释行
-                        if line and not line.startswith('#'):
-                            # 替换玩家名称占位符（含空格时加引号，避免指令拆成多参数）
-                            command = line.replace(
-                                '{player}', format_mc_command_player_name(player.name)
-                            )
-                            # 执行指令
-                            try:
-                                self.server.dispatch_command(self.server.command_sender, command)
-                                executed_count += 1
-                                self.logger.info(f"[ARC Core]Executed newbie command for {player.name}: {command}")
-                            except Exception as cmd_e:
-                                self.logger.error(f"[ARC Core]Failed to execute command '{command}' for {player.name}: {str(cmd_e)}")
-                    
-                    if executed_count > 0:
-                        self.logger.info(f"[ARC Core]Executed {executed_count} newbie commands for {player.name}")
-                else:
-                    self.logger.warning(f"[ARC Core]Commands file is empty: {self.newbie_commands_file}")
-            else:
-                self.logger.warning(f"[ARC Core]Commands file not found: {self.newbie_commands_file}")
+            if not self.newbie_command_lines:
+                self.logger.warning(
+                    f"[ARC Core]Newbie commands are empty: {self.newbie_commands_file}"
+                )
+                return
+            executed_count = 0
+            for line in self.newbie_command_lines:
+                command = line.replace(
+                    "{player}", format_mc_command_player_name(player.name)
+                )
+                try:
+                    self.server.dispatch_command(self.server.command_sender, command)
+                    executed_count += 1
+                    self.logger.info(
+                        f"[ARC Core]Executed newbie command for {player.name}: {command}"
+                    )
+                except Exception as cmd_e:
+                    self.logger.error(
+                        f"[ARC Core]Failed to execute command '{command}' for {player.name}: {str(cmd_e)}"
+                    )
+            if executed_count > 0:
+                self.logger.info(
+                    f"[ARC Core]Executed {executed_count} newbie commands for {player.name}"
+                )
         except Exception as e:
             self.logger.error(f"[ARC Core]Failed to execute newbie commands for {player.name}: {str(e)}")
 
@@ -4769,14 +4794,13 @@ class ARCCorePlugin(Plugin):
         player.perform_command('suicide')
 
     def show_newbie_welcome_panel(self, player: Player):
-        """显示新手引导面板，内容来自 newbie_welcome.txt"""
-        try:
-            if self.newbie_welcome_file.exists():
-                welcome_content = self.newbie_welcome_file.read_text(encoding='utf-8')
-            else:
-                welcome_content = self.language_manager.GetText('NEWBIE_GUIDE_PANEL_TITLE') + "\n\n（引导文件暂未配置）"
-        except Exception:
-            welcome_content = self.language_manager.GetText('NEWBIE_GUIDE_PANEL_TITLE') + "\n\n（读取引导内容失败）"
+        """显示新手引导面板，内容来自内存中的 newbie_welcome.txt"""
+        welcome_content = self.newbie_welcome_text or ""
+        if not str(welcome_content).strip():
+            welcome_content = (
+                self.language_manager.GetText("NEWBIE_GUIDE_PANEL_TITLE")
+                + "\n\n（引导文件暂未配置）"
+            )
         newbie_form = ActionForm(
             title=self.language_manager.GetText('NEWBIE_GUIDE_PANEL_TITLE'),
             content=welcome_content,
@@ -5229,14 +5253,8 @@ class ARCCorePlugin(Plugin):
         return any_ok
 
     def api_get_newbie_guide_text(self) -> str:
-        """供其他插件调用：返回新手引导文本全文（与 `plugins/ARCCore/newbie_welcome.txt`、主菜单新手引导一致）。"""
-        try:
-            if self.newbie_welcome_file.exists():
-                raw_text = self.newbie_welcome_file.read_text(encoding="utf-8")
-                return raw_text.strip() if raw_text else ""
-        except Exception:
-            pass
-        return ""
+        """供其他插件调用：返回新手引导文本全文（与内存中的 newbie_welcome.txt、主菜单新手引导一致）。"""
+        return str(self.newbie_welcome_text or "").strip()
 
     def _landmark_dim_label(self, dimension: str) -> str:
         dim = str(dimension or "").strip() or "-"
@@ -14642,6 +14660,7 @@ class ARCCorePlugin(Plugin):
             self.setting_manager.Reload()
             self._reapply_cached_settings()
             self._load_broadcast_messages()
+            self._load_newbie_files()
             self.language_manager.ReloadCurrentLanguage()
             self.entity_display_name_manager.reload()
             self.kill_reward_config.reload()

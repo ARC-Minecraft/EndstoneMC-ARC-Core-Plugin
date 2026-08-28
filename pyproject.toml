@@ -4,7 +4,7 @@ build-backend = "hatchling.build"
 
 [project]
 name = "endstone_arc_core"
-version = "0.9.34"
+version = "0.9.35"
 dependencies = []
 authors = [
     { name = "DEVILENMO", email = "DEVILENMO@gmail.com" },
