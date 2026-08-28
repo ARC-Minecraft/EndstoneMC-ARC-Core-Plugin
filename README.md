@@ -3,7 +3,7 @@
 # EndStone ARC Core Plugin / EndStone弧光核心
 
 [![Codacy Grade](https://app.codacy.com/project/badge/Grade/2f830615baf347258558dcc2a5ab85a1)](https://app.codacy.com/gh/DEVILENMO/EndstoneMC-ARC-Core-Plugin/dashboard?utm_source=gh&utm_medium=referral&utm_content=&utm_campaign=Badge_grade)
-[![Version](https://img.shields.io/badge/version-v0.9.32-blue)](https://github.com/ARC-Minecraft/EndstoneMC-ARC-Core-Plugin)
+[![Version](https://img.shields.io/badge/version-v0.9.33-blue)](https://github.com/ARC-Minecraft/EndstoneMC-ARC-Core-Plugin)
 [![Python](https://img.shields.io/badge/python-3.13+-blue?logo=python&logoColor=white)](https://www.python.org/)
 [![EndStone API](https://img.shields.io/badge/EndStone_API-0.7+-black)](https://github.com/EndstoneMC/endstone)
 [![License](https://img.shields.io/github/license/ARC-Minecraft/EndstoneMC-ARC-Core-Plugin)](LICENSE)
@@ -803,7 +803,12 @@ arc.api_sidebar_set_values(
 
 ## 📋 近期更新日志
 
-### v0.9.32（当前版本）
+### v0.9.33（当前版本）
+
+- ✅ **统一领地权限检查** `check_land_permission`：破坏/放置/方块交互/实体交互/攻击/展示框/爆炸共用；`ENABLE_LAND_SYSTEM=False` 或坐标无领地时直接跳过领地部分
+- ✅ **领地系统关闭时**不再做爆炸拦截、生物生成拦截、仅领地可放置方块等领地相关判定
+
+### v0.9.32
 
 - ✅ **侧边栏进服 tick 错峰**：记录玩家进服 tick，调度每 1 tick 仅刷新到期玩家，自然分散负载；单人周期仍为 `SIDEBAR_REFRESH_TICKS`
 - ✅ **领地系统总开关**：新增 `ENABLE_LAND_SYSTEM`；关闭时不启位置追踪线程（无进出领地提示），OP 面板可配

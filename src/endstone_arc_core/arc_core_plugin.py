@@ -1474,29 +1474,14 @@ class ARCCorePlugin(Plugin):
                                     (event.block.location.x, event.block.location.y, event.block.location.z)):
             event.is_cancelled = True
         if not event.is_cancelled and self._is_frame_block(event.block):
-            land_id = self.get_land_at_pos(
-                get_dimension_id(event.block.location.dimension),
-                int(event.block.location.x), int(event.block.location.z),
-                int(event.block.location.y)
+            dim = get_dimension_id(event.block.location.dimension)
+            bpos = (
+                event.block.location.x,
+                event.block.location.y,
+                event.block.location.z,
             )
-            if land_id is not None:
-                land_info = self.get_land_info(land_id)
-                if (
-                    land_info
-                    and not land_info.get('allow_frame', False)
-                    and not self._land_player_exempt_from_frame_protect(
-                        event.player,
-                        (
-                            event.block.location.x,
-                            event.block.location.y,
-                            event.block.location.z,
-                        ),
-                        land_id,
-                        land_info,
-                    )
-                ):
-                    event.is_cancelled = True
-                    event.player.send_message(self.language_manager.GetText('LAND_FRAME_PROTECT_HINT'))
+            if not self.check_land_permission(event.player, dim, bpos, "frame"):
+                event.is_cancelled = True
         if not self.spawn_protect_check(event.player, get_dimension_id(event.block.location.dimension),
                                     (event.block.location.x, event.block.location.y, event.block.location.z)):
             event.is_cancelled = True
@@ -1832,18 +1817,8 @@ class ARCCorePlugin(Plugin):
             if not self.land_interact_check(event.player, dimension, pos):
                 event.is_cancelled = True
             elif self._is_frame_block(block):
-                land_id = self.get_land_at_pos(dimension, int(block_location.x), int(block_location.z), int(block_location.y))
-                if land_id is not None:
-                    land_info = self.get_land_info(land_id)
-                    if (
-                        land_info
-                        and not land_info.get('allow_frame', False)
-                        and not self._land_player_exempt_from_frame_protect(
-                            event.player, pos, land_id, land_info
-                        )
-                    ):
-                        event.is_cancelled = True
-                        event.player.send_message(self.language_manager.GetText('LAND_FRAME_PROTECT_HINT'))
+                if not self.check_land_permission(event.player, dimension, pos, "frame"):
+                    event.is_cancelled = True
         except Exception as e:
             pass
             # self.logger.error(f"[ARC Core] on_player_interact error: {str(e)}")
@@ -1900,12 +1875,12 @@ class ARCCorePlugin(Plugin):
                 return
 
             # 爆炸中心落在禁止爆炸的领地：整片破坏列表清空（与旧 cancel 同级保护，但保留伤害）
-            land_id = self.get_land_at_pos(dimension, math.floor(explosion_location.x), math.floor(explosion_location.z))
-            if land_id is not None:
-                land_info = self.get_land_info(land_id)
-                if land_info and not land_info.get('allow_explosion', False):
-                    self._suppress_explosion_block_break(event, f"land#{land_id}")
-                    return
+            ex = math.floor(explosion_location.x)
+            ey = math.floor(explosion_location.y)
+            ez = math.floor(explosion_location.z)
+            if not self.is_land_explosion_allowed_at(dimension, ex, ez, ey):
+                self._suppress_explosion_block_break(event, f"land@{ex},{ey},{ez}")
+                return
             
             # 安全检查：确保 block_list 存在且可迭代
             if not hasattr(event, 'block_list') or event.block_list is None:
@@ -1927,16 +1902,10 @@ class ARCCorePlugin(Plugin):
                     # 无法读取坐标的方块按保护处理（不保留 → 不被炸）
                     continue
                 try:
-                    block_land_id = self.get_land_at_pos(dimension, bx, bz)
-                    if block_land_id is not None:
-                        block_land_info = self.get_land_info(block_land_id)
-                        if block_land_info and block_land_info.get('allow_explosion', False):
-                            keep_coords.append((bx, by, bz))  # 领地允许爆炸 → 保留
-                        # 否则：领地禁止爆炸 → 不保留（spared）
-                    else:
-                        keep_coords.append((bx, by, bz))  # 荒野 → 保留
+                    if not self.is_land_explosion_allowed_at(dimension, bx, bz, by):
+                        continue
+                    keep_coords.append((bx, by, bz))
                 except (AttributeError, TypeError, ValueError):
-                    # 查询领地出错按保护处理（不保留 → 不被炸）
                     continue
 
             # 仅在确实移除了方块时才写回（无变化时跳过 setter）
@@ -1986,22 +1955,10 @@ class ARCCorePlugin(Plugin):
         ax = math.floor(actor_location.x)
         ay = math.floor(actor_location.y)
         az = math.floor(actor_location.z)
-
-        # 检查生物是否在领地内
-        land_id = self.get_land_at_pos(dimension, ax, az, ay)
-        if land_id is not None:
-            # 先检查子领地权限
-            sub_land_id = self.get_sub_land_at_pos(land_id, ax, ay, az)
-            if sub_land_id is not None:
-                sub_info = self.get_sub_land_info(sub_land_id)
-                if sub_info and self._check_sub_land_permission(event.player, sub_info):
-                    return
-            land_info = self.get_land_info(land_id)
-            if land_info and not land_info.get('allow_actor_interaction', False):
-                # 检查玩家是否有权限（领地主人或授权用户）
-                if not self._check_land_permission(event.player, land_info):
-                    event.is_cancelled = True
-                    event.player.send_message(self.language_manager.GetText('LAND_ACTOR_INTERACTION_DENIED'))
+        if not self.check_land_permission(
+            event.player, dimension, (ax, ay, az), "actor_interact"
+        ):
+            event.is_cancelled = True
 
     @event_handler
     def on_actor_damage(self, event: ActorDamageEvent):
@@ -2074,37 +2031,10 @@ class ARCCorePlugin(Plugin):
         ax = math.floor(actor_location.x)
         ay = math.floor(actor_location.y)
         az = math.floor(actor_location.z)
-
-        # 检查生物是否在领地内
-        land_id = self.get_land_at_pos(dimension, ax, az, ay)
-        if land_id is not None:
-            # 先检查子领地权限：有子领地权限则直接放行
-            sub_land_id = self.get_sub_land_at_pos(land_id, ax, ay, az)
-            if sub_land_id is not None:
-                sub_info = self.get_sub_land_info(sub_land_id)
-                if sub_info and self._check_sub_land_permission(attacker, sub_info):
-                    return
-            land_info = self.get_land_info(land_id)
-            if not land_info:
-                return
-            # 公共领地：禁止生物伤害时一律拦截；开放生物伤害时仅保护白名单生物
-            if self.is_public_land(land_id):
-                if not land_info.get('allow_actor_damage', False):
-                    event.is_cancelled = True
-                    attacker.send_message(self.language_manager.GetText('LAND_ACTOR_DAMAGE_DENIED'))
-                    return
-                protected = self._get_public_land_protected_entities()
-                # print("entity",event.actor.type, "public land protected entities", protected)
-                damaged_entity_type = event.actor.type
-                if damaged_entity_type and damaged_entity_type in protected:
-                    event.is_cancelled = True
-                    attacker.send_message(self.language_manager.GetText('LAND_ACTOR_DAMAGE_DENIED'))
-                return
-            # 非公共领地：未开放生物伤害时仅主人/授权用户可造成伤害（与方块互动等统一走权限判定）
-            if not land_info.get('allow_actor_damage', False):
-                if not self._check_land_permission(attacker, land_info):
-                    event.is_cancelled = True
-                    attacker.send_message(self.language_manager.GetText('LAND_ACTOR_DAMAGE_DENIED'))
+        if not self.check_land_permission(
+            attacker, dimension, (ax, ay, az), "actor_damage", damaged_actor=event.actor
+        ):
+            event.is_cancelled = True
 
     @event_handler
     def on_actor_spawn(self, event: ActorSpawnEvent):
@@ -2112,6 +2042,8 @@ class ARCCorePlugin(Plugin):
         try:
             actor = event.actor
             if actor is None or isinstance(actor, Player):
+                return
+            if not self._is_land_system_enabled():
                 return
             loc = actor.location
             if loc is None:
@@ -3086,6 +3018,181 @@ class ARCCorePlugin(Plugin):
     def _is_disabled_block(self, block_identifier: str) -> bool:
         return self._normalize_block_id(block_identifier) in self._disabled_block_ids
 
+    def _parse_land_pos(self, pos: tuple):
+        x = pos[0]
+        y = pos[1] if len(pos) > 1 else None
+        z = pos[2] if len(pos) > 2 else pos[1]
+        return x, y, z
+
+    def _build_land_check_context(self, dimension: str, pos: tuple) -> Optional[dict]:
+        """领地系统关闭或坐标不在任何领地内时返回 None（调用方可直接跳过领地检查）。"""
+        if not self._is_land_system_enabled():
+            return None
+        x, y, z = self._parse_land_pos(pos)
+        land_id = self.land_system.get_land_at_pos(dimension, x, z, y)
+        if land_id is None:
+            return None
+        land_info = self.get_land_info(land_id)
+        if not land_info:
+            return None
+        sub_info = None
+        if y is not None:
+            sub_land_id = self.get_sub_land_at_pos(land_id, int(x), int(y), int(z))
+            if sub_land_id is not None:
+                sub_info = self.get_sub_land_info(sub_land_id)
+        return {
+            "land_id": land_id,
+            "land_info": land_info,
+            "sub_info": sub_info,
+        }
+
+    def _send_land_deny_message(
+        self, player: Player, kind: str, land_id: Optional[int] = None
+    ) -> None:
+        try:
+            if kind == "actor_interact":
+                player.send_message(
+                    self.language_manager.GetText("LAND_ACTOR_INTERACTION_DENIED")
+                )
+            elif kind == "actor_damage":
+                player.send_message(
+                    self.language_manager.GetText("LAND_ACTOR_DAMAGE_DENIED")
+                )
+            elif kind == "frame":
+                player.send_message(
+                    self.language_manager.GetText("LAND_FRAME_PROTECT_HINT")
+                )
+            else:
+                if land_id is not None and self.is_public_land(land_id):
+                    owner_disp = self.language_manager.GetText("PUBLIC_LAND_NAME")
+                else:
+                    owner_disp = (
+                        self.get_land_display_owner_name(land_id) if land_id else "?"
+                    )
+                player.send_message(
+                    self.language_manager.GetText("LAND_PROTECT_HINT").format(owner_disp)
+                )
+        except Exception:
+            pass
+
+    def check_land_permission(
+        self,
+        player: Player,
+        dimension: str,
+        pos: tuple,
+        kind: str,
+        *,
+        damaged_actor=None,
+        send_hint: bool = True,
+    ) -> bool:
+        """
+        统一领地权限检查。
+        kind: operation | interact | actor_interact | actor_damage | frame
+        领地系统未开启或当前坐标无领地：True（跳过领地部分）。
+        """
+        ctx = self._build_land_check_context(dimension, pos)
+        if ctx is None:
+            return True
+
+        land_id = ctx["land_id"]
+        land_info = ctx["land_info"]
+        sub_info = ctx.get("sub_info")
+
+        if sub_info and self._check_sub_land_permission(player, sub_info):
+            return True
+
+        owner_key = land_info.get("owner_xuid", "")
+
+        if kind == "frame":
+            if land_info.get("allow_frame", False):
+                return True
+            allowed = self._land_player_exempt_from_frame_protect(
+                player, pos, land_id, land_info
+            )
+            if not allowed and send_hint:
+                self._send_land_deny_message(player, kind, land_id)
+            return allowed
+
+        if kind == "actor_interact":
+            if land_info.get("allow_actor_interaction", False):
+                return True
+            allowed = self._check_land_permission(player, land_info)
+            if not allowed and send_hint:
+                self._send_land_deny_message(player, kind, land_id)
+            return allowed
+
+        if kind == "actor_damage":
+            if self.is_public_land(land_id):
+                if not land_info.get("allow_actor_damage", False):
+                    if send_hint:
+                        self._send_land_deny_message(player, kind, land_id)
+                    return False
+                if damaged_actor is not None:
+                    protected = self._get_public_land_protected_entities()
+                    damaged_entity_type = getattr(damaged_actor, "type", None)
+                    if damaged_entity_type and damaged_entity_type in protected:
+                        if send_hint:
+                            self._send_land_deny_message(player, kind, land_id)
+                        return False
+                return True
+            if not land_info.get("allow_actor_damage", False):
+                allowed = self._check_land_permission(player, land_info)
+                if not allowed and send_hint:
+                    self._send_land_deny_message(player, kind, land_id)
+                return allowed
+            return True
+
+        if kind == "interact":
+            if land_info.get("allow_public_interact", False):
+                if LandSystem.parse_land_owner_guild_id(str(owner_key or "")) is None:
+                    return True
+            if self.land_system.is_public_land_owner(owner_key):
+                if player.is_op:
+                    return True
+                if send_hint:
+                    self._send_land_deny_message(player, kind, land_id)
+                return False
+            shared_users = land_info.get("shared_users", [])
+            if (
+                self._player_matches_land_owner_key(player, owner_key)
+                or self._land_shared_user_grants_access(player, owner_key, shared_users)
+                or self._land_interact_allowed_for_guild_peer(player, land_info)
+            ):
+                return True
+            if send_hint:
+                self._send_land_deny_message(player, kind, land_id)
+            return False
+
+        # operation（破坏/放置等建造类）
+        if self.land_system.is_public_land_owner(owner_key):
+            if player.is_op:
+                return True
+            if send_hint:
+                self._send_land_deny_message(player, kind, land_id)
+            return False
+        shared_users = land_info.get("shared_users", [])
+        if self._player_matches_land_owner_key(player, owner_key) or self._land_shared_user_grants_access(
+            player, owner_key, shared_users
+        ):
+            return True
+        if send_hint:
+            self._send_land_deny_message(player, kind, land_id)
+        return False
+
+    def is_land_explosion_allowed_at(
+        self, dimension: str, x: int, z: int, y: Optional[int] = None
+    ) -> bool:
+        """坐标是否允许爆炸破坏方块；系统关闭或无领地视为允许。"""
+        if not self._is_land_system_enabled():
+            return True
+        land_id = self.land_system.get_land_at_pos(dimension, x, z, y)
+        if land_id is None:
+            return True
+        land_info = self.get_land_info(land_id)
+        if not land_info:
+            return True
+        return bool(land_info.get("allow_explosion", False))
+
     def land_only_place_wilderness_check(
         self, player: Player, dimension: str, pos: tuple, block_identifier: str
     ) -> bool:
@@ -3097,79 +3204,20 @@ class ARCCorePlugin(Plugin):
             bid = "minecraft:" + bid
         if bid not in self._land_only_place_block_ids:
             return True
-        x, y, z = pos[0], (pos[1] if len(pos) > 1 else None), pos[2]
-        land_id = self.get_land_at_pos(dimension, x, z, y)
+        if not self._is_land_system_enabled():
+            return True
+        x, y, z = self._parse_land_pos(pos)
+        land_id = self.land_system.get_land_at_pos(dimension, x, z, y)
         if land_id is None:
             player.send_message(self.language_manager.GetText("LAND_ONLY_PLACE_WILDERNESS_HINT"))
             return False
         return True
 
     def land_operation_check(self, player: Player, dimension: str, pos: tuple):
-        x, y, z = pos[0], (pos[1] if len(pos) > 1 else None), pos[2]
-        land_id = self.get_land_at_pos(dimension, x, z, y)
-        if land_id is not None:
-            # 先检查子领地权限
-            if y is not None:
-                sub_land_id = self.get_sub_land_at_pos(land_id, int(x), int(y), int(z))
-                if sub_land_id is not None:
-                    sub_info = self.get_sub_land_info(sub_land_id)
-                    if sub_info and self._check_sub_land_permission(player, sub_info):
-                        return True
-            # 回落到父领地权限检查
-            land_info = self.get_land_info(land_id)
-            if not land_info:
-                return True
-            owner_key = land_info['owner_xuid']
-            if self.land_system.is_public_land_owner(owner_key):
-                if not player.is_op:
-                    player.send_message(self.language_manager.GetText('LAND_PROTECT_HINT').format(self.language_manager.GetText('PUBLIC_LAND_NAME')))
-                    return False
-                return True
-            shared_users = land_info['shared_users']
-            if not self._player_matches_land_owner_key(player, owner_key) and not self._land_shared_user_grants_access(
-                player, owner_key, shared_users
-            ):
-                owner_disp = self.get_land_display_owner_name(land_id)
-                player.send_message(self.language_manager.GetText('LAND_PROTECT_HINT').format(owner_disp))
-                return False
-        return True
+        return self.check_land_permission(player, dimension, pos, "operation")
 
     def land_interact_check(self, player: Player, dimension: str, pos: tuple):
-        """检查玩家是否有权限在领地内进行方块互动"""
-        x, y, z = pos[0], (pos[1] if len(pos) > 1 else None), pos[2]
-        land_id = self.get_land_at_pos(dimension, x, z, y)
-        if land_id is not None:
-            # 先检查子领地权限
-            if y is not None:
-                sub_land_id = self.get_sub_land_at_pos(land_id, int(x), int(y), int(z))
-                if sub_land_id is not None:
-                    sub_info = self.get_sub_land_info(sub_land_id)
-                    if sub_info and self._check_sub_land_permission(player, sub_info):
-                        return True
-            # 回落到父领地权限检查
-            land_info = self.get_land_info(land_id)
-            if not land_info:
-                return True
-            owner_key = land_info['owner_xuid']
-            if land_info.get('allow_public_interact', False):
-                if LandSystem.parse_land_owner_guild_id(str(owner_key or "")) is None:
-                    return True
-            if self.land_system.is_public_land_owner(owner_key):
-                if not player.is_op:
-                    player.send_message(self.language_manager.GetText('LAND_PROTECT_HINT').format(self.language_manager.GetText('PUBLIC_LAND_NAME')))
-                    return False
-                return True
-            shared_users = land_info['shared_users']
-            if (
-                self._player_matches_land_owner_key(player, owner_key)
-                or self._land_shared_user_grants_access(player, owner_key, shared_users)
-                or self._land_interact_allowed_for_guild_peer(player, land_info)
-            ):
-                return True
-            owner_disp = self.get_land_display_owner_name(land_id)
-            player.send_message(self.language_manager.GetText('LAND_PROTECT_HINT').format(owner_disp))
-            return False
-        return True
+        return self.check_land_permission(player, dimension, pos, "interact")
     
     def spawn_protect_check(self, player: Player, dimension: str, pos: tuple):
         if self.if_protect_spawn and len(self.spawn_pos_dict):
