@@ -138,6 +138,7 @@ class SidebarSystem:
         self._cached_max_players: Optional[int] = None
         self._ping_cache: Dict[str, Optional[int]] = {}
         self._money_cache: Dict[str, str] = {}
+        self._tick_counter: int = 0
         self.enabled = True
         self.default_on = True
         self.sidebar_title = "§6弧光服务器"
@@ -381,10 +382,8 @@ class SidebarSystem:
             xs = str(xuid or "").strip()
             if xs:
                 self._values.setdefault(xs, {}).setdefault(pid, {})[k] = value
-                self._schedule_refresh_xuid(xs)
             else:
                 self._global_values.setdefault(pid, {})[k] = value
-                self._schedule_refresh_all_enabled()
             return True
         except Exception as e:
             self._log_error(f"set_value: {e}")
@@ -408,10 +407,6 @@ class SidebarSystem:
                     self._values.setdefault(xs, {}).setdefault(pid, {})[kk] = v
                 else:
                     self._global_values.setdefault(pid, {})[kk] = v
-            if xs:
-                self._schedule_refresh_xuid(xs)
-            else:
-                self._schedule_refresh_all_enabled()
             return ok
         except Exception as e:
             self._log_error(f"set_values: {e}")
@@ -516,8 +511,6 @@ class SidebarSystem:
                     )
                 except Exception:
                     self._run_on_main(_later)
-            # 其它已开启侧边栏的玩家：刷新在线人数
-            self._refresh_all_enabled(exclude_xuid=xuid)
         except Exception as e:
             self._log_error(f"on_player_join: {e}")
 
@@ -534,7 +527,6 @@ class SidebarSystem:
             self._ping_cache.pop(xuid, None)
             self._money_cache.pop(xuid, None)
             self._update_online_cache()
-            self._refresh_all_enabled()
         except Exception as e:
             self._log_error(f"on_player_quit: {e}")
 
@@ -677,14 +669,22 @@ class SidebarSystem:
 
     # ------------------------------------------------------------------ tick / render
     def tick(self) -> None:
-        """低频定时：只刷新时间 / TPS / MSPT / 延迟，再重绘已开启侧边栏的玩家。"""
+        """低频定时：刷新时间/TPS/MSPT/延迟，并按 xuid 分批重绘已开启侧边栏的玩家。"""
         if not self.enabled:
             return
         try:
             self._refresh_timed_cache()
             now = time.time()
+            period = max(1, int(self.refresh_ticks))
+            slot = self._tick_counter % period
+            self._tick_counter = (self._tick_counter + 1) % period
             for player in list(getattr(self.plugin.server, "online_players", []) or []):
                 try:
+                    xuid = str(getattr(player, "xuid", "") or "").strip()
+                    if not xuid:
+                        continue
+                    if (hash(xuid) % period) != slot:
+                        continue
                     self._tick_player(player, now)
                 except Exception as e:
                     self._log_error(f"tick player: {e}")
@@ -692,39 +692,23 @@ class SidebarSystem:
             self._log_error(f"tick: {e}")
 
     def notify_money_changed(self, xuid: str) -> None:
-        """金钱变动：侧边栏开着则立刻刷该玩家金钱行。"""
+        """金钱变动：只更新缓存，等定时 tick 渲染。"""
         xs = str(xuid or "").strip()
         if not xs or not self.enabled:
             return
-
-        def _run() -> None:
-            try:
-                self._seed_money_cache(xs)
-                player = self._find_online(xs)
-                if player is None:
-                    return
-                st = self._player_state.get(xs)
-                if st is None or not st.enabled:
-                    return
-                self.refresh_player(player, force=False)
-            except Exception as e:
-                self._log_error(f"notify_money_changed: {e}")
-
-        self._run_on_main(_run)
+        try:
+            self._seed_money_cache(xs)
+        except Exception as e:
+            self._log_error(f"notify_money_changed: {e}")
 
     def notify_online_changed(self) -> None:
-        """在线人数变动（一般由进出服调用）。"""
+        """在线人数变动：只更新缓存，等定时 tick 渲染。"""
         if not self.enabled:
             return
-
-        def _run() -> None:
-            try:
-                self._update_online_cache()
-                self._refresh_all_enabled()
-            except Exception as e:
-                self._log_error(f"notify_online_changed: {e}")
-
-        self._run_on_main(_run)
+        try:
+            self._update_online_cache()
+        except Exception as e:
+            self._log_error(f"notify_online_changed: {e}")
 
     def refresh(self, xuid: str = "") -> None:
         try:

@@ -3,7 +3,7 @@
 # EndStone ARC Core Plugin / EndStone弧光核心
 
 [![Codacy Grade](https://app.codacy.com/project/badge/Grade/2f830615baf347258558dcc2a5ab85a1)](https://app.codacy.com/gh/DEVILENMO/EndstoneMC-ARC-Core-Plugin/dashboard?utm_source=gh&utm_medium=referral&utm_content=&utm_campaign=Badge_grade)
-[![Version](https://img.shields.io/badge/version-v0.9.28-blue)](https://github.com/ARC-Minecraft/EndstoneMC-ARC-Core-Plugin)
+[![Version](https://img.shields.io/badge/version-v0.9.29-blue)](https://github.com/ARC-Minecraft/EndstoneMC-ARC-Core-Plugin)
 [![Python](https://img.shields.io/badge/python-3.13+-blue?logo=python&logoColor=white)](https://www.python.org/)
 [![EndStone API](https://img.shields.io/badge/EndStone_API-0.7+-black)](https://github.com/EndstoneMC/endstone)
 [![License](https://img.shields.io/github/license/ARC-Minecraft/EndstoneMC-ARC-Core-Plugin)](LICENSE)
@@ -19,7 +19,7 @@ EndStone ARC Core 是一个功能完整的 EndStone (Minecraft 基岩版服务�
 
 - **作者**: DEVILENMO
 - **邮箱**: DEVILENMO@gmail.com
-- **版本**: 0.9.28
+- **版本**: 0.9.29
 - **API 版本**: 0.7+
 - **推荐 Python 版本**: 3.13
 
@@ -78,9 +78,9 @@ EndStone ARC Core 是一个功能完整的 EndStone (Minecraft 基岩版服务�
 - **原生计分板 SIDE_BAR**：每玩家独立 `Scoreboard`，复用稳定 objective 原地刷新（避免频繁销毁重建导致客户端闪退）
 - **多页面 + 定时翻页**：可见页 ≥ 2 时默认每 **10 秒**自动切换；可用 `/sidebar lock` 锁定
 - **核心主页面 `arc_core_main`**：现实时间、金钱、**TPS**、在线人数、**玩家延迟**等（模板可配；默认不含生命/饱食）
-- **其它插件注册页面**：`api_sidebar_register_page` + 行模板 `{key}`，数值变更用 `api_sidebar_set_value(s)` 推送（会触发刷新）
+- **其它插件注册页面**：`api_sidebar_register_page` + 行模板 `{key}`，数值变更用 `api_sidebar_set_value(s)` 推送（等定时 tick 渲染）
 - **玩家命令**：`/sidebar`（别名 `/sb`）支持 `on` / `off` / `next` / `prev` / `lock` / `unlock` / `list`；开关与锁定偏好持久化到 SQLite
-- **刷新策略（v0.9.25）**：约 3 秒定时只更新时间/TPS/延迟；金钱变动、进出服（在线人数）、插件推送值为事件触发
+- **刷新策略（v0.9.29）**：纯定时驱动，默认约 **3 秒**（`SIDEBAR_REFRESH_TICKS=60`）按 xuid 分批刷新时间/TPS/延迟/在线/金钱等；进出服、金钱变动、插件推送值不再触发重绘；玩家主动 `/sidebar on|off|next|prev|lock` 仍即时刷新
 - **配置**：`SIDEBAR_ENABLE`、`SIDEBAR_DEFAULT_ON`、`SIDEBAR_TITLE`、`SIDEBAR_SWITCH_INTERVAL`、`SIDEBAR_REFRESH_TICKS`（默认 60）、`SIDEBAR_JOIN_DELAY_TICKS`（默认 40）、`SIDEBAR_MAIN_LINES`、`SIDEBAR_MAX_LINES`（亦可在 OP 面板「侧边栏」分组修改）
 
 ### 🏠 领地管理系统
@@ -802,7 +802,12 @@ arc.api_sidebar_set_values(
 
 ## 📋 近期更新日志
 
-### v0.9.28（当前版本）
+### v0.9.29（当前版本）
+
+- ✅ **侧边栏纯定时刷新**：去掉进出服、金钱变动、插件 `set_value` 的事件重绘；约 3 秒 tick 按 xuid 分批渲染，降低单 tick 峰值；`/sidebar on|off|next|prev|lock` 仍即时响应
+- ✅ **进服/离服减负**：`on_player_join` 头衔、时长、邀请提示、天眼、侧边栏分帧延迟执行；离服天眼与时长结算延后 1 tick，避免同帧阻塞主线程
+
+### v0.9.28
 
 - ✅ **天眼查询增强**：玩家名默认模糊匹配；`action` 支持 `death`/`pvp`/`pve`/`combat` 等别名与 PvP 细分；可不传玩家名按事件类型查全服；展示区分 PvP 攻击/死亡与攻击生物
 

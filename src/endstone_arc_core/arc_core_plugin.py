@@ -1116,76 +1116,110 @@ class ARCCorePlugin(Plugin):
     # Event handlers
     @event_handler
     def on_player_join(self, event: PlayerJoinEvent):
+        player = event.player
         # 在玩家加入时立即初始化玩家数据（基本信息和经济数据）
-        success, is_new_player = self.ensure_player_data_initialized(event.player)
-        
+        success, is_new_player = self.ensure_player_data_initialized(player)
+
         # 如果是新玩家，执行新人欢迎功能
         if is_new_player and success:
-            # 发送新人欢迎消息
-            self._send_newbie_welcome_message(event.player)
-            # 执行新人指令
-            self._execute_newbie_commands(event.player)
-        
+            self._send_newbie_welcome_message(player)
+            self._execute_newbie_commands(player)
+
         self._broadcast_text(
-            self.language_manager.GetText('PLAYER_JOIN_MESSAGE').format(event.player.name)
+            self.language_manager.GetText('PLAYER_JOIN_MESSAGE').format(player.name)
         )
-        self.player_sensitive_password_verified.pop(event.player.name, None)
-        self._pending_sensitive_action_by_player.pop(event.player.name, None)
-        self._send_text(event.player, self.language_manager.GetText('PLAYER_JOIN_HINT'))
+        self.player_sensitive_password_verified.pop(player.name, None)
+        self._pending_sensitive_action_by_player.pop(player.name, None)
 
-        # 登录时提示可领取的邀请奖励次数
-        try:
-            player_xuid = str(event.player.xuid)
-            pending_info = self.database_manager.query_one(
-                "SELECT pending_invite_reward_times FROM player_basic_info WHERE xuid = ?",
-                (player_xuid,)
-            )
-            if pending_info is not None:
-                try:
-                    pending_times = int(pending_info.get('pending_invite_reward_times', 0) or 0)
-                except (ValueError, TypeError):
-                    pending_times = 0
-                if pending_times > 0:
-                    event.player.send_message(
-                        self.language_manager.GetText('INVITE_REWARD_PENDING_HINT').format(pending_times)
+        # Join 完成后再开始追踪；此前 GameModeChange 等加载事件一律忽略
+        self._sky_eye_mark_ready(player)
+
+        join_delay_ticks = 40
+        if getattr(self, "sidebar_system", None) is not None:
+            join_delay_ticks = max(1, int(self.sidebar_system.join_delay_ticks))
+
+        def _if_still_online(fn):
+            def _wrapped(p=player):
+                if p is None or p not in self.server.online_players:
+                    return
+                fn(p)
+            return _wrapped
+
+        def _defer(delay: int, fn) -> None:
+            self.server.scheduler.run_task(self, fn, delay=delay)
+
+        _defer(
+            2,
+            _if_still_online(
+                lambda p: (
+                    self.title_system.on_player_join(p),
+                    self._auto_equip_highest_title_if_needed(p),
+                    self._update_player_name_tag(p),
+                )
+            ),
+        )
+        _defer(4, _if_still_online(self._record_player_join_playtime))
+
+        def _join_hints(p):
+            self._send_text(p, self.language_manager.GetText('PLAYER_JOIN_HINT'))
+            try:
+                player_xuid = str(p.xuid)
+                pending_info = self.database_manager.query_one(
+                    "SELECT pending_invite_reward_times FROM player_basic_info WHERE xuid = ?",
+                    (player_xuid,),
+                )
+                if pending_info is not None:
+                    try:
+                        pending_times = int(
+                            pending_info.get('pending_invite_reward_times', 0) or 0
+                        )
+                    except (ValueError, TypeError):
+                        pending_times = 0
+                    if pending_times > 0:
+                        p.send_message(
+                            self.language_manager.GetText(
+                                'INVITE_REWARD_PENDING_HINT'
+                            ).format(pending_times)
+                        )
+            except Exception as e:
+                self.logger.error(
+                    f"{ColorFormat.RED}[ARC Core]Check pending invite rewards on join error: {str(e)}"
+                )
+
+        _defer(6, _if_still_online(_join_hints))
+
+        def _join_sky_eye(p):
+            try:
+                join_loc = getattr(p, "location", None)
+                if join_loc is not None and getattr(join_loc, "dimension", None) is not None:
+                    self._sky_eye_append(
+                        "PlayerJoin",
+                        p,
+                        get_dimension_id(join_loc.dimension),
+                        float(join_loc.x),
+                        float(join_loc.y),
+                        float(join_loc.z),
+                        detail=f"new_player={bool(is_new_player and success)}",
                     )
-        except Exception as e:
-            self.logger.error(f"{ColorFormat.RED}[ARC Core]Check pending invite rewards on join error: {str(e)}")
+            except Exception:
+                pass
 
-        self.title_system.on_player_join(event.player)
-        self._auto_equip_highest_title_if_needed(event.player)
-        self._update_player_name_tag(event.player)
+        _defer(8, _if_still_online(_join_sky_eye))
 
-        self._record_player_join_playtime(event.player)
+        def _join_sidebar(p):
+            try:
+                if getattr(self, "sidebar_system", None) is not None:
+                    self.sidebar_system.on_player_join(p)
+            except Exception:
+                pass
+
+        _defer(join_delay_ticks, _if_still_online(_join_sidebar))
 
         self.server.scheduler.run_task(
             self,
-            lambda p=event.player: self._show_join_arc_main_menu_with_delay(p),
+            lambda p=player: self._show_join_arc_main_menu_with_delay(p),
             delay=20,
         )
-
-        try:
-            join_loc = getattr(event.player, "location", None)
-            if join_loc is not None and getattr(join_loc, "dimension", None) is not None:
-                self._sky_eye_append(
-                    "PlayerJoin",
-                    event.player,
-                    get_dimension_id(join_loc.dimension),
-                    float(join_loc.x),
-                    float(join_loc.y),
-                    float(join_loc.z),
-                    detail=f"new_player={bool(is_new_player and success)}",
-                )
-        except Exception:
-            pass
-        # Join 完成后再开始追踪；此前 GameModeChange 等加载事件一律忽略
-        self._sky_eye_mark_ready(event.player)
-
-        try:
-            if getattr(self, "sidebar_system", None) is not None:
-                self.sidebar_system.on_player_join(event.player)
-        except Exception:
-            pass
 
     def _sky_eye_player_key(self, player: Optional[Player]) -> str:
         if player is None:
@@ -1345,40 +1379,70 @@ class ARCCorePlugin(Plugin):
 
     @event_handler
     def on_player_quit(self, event: PlayerQuitEvent):
+        player = event.player
+        player_name = str(getattr(player, "name", "") or "")
+        player_xuid = str(getattr(player, "xuid", "") or "")
+        quit_dimension = ""
+        quit_x = quit_y = quit_z = 0.0
         try:
-            quit_loc = getattr(event.player, "location", None)
+            quit_loc = getattr(player, "location", None)
             if quit_loc is not None and getattr(quit_loc, "dimension", None) is not None:
-                self._sky_eye_append(
-                    "PlayerQuit",
-                    event.player,
-                    get_dimension_id(quit_loc.dimension),
-                    float(quit_loc.x),
-                    float(quit_loc.y),
-                    float(quit_loc.z),
-                    detail="",
-                )
+                quit_dimension = get_dimension_id(quit_loc.dimension)
+                quit_x = float(quit_loc.x)
+                quit_y = float(quit_loc.y)
+                quit_z = float(quit_loc.z)
         except Exception:
             pass
-        self._sky_eye_clear_ready(event.player)
-        self._record_player_quit_playtime(event.player)
-        self._broadcast_text(
-            self.language_manager.GetText('PLAYER_QUIT_MESSAGE').format(event.player.name)
-        )
-        self.player_sensitive_password_verified.pop(event.player.name, None)
-        self._pending_sensitive_action_by_player.pop(event.player.name, None)
 
-        
+        self._sky_eye_clear_ready(player)
+        self._broadcast_text(
+            self.language_manager.GetText('PLAYER_QUIT_MESSAGE').format(player_name)
+        )
+        self.player_sensitive_password_verified.pop(player_name, None)
+        self._pending_sensitive_action_by_player.pop(player_name, None)
+
         # 线程安全地清理玩家领地位置记录
         with self.position_thread_lock:
-            if event.player.name in self.player_in_land_id_dict:
-                del self.player_in_land_id_dict[event.player.name]
-        self.player_land_creation_pick.pop(event.player.name, None)
-        self.player_land_pick_last_event_ts.pop(event.player.name, None)
+            if player_name in self.player_in_land_id_dict:
+                del self.player_in_land_id_dict[player_name]
+        self.player_land_creation_pick.pop(player_name, None)
+        self.player_land_pick_last_event_ts.pop(player_name, None)
         try:
             if getattr(self, "sidebar_system", None) is not None:
-                self.sidebar_system.on_player_quit(event.player)
+                self.sidebar_system.on_player_quit(player)
         except Exception:
             pass
+
+        def _deferred_quit_work(
+            xuid=player_xuid,
+            name=player_name,
+            dimension=quit_dimension,
+            px=quit_x,
+            py=quit_y,
+            pz=quit_z,
+        ) -> None:
+            try:
+                if dimension:
+                    self.api_sky_eye_log(
+                        "PlayerQuit",
+                        player_name=name,
+                        player_xuid=xuid,
+                        dimension=dimension,
+                        x=px,
+                        y=py,
+                        z=pz,
+                        resolve_online=False,
+                    )
+            except Exception:
+                pass
+            try:
+                self._record_player_quit_playtime(
+                    player=None, xuid=xuid, name=name
+                )
+            except Exception:
+                pass
+
+        self.server.scheduler.run_task(self, _deferred_quit_work, delay=1)
 
     @event_handler
     def on_block_break(self, event: BlockBreakEvent):
@@ -17593,13 +17657,16 @@ class ARCCorePlugin(Plugin):
             if self.logger:
                 self.logger.error(f"[ARC Core] record join playtime error: {e}")
 
-    def _record_player_quit_playtime(self, player) -> None:
+    def _record_player_quit_playtime(
+        self, player=None, *, xuid: str = "", name: str = ""
+    ) -> None:
         """Accumulate session seconds into cross-server total_playtime."""
         try:
             import time as _time
             from datetime import datetime as _dt
-            name = getattr(player, "name", "") or ""
-            xuid = str(getattr(player, "xuid", "") or "")
+            if player is not None:
+                name = getattr(player, "name", "") or name
+                xuid = str(getattr(player, "xuid", "") or "") or xuid
             if not xuid:
                 return
             started = self._play_session_start.pop(xuid, None)
