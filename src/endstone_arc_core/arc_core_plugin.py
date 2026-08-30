@@ -298,6 +298,9 @@ class ARCCorePlugin(Plugin):
         self.player_land_creation_pick: Dict[str, Dict[str, Any]] = {}
         # 上次成功写入一次选点的时间，用于防抖（与 player_land_creation_pick 同步清理）
         self.player_land_pick_last_event_ts: Dict[str, float] = {}
+        # 领地边界粒子：按 xuid（无则 name）追踪分 tick 任务；退出时取消，避免对失效 Player 调 spawn_particle 崩服
+        self._land_particle_task_by_key: Dict[str, Any] = {}
+        self._land_particle_gen_by_key: Dict[str, int] = {}
 
         # OP坐标记录与上次执行指令（空输入时重复执行）
         self.op_coordinate1_dict = {}
@@ -1163,28 +1166,6 @@ class ARCCorePlugin(Plugin):
         if getattr(self, "sidebar_system", None) is not None:
             join_delay_ticks = max(1, int(self.sidebar_system.join_delay_ticks))
 
-        def _if_still_online(fn):
-            def _wrapped(p=player):
-                if p is None or p not in self.server.online_players:
-                    return
-                fn(p)
-            return _wrapped
-
-        def _defer(delay: int, fn) -> None:
-            self.server.scheduler.run_task(self, fn, delay=delay)
-
-        _defer(
-            2,
-            _if_still_online(
-                lambda p: (
-                    self.title_system.on_player_join(p),
-                    self._auto_equip_highest_title_if_needed(p),
-                    self._update_player_name_tag(p),
-                )
-            ),
-        )
-        _defer(4, _if_still_online(self._record_player_join_playtime))
-
         def _join_hints(p):
             self._send_text(p, self.language_manager.GetText('PLAYER_JOIN_HINT'))
             try:
@@ -1211,8 +1192,6 @@ class ARCCorePlugin(Plugin):
                     f"{ColorFormat.RED}[ARC Core]Check pending invite rewards on join error: {str(e)}"
                 )
 
-        _defer(6, _if_still_online(_join_hints))
-
         def _join_sky_eye(p):
             try:
                 join_loc = getattr(p, "location", None)
@@ -1229,8 +1208,6 @@ class ARCCorePlugin(Plugin):
             except Exception:
                 pass
 
-        _defer(8, _if_still_online(_join_sky_eye))
-
         def _join_sidebar(p):
             try:
                 if getattr(self, "sidebar_system", None) is not None:
@@ -1238,11 +1215,22 @@ class ARCCorePlugin(Plugin):
             except Exception:
                 pass
 
-        _defer(join_delay_ticks, _if_still_online(_join_sidebar))
-
-        self.server.scheduler.run_task(
-            self,
-            lambda p=player: self._show_join_arc_main_menu_with_delay(p),
+        self.run_player_task(
+            player,
+            lambda p: (
+                self.title_system.on_player_join(p),
+                self._auto_equip_highest_title_if_needed(p),
+                self._update_player_name_tag(p),
+            ),
+            delay=2,
+        )
+        self.run_player_task(player, self._record_player_join_playtime, delay=4)
+        self.run_player_task(player, _join_hints, delay=6)
+        self.run_player_task(player, _join_sky_eye, delay=8)
+        self.run_player_task(player, _join_sidebar, delay=join_delay_ticks)
+        self.run_player_task(
+            player,
+            self._show_join_arc_main_menu_with_delay,
             delay=20,
         )
 
@@ -1270,10 +1258,6 @@ class ARCCorePlugin(Plugin):
 
     def _show_join_arc_main_menu_with_delay(self, player: Player):
         """进服后延迟弹出主菜单一次（与配置无关）；玩家可关闭表单，随时可用 /arc 再次打开。"""
-        if player is None:
-            return
-        if player not in self.server.online_players:
-            return
         self.show_main_menu(player)
 
     @event_handler
@@ -1432,6 +1416,7 @@ class ARCCorePlugin(Plugin):
                 del self.player_in_land_id_dict[player_name]
         self.player_land_creation_pick.pop(player_name, None)
         self.player_land_pick_last_event_ts.pop(player_name, None)
+        self._cancel_land_particle_boundary(player_xuid, player_name)
         try:
             if getattr(self, "sidebar_system", None) is not None:
                 self.sidebar_system.on_player_quit(player)
@@ -7055,6 +7040,58 @@ class ARCCorePlugin(Plugin):
             pass
         return None
 
+    def _resolve_online_player(self, xuid: str = "", name: str = "") -> Optional[Player]:
+        """从 online_players 重取活对象；不触碰可能已销毁的旧 Player 引用。"""
+        xuid_s = str(xuid or "").strip()
+        if xuid_s:
+            p = self._find_online_player_by_xuid(xuid_s)
+            if p is not None:
+                return p
+        name_s = str(name or "").strip()
+        if name_s:
+            try:
+                return self.server.get_player(name_s)
+            except Exception:
+                return None
+        return None
+
+    def run_player_task(self, player: Player, fn: Callable[[Player], None], delay: int = 0):
+        """调度仅对仍在线玩家执行的回调；闭包只存 xuid/name，避免 purecall 崩服。"""
+        xuid = str(getattr(player, "xuid", "") or "").strip()
+        name = str(getattr(player, "name", "") or "").strip()
+
+        def _wrapped() -> None:
+            p = self._resolve_online_player(xuid, name)
+            if p is None:
+                return
+            fn(p)
+
+        return self.server.scheduler.run_task(self, _wrapped, delay=delay)
+
+    def run_two_player_task(
+        self,
+        player: Player,
+        target_player: Player,
+        fn: Callable[[Player, Player], None],
+        delay: int = 0,
+    ):
+        """调度需同时解析发起者与目标仍在线的回调。"""
+        xuid = str(getattr(player, "xuid", "") or "").strip()
+        name = str(getattr(player, "name", "") or "").strip()
+        target_xuid = str(getattr(target_player, "xuid", "") or "").strip()
+        target_name = str(getattr(target_player, "name", "") or "").strip()
+
+        def _wrapped() -> None:
+            p = self._resolve_online_player(xuid, name)
+            if p is None:
+                return
+            t = self._resolve_online_player(target_xuid, target_name)
+            if t is None:
+                return
+            fn(p, t)
+
+        return self.server.scheduler.run_task(self, _wrapped, delay=delay)
+
     # Guild
     def _guild_size_tier_color(self, tier: str) -> str:
         """规模等级的 MC 颜色码：小型 §h，中型 §s，大型 §p（可由语言文件覆盖）。"""
@@ -8127,9 +8164,9 @@ class ARCCorePlugin(Plugin):
                 ).format(int(cost), int(new_p))
             )
         tp_target_pos = self.get_land_teleport_point(int(land_id))
-        self.server.scheduler.run_task(
-            self,
-            lambda p=player, l_id=int(land_id), pos=tp_target_pos: self.delay_teleport_to_land(
+        self.run_player_task(
+            player,
+            lambda p, l_id=int(land_id), pos=tp_target_pos: self.delay_teleport_to_land(
                 p, l_id, pos
             ),
             delay=45,
@@ -9711,12 +9748,14 @@ class ARCCorePlugin(Plugin):
 
     def start_teleport_to_position_countdown(self, player: Player, destination_name: str, position: tuple, teleport_type: str, dimension: str = 'overworld'):
         """开始传送到位置倒计时"""
-        self.server.scheduler.run_task(
-            self, 
-            lambda: self.execute_teleport_to_position(player, destination_name, position, teleport_type, dimension), 
-            delay=45
+        self.run_player_task(
+            player,
+            lambda p: self.execute_teleport_to_position(
+                p, destination_name, position, teleport_type, dimension
+            ),
+            delay=45,
         )
-        
+
         # 发送提示
         if teleport_type == 'PUBLIC_WARP':
             message = self.language_manager.GetText('TELEPORT_TO_WARP_COUNTDOWN').format(destination_name)
@@ -9728,10 +9767,11 @@ class ARCCorePlugin(Plugin):
     
     def start_teleport_to_player_countdown(self, player: Player, target_player: Player):
         """开始传送到玩家倒计时"""
-        self.server.scheduler.run_task(
-            self, 
-            lambda: self.execute_teleport_to_player(player, target_player), 
-            delay=45
+        self.run_two_player_task(
+            player,
+            target_player,
+            self.execute_teleport_to_player,
+            delay=45,
         )
 
         # 发送提示
@@ -9807,12 +9847,12 @@ class ARCCorePlugin(Plugin):
         death_location = self.teleport_system.get_death_location(player.name)
         
         # 开始传送倒计时
-        self.server.scheduler.run_task(
-            self, 
-            lambda: self.execute_death_location_teleport(player), 
-            delay=45
+        self.run_player_task(
+            player,
+            self.execute_death_location_teleport,
+            delay=45,
         )
-        
+
         player.send_message(self.language_manager.GetText('TELEPORT_TO_DEATH_LOCATION_COUNTDOWN'))
 
     def execute_death_location_teleport(self, player: Player):
@@ -9858,10 +9898,10 @@ class ARCCorePlugin(Plugin):
         player.send_message(self.language_manager.GetText('RANDOM_TELEPORT_COUNTDOWN'))
         
         # 延迟执行传送
-        self.server.scheduler.run_task(
-            self,
-            lambda: self.execute_random_teleport(player),
-            delay=45
+        self.run_player_task(
+            player,
+            self.execute_random_teleport,
+            delay=45,
         )
     
     def execute_random_teleport(self, player: Player):
@@ -9870,10 +9910,10 @@ class ARCCorePlugin(Plugin):
         dimension = 'overworld'
         player.send_message(self.language_manager.GetText('RANDOM_TELEPORT_SUCCESS').format(position[0], position[2]))
         self.teleport_system.execute_teleport_to_position(player.name, position, dimension)
-        self.server.scheduler.run_task(
-            self,
-            lambda: self._apply_slow_falling_effect(player),
-            delay=2
+        self.run_player_task(
+            player,
+            self._apply_slow_falling_effect,
+            delay=2,
         )
 
     def _apply_slow_falling_effect(self, player: Player):
@@ -11373,7 +11413,11 @@ class ARCCorePlugin(Plugin):
                 return
         
         tp_target_pos = self.get_land_teleport_point(land_id)
-        self.server.scheduler.run_task(self, lambda p=player, l_id=land_id, pos=tp_target_pos: self.delay_teleport_to_land(p, l_id, pos), delay=45)
+        self.run_player_task(
+            player,
+            lambda p, l_id=land_id, pos=tp_target_pos: self.delay_teleport_to_land(p, l_id, pos),
+            delay=45,
+        )
         player.send_message(self.language_manager.GetText('READY_TELEPORT_TO_LAND').format(land_id))
 
     def delay_teleport_to_land(self, player: Player, land_id: int, position: tuple):
@@ -12200,9 +12244,49 @@ class ARCCorePlugin(Plugin):
                 exception=e,
             )
 
+    def _land_particle_player_key(self, player: Player = None, xuid: str = "", name: str = "") -> str:
+        """领地粒子任务键：优先 xuid，否则 name。"""
+        key = str(xuid or "").strip()
+        if not key and player is not None:
+            key = str(getattr(player, "xuid", "") or "").strip()
+        if not key:
+            key = str(name or "").strip()
+        if not key and player is not None:
+            key = str(getattr(player, "name", "") or "").strip()
+        return key
+
+    def _cancel_land_particle_boundary(self, xuid: str = "", name: str = "") -> None:
+        """取消该玩家未完成的领地边界粒子分批任务（退出/重开时调用）。"""
+        keys = []
+        x = str(xuid or "").strip()
+        n = str(name or "").strip()
+        if x:
+            keys.append(x)
+        if n and n not in keys:
+            keys.append(n)
+        for key in keys:
+            self._land_particle_gen_by_key[key] = int(self._land_particle_gen_by_key.get(key, 0)) + 1
+            task = self._land_particle_task_by_key.pop(key, None)
+            if task is None:
+                continue
+            try:
+                task.cancel()
+            except Exception:
+                pass
+
     def display_land_particle_boundary(self, player: Player, land_info: dict, y_coord: float = None):
-        """显示三维领地粒子边界（立方体12条棱），分 tick 发送避免单帧 100+ 次 spawn。"""
+        """显示三维领地粒子边界（立方体12条棱），分 tick 发送避免单帧 100+ 次 spawn。
+
+        不闭包持有 Player：每批按 xuid 从 online_players 重取；退出时取消任务，
+        避免对已销毁 Player 调用 spawn_particle 触发 purecall 崩服。
+        """
         try:
+            player_xuid = str(getattr(player, "xuid", "") or "").strip()
+            player_name = str(getattr(player, "name", "") or "").strip()
+            key = self._land_particle_player_key(player, player_xuid, player_name)
+            if not key:
+                return
+
             min_x = land_info['min_x']
             max_x = land_info['max_x']
             min_y = land_info.get('min_y', 0)
@@ -12240,23 +12324,58 @@ class ARCCorePlugin(Plugin):
                 for i in range(STEPS + 1):
                     points.append(lerp(corners[a], corners[b], i / STEPS))
 
+            # 取消同玩家旧任务并提升代数，使已排队的旧 lambda 直接退出
+            self._cancel_land_particle_boundary(player_xuid, player_name)
+            gen = int(self._land_particle_gen_by_key.get(key, 0))
+
+            def _resolve_online_player():
+                if player_xuid:
+                    p = self._find_online_player_by_xuid(player_xuid)
+                    if p is not None:
+                        return p
+                if player_name:
+                    try:
+                        return self.server.get_player(player_name)
+                    except Exception:
+                        return None
+                return None
+
             def spawn_batch(start: int = 0):
                 try:
-                    if player is None:
+                    if self._land_particle_gen_by_key.get(key) != gen:
                         return
-                    iv = getattr(player, "is_valid", None)
+                    online = _resolve_online_player()
+                    if online is None:
+                        self._land_particle_task_by_key.pop(key, None)
+                        return
+                    iv = getattr(online, "is_valid", None)
                     if callable(iv) and not iv():
+                        self._land_particle_task_by_key.pop(key, None)
                         return
                     end = min(start + BATCH, len(points))
                     for x, y, z in points[start:end]:
-                        player.spawn_particle(
+                        # 同 tick 内中途下线极少见；purecall 不可捕获，每点前再确认代数
+                        if self._land_particle_gen_by_key.get(key) != gen:
+                            self._land_particle_task_by_key.pop(key, None)
+                            return
+                        online.spawn_particle(
                             "minecraft:crop_growth_emitter", float(x), float(y), float(z)
                         )
                     if end < len(points):
-                        self.server.scheduler.run_task(
-                            self, lambda: spawn_batch(end), delay=1
+                        if self._land_particle_gen_by_key.get(key) != gen:
+                            self._land_particle_task_by_key.pop(key, None)
+                            return
+                        task = self.server.scheduler.run_task(
+                            self, lambda s=end: spawn_batch(s), delay=1
                         )
+                        if task is not None:
+                            self._land_particle_task_by_key[key] = task
+                        else:
+                            self._land_particle_task_by_key.pop(key, None)
+                    else:
+                        self._land_particle_task_by_key.pop(key, None)
                 except Exception as inner:
+                    self._land_particle_task_by_key.pop(key, None)
                     self.logger.error(f"Display land particle batch error: {str(inner)}")
 
             spawn_batch(0)
@@ -15348,10 +15467,12 @@ class ARCCorePlugin(Plugin):
                 player,
             )
             return
-        self.server.scheduler.run_task(
-            self,
-            lambda: self.delay_teleport_to_land(player, land_id, tp_target_pos),
-            delay=45
+        self.run_player_task(
+            player,
+            lambda p, l_id=land_id, pos=tp_target_pos: self.delay_teleport_to_land(
+                p, l_id, pos
+            ),
+            delay=45,
         )
         player.send_message(self.language_manager.GetText('READY_TELEPORT_TO_LAND').format(land_id))
     
