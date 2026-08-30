@@ -87,8 +87,15 @@ class DatabaseManager:
         conn = conns.get(db_path)
         if conn is not None:
             return conn
-        conn = sqlite3.connect(db_path)
+        conn = sqlite3.connect(db_path, timeout=30.0)
         conn.row_factory = sqlite3.Row
+        # 多线程共写同一文件：WAL + busy_timeout，避免默认 journal 下无限/长时间文件锁
+        try:
+            conn.execute("PRAGMA journal_mode=WAL")
+            conn.execute("PRAGMA busy_timeout=5000")
+            conn.execute("PRAGMA synchronous=NORMAL")
+        except sqlite3.Error as e:
+            print(f"[ARC Core] SQLite pragma setup warning ({db_path}): {e}")
         conns[db_path] = conn
         return conn
 

@@ -555,10 +555,12 @@ class SidebarSystem:
                 self._log_warn(
                     f"shutdown with unclosed render xuid={self._render_open_xuid}"
                 )
-            for xuid, player in list(self._online_by_xuid.items()):
-                st = self._player_state.get(xuid)
+            # 关服时原生 Player 可能已半销毁；只清 Python 引用，禁止写 player.scoreboard
+            for xuid, st in list(self._player_state.items()):
                 if st is not None:
-                    self._release_player_board(player, st, xuid)
+                    self._release_player_board(
+                        None, st, xuid, restore_primary=False
+                    )
             self._player_state.clear()
             self._online_by_xuid.clear()
             self._due_heap.clear()
@@ -715,7 +717,8 @@ class SidebarSystem:
                 due_xuids.append(xuid)
             for xuid in due_xuids:
                 try:
-                    player = self._online_by_xuid.get(xuid)
+                    # 定时任务必须从 online_players 重取，禁止用可能已销毁的缓存 Player
+                    player = self._find_online(xuid)
                     st = self._player_state.get(xuid)
                     if player is None or st is None:
                         self._due_at.pop(xuid, None)
@@ -756,8 +759,10 @@ class SidebarSystem:
                 if player is not None:
                     self.refresh_player(player, force=True)
                 return
-            for player in list(self._online_by_xuid.values()):
-                self.refresh_player(player, force=True)
+            for ox in list(self._player_state.keys()):
+                player = self._find_online(ox)
+                if player is not None:
+                    self.refresh_player(player, force=True)
         except Exception as e:
             self._log_error(f"refresh: {e}")
 
@@ -882,15 +887,36 @@ class SidebarSystem:
         st.last_render_sig = ""
 
     def _release_player_board(
-        self, player: Optional[Player], st: PlayerSidebarState, xuid: str
+        self,
+        player: Optional[Player],
+        st: PlayerSidebarState,
+        xuid: str,
+        *,
+        restore_primary: bool = True,
     ) -> None:
-        """仅下线/shutdown：先交还主计分板，再丢掉 Python 强引用。"""
-        try:
-            primary = self.plugin.server.scoreboard
-            if primary is not None and player is not None:
-                player.scoreboard = primary
-        except Exception:
-            pass
+        """下线时尽量交还主计分板；shutdown 时 restore_primary=False，只丢 Python 引用。"""
+        if restore_primary:
+            try:
+                live = None
+                xs = str(xuid or "").strip()
+                if xs:
+                    live = self._find_online(xs)
+                if live is None:
+                    live = player
+                if live is not None:
+                    try:
+                        iv = getattr(live, "is_valid", None)
+                        if callable(iv) and not iv():
+                            live = None
+                        elif isinstance(iv, bool) and not iv:
+                            live = None
+                    except Exception:
+                        live = None
+                primary = self.plugin.server.scoreboard
+                if primary is not None and live is not None:
+                    live.scoreboard = primary
+            except Exception:
+                pass
         sb = st.scoreboard or (self._boards.get(xuid) if xuid else None)
         if sb is not None:
             try:
@@ -1183,13 +1209,16 @@ class SidebarSystem:
 
     def _refresh_all_enabled(self, exclude_xuid: str = "") -> None:
         ex = str(exclude_xuid or "").strip()
-        for xuid, player in list(self._online_by_xuid.items()):
+        for xuid in list(self._player_state.keys()):
             if not xuid or xuid == ex:
                 continue
             st = self._player_state.get(xuid)
             if st is None or not st.enabled:
                 continue
             try:
+                player = self._find_online(xuid)
+                if player is None:
+                    continue
                 self.refresh_player(player, force=False)
             except Exception as e:
                 self._log_error(f"refresh_all_enabled: {e}")
@@ -1349,22 +1378,41 @@ class SidebarSystem:
         return None
 
     def _find_online(self, xuid: str) -> Optional[Player]:
+        """从 server.online_players 重取活对象；定时/延迟任务禁止使用可能已销毁的缓存引用。"""
         xs = str(xuid or "").strip()
         if not xs:
             return None
-        player = self._online_by_xuid.get(xs)
-        if player is not None:
-            return player
+        found = None
         try:
             fn = getattr(self.plugin, "_find_online_player_by_xuid", None)
             if callable(fn):
                 found = fn(xs)
-                if found is not None:
-                    self._online_by_xuid[xs] = found
-                    return found
         except Exception:
-            pass
-        return None
+            found = None
+        if found is None:
+            try:
+                for p in list(getattr(self.plugin.server, "online_players", None) or []):
+                    if str(getattr(p, "xuid", "") or "").strip() == xs:
+                        found = p
+                        break
+            except Exception:
+                found = None
+        if found is None:
+            self._online_by_xuid.pop(xs, None)
+            return None
+        try:
+            iv = getattr(found, "is_valid", None)
+            if callable(iv) and not iv():
+                self._online_by_xuid.pop(xs, None)
+                return None
+            if isinstance(iv, bool) and not iv:
+                self._online_by_xuid.pop(xs, None)
+                return None
+        except Exception:
+            self._online_by_xuid.pop(xs, None)
+            return None
+        self._online_by_xuid[xs] = found
+        return found
 
     def _is_render_ready(self, player: Player) -> bool:
         if player is None:

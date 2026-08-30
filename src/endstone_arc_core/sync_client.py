@@ -56,16 +56,20 @@ class SyncClient:
         self._socket: Optional[socket.socket] = None
         self._active = False  # 希望保持连接（允许断线重连）
         self._worker_thread: Optional[threading.Thread] = None
+        # 只保护 socket 指针与 recv 缓冲；禁止在持锁时 recv/dispatch/写库
         self._socket_lock = threading.Lock()
         self._outbox_lock = threading.Lock()
         self._pending_acks: Set[int] = set()
         self._server_protocol_version = 1
         self._last_error = ""
         self._flushing = False
+        # 主线程 mirror 只入队；后台监听循环被唤醒后 flush，避免主线程 sendall
+        self._outbox_wake = threading.Event()
         # TCP 粘包缓冲：跨多次 recv / request-response 保留半包，避免错位超时
         self._recv_buffer = b""
         self._connect_timeout = 30.0
         self._full_sync_timeout = 120.0
+        self._listen_recv_timeout = 1.0
 
         try:
             sync_outbox.ensure_outbox_table(self.db)
@@ -168,12 +172,13 @@ class SyncClient:
         }
 
     def mirror_local_write(self, kind: str, table: str, **kwargs) -> None:
-        """本地业务写库后入 outbox；已连接则立即尝试发送。"""
+        """本地业务写库后只入 outbox；由后台监听循环 flush，避免主线程抢 socket 锁/sendall。"""
         if table not in self.enabled_tables:
             return
         table_enum = TABLE_TO_ENUM.get(table)
         if table_enum is None:
             return
+        queued = False
         try:
             for action in iter_mirror_write_actions(self.db, kind, table, **kwargs):
                 if action[0] == "delete":
@@ -186,8 +191,9 @@ class SyncClient:
                 if seq is None:
                     self._log("error", f"Outbox enqueue failed for {table}/{kind}")
                     continue
-                if self.is_running():
-                    self._send_outbox_item(seq, table, action[0], payload)
+                queued = True
+            if queued:
+                self._outbox_wake.set()
         except Exception as e:
             self._last_error = str(e)
             self._log("error", f"Mirror local write {table}/{kind} error: {e}")
@@ -383,10 +389,12 @@ class SyncClient:
                     pass
 
     def _send(self, payload: bytes) -> None:
+        """短持锁取出 socket 后 sendall；不在持锁时阻塞 recv。"""
         with self._socket_lock:
-            if not self._socket:
-                raise ConnectionError("Sync client socket is closed")
-            self._socket.sendall(payload)
+            sock = self._socket
+        if not sock:
+            raise ConnectionError("Sync client socket is closed")
+        sock.sendall(payload)
 
     def _pop_complete_message(self) -> Optional[tuple]:
         """从 _recv_buffer 弹出一条完整消息；数据不足则返回 None。须持有 _socket_lock。"""
@@ -401,16 +409,41 @@ class SyncClient:
         self._recv_buffer = self._recv_buffer[5 + msg_len :]
         return decode_message(raw)
 
-    def _recv_message_unlocked(self, sock: socket.socket) -> Optional[tuple]:
-        """读满一条消息（保留粘包剩余字节）。须持有 _socket_lock。"""
+    def _drain_complete_messages_locked(self) -> list:
+        """弹出缓冲中所有完整消息。须持有 _socket_lock。"""
+        msgs = []
         while True:
             msg = self._pop_complete_message()
-            if msg is not None:
-                return msg
+            if msg is None:
+                break
+            msgs.append(msg)
+        return msgs
+
+    def _append_recv_chunk(self, sock: socket.socket, chunk: bytes) -> list:
+        """把 chunk 写入缓冲并弹出完整消息；socket 已更换则丢弃。"""
+        with self._socket_lock:
+            if self._socket is not sock:
+                return []
+            self._recv_buffer += chunk
+            return self._drain_complete_messages_locked()
+
+    def _recv_one_message(self, sock: socket.socket, timeout: float) -> Optional[tuple]:
+        """读满一条消息（不持锁阻塞 recv）。返回 None 表示对端关闭。"""
+        while True:
+            with self._socket_lock:
+                if self._socket is not sock:
+                    raise ConnectionError("Sync client socket is closed")
+                msg = self._pop_complete_message()
+                if msg is not None:
+                    return msg
+            sock.settimeout(max(0.05, float(timeout)))
             chunk = sock.recv(65536)
             if not chunk:
                 return None
-            self._recv_buffer += chunk
+            with self._socket_lock:
+                if self._socket is not sock:
+                    raise ConnectionError("Sync client socket is closed")
+                self._recv_buffer += chunk
 
     def _handle_side_message_during_request(self, msg_type, data: Dict[str, Any]) -> None:
         """连接阶段等待响应时穿插到的 PUSH/心跳等，就地消化，避免帧错位。"""
@@ -448,29 +481,31 @@ class SyncClient:
         expect_types: Optional[Set[SyncMessageType]] = None,
         timeout: Optional[float] = None,
     ) -> tuple:
-        """发送请求并等待期望类型的响应；中途 PUSH/心跳不打断帧同步。"""
+        """发送请求并等待期望类型的响应；中途 PUSH/心跳不打断帧同步。
+
+        recv 不持有 _socket_lock，避免连接/全量同步阶段卡住其它短临界区。
+        """
         wait = self._connect_timeout if timeout is None else float(timeout)
         deadline = time.time() + wait
         with self._socket_lock:
-            if not self._socket:
-                raise ConnectionError("Sync client socket is closed")
-            self._socket.sendall(payload)
-            while True:
-                remaining = deadline - time.time()
-                if remaining <= 0:
-                    raise TimeoutError("timed out")
-                self._socket.settimeout(max(0.05, remaining))
-                try:
-                    result = self._recv_message_unlocked(self._socket)
-                except socket.timeout:
-                    raise TimeoutError("timed out") from None
-                if result is None:
-                    raise ConnectionError("Sync server closed connection")
-                msg_type, data = result
-                if expect_types is None or msg_type in expect_types:
-                    return result
-                # 释放锁前不能调用可能再抢锁的 _send；侧路消息仅本地消化
-                self._handle_side_message_during_request(msg_type, data)
+            sock = self._socket
+        if not sock:
+            raise ConnectionError("Sync client socket is closed")
+        sock.sendall(payload)
+        while True:
+            remaining = deadline - time.time()
+            if remaining <= 0:
+                raise TimeoutError("timed out")
+            try:
+                result = self._recv_one_message(sock, remaining)
+            except socket.timeout:
+                raise TimeoutError("timed out") from None
+            if result is None:
+                raise ConnectionError("Sync server closed connection")
+            msg_type, data = result
+            if expect_types is None or msg_type in expect_types:
+                return result
+            self._handle_side_message_during_request(msg_type, data)
 
     def _authenticate(self) -> bool:
         payload = build_auth_request(
@@ -646,31 +681,37 @@ class SyncClient:
                     except Exception:
                         break
                     last_heartbeat = now
-                if now - last_flush > 15:
+                # 主线程入队后立即 flush；否则最多约 15s 兜底一次
+                if self._outbox_wake.is_set() or (now - last_flush > 15):
+                    self._outbox_wake.clear()
                     self.flush_outbox()
                     last_flush = now
 
+                pending: list = []
+                need_recv = False
                 with self._socket_lock:
-                    if not self._socket:
+                    if self._socket is not sock:
                         break
-                    self._socket.settimeout(5.0)
+                    pending = self._drain_complete_messages_locked()
+                    if not pending:
+                        need_recv = True
+
+                if need_recv:
                     try:
-                        # 先消化缓冲里已有完整包；没有则再 recv
-                        msg = self._pop_complete_message()
-                        if msg is None:
-                            chunk = self._socket.recv(65536)
-                            if not chunk:
-                                break
-                            self._recv_buffer += chunk
-                            msg = self._pop_complete_message()
-                        while msg is not None:
-                            msg_type, data = msg
-                            last_heartbeat = self._dispatch_listen_message(
-                                msg_type, data, last_heartbeat
-                            )
-                            msg = self._pop_complete_message()
+                        sock.settimeout(self._listen_recv_timeout)
+                        chunk = sock.recv(65536)
                     except socket.timeout:
-                        pass
+                        chunk = None
+                    if chunk is not None:
+                        if not chunk:
+                            break
+                        pending = self._append_recv_chunk(sock, chunk)
+
+                # dispatch / 写库绝不持有 _socket_lock
+                for msg_type, data in pending:
+                    last_heartbeat = self._dispatch_listen_message(
+                        msg_type, data, last_heartbeat
+                    )
             except socket.timeout:
                 continue
             except Exception as e:

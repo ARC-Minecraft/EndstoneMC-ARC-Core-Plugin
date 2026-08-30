@@ -286,24 +286,35 @@ class PlayerActivityStats:
             self._pending.clear()
         if not items:
             return
-        for (xuid, stat_key), delta in items:
-            if not delta:
-                continue
-            try:
-                self.database_manager.execute(
+        # 单事务批量提交，避免每条 delta 两次独立 commit 与主线程抢文件锁
+        conn = self.database_manager.connection_for_table(self.TABLE)
+        try:
+            cur = conn.cursor()
+            for (xuid, stat_key), delta in items:
+                if not delta:
+                    continue
+                cur.execute(
                     f"INSERT OR IGNORE INTO {self.TABLE} (xuid, stat_key, count) VALUES (?, ?, 0)",
                     (xuid, stat_key),
                 )
-                self.database_manager.execute(
+                cur.execute(
                     f"UPDATE {self.TABLE} SET count = count + ? WHERE xuid = ? AND stat_key = ?",
                     (int(delta), xuid, stat_key),
                 )
-            except Exception as e:
-                with self._lock:
+            conn.commit()
+        except Exception as e:
+            try:
+                conn.rollback()
+            except Exception:
+                pass
+            with self._lock:
+                for (xuid, stat_key), delta in items:
+                    if not delta:
+                        continue
                     self._pending[(xuid, stat_key)] = int(
                         self._pending.get((xuid, stat_key), 0)
                     ) + int(delta)
-                self._log("warning", f"[ARC Core]PlayerActivityStats write failed: {e}")
+            self._log("warning", f"[ARC Core]PlayerActivityStats write failed: {e}")
 
     def record_kill(self, xuid: str, entity_type: str) -> None:
         xuid = str(xuid or "").strip()
