@@ -9746,37 +9746,58 @@ class ARCCorePlugin(Plugin):
         
         self.start_teleport_to_position_countdown(player, home_name, (home_info['x'], home_info['y'], home_info['z']), 'HOME', home_info['dimension'])
 
+    def _send_teleport_countdown_titles(
+        self, player: Player, subtitle: str, total_ticks: int = 45
+    ) -> None:
+        """用屏幕 title 显示传送倒计时：大数字 + 说明字幕。"""
+        seconds = max(1, (int(total_ticks) + 19) // 20)
+        sub = str(subtitle or "")
+        for i in range(seconds):
+            remaining = seconds - i
+
+            def _make_show(rem: int):
+                def _show(p: Player) -> None:
+                    try:
+                        p.send_title(f"§e{rem}", sub, 0, 25, 5)
+                    except Exception:
+                        if sub:
+                            p.send_message(sub)
+
+                return _show
+
+            self.run_player_task(player, _make_show(remaining), delay=i * 20)
+
     def start_teleport_to_position_countdown(self, player: Player, destination_name: str, position: tuple, teleport_type: str, dimension: str = 'overworld'):
         """开始传送到位置倒计时"""
+        delay = 45
         self.run_player_task(
             player,
             lambda p: self.execute_teleport_to_position(
                 p, destination_name, position, teleport_type, dimension
             ),
-            delay=45,
+            delay=delay,
         )
 
-        # 发送提示
         if teleport_type == 'PUBLIC_WARP':
             message = self.language_manager.GetText('TELEPORT_TO_WARP_COUNTDOWN').format(destination_name)
         elif teleport_type == 'HOME':
             message = self.language_manager.GetText('TELEPORT_TO_HOME_COUNTDOWN').format(destination_name)
         else:
             message = self.language_manager.GetText('TELEPORT_COUNTDOWN').format(destination_name)
-        player.send_message(message)
+        self._send_teleport_countdown_titles(player, message, delay)
     
     def start_teleport_to_player_countdown(self, player: Player, target_player: Player):
         """开始传送到玩家倒计时"""
+        delay = 45
         self.run_two_player_task(
             player,
             target_player,
             self.execute_teleport_to_player,
-            delay=45,
+            delay=delay,
         )
 
-        # 发送提示
         message = self.language_manager.GetText('TELEPORT_COUNTDOWN').format(target_player.name)
-        player.send_message(message)
+        self._send_teleport_countdown_titles(player, message, delay)
 
     def execute_teleport_to_position(self, player: Player, destination_name: str, position: tuple, teleport_type: str, dimension: str = 'overworld'):
         """执行传送"""
@@ -9847,13 +9868,18 @@ class ARCCorePlugin(Plugin):
         death_location = self.teleport_system.get_death_location(player.name)
         
         # 开始传送倒计时
+        delay = 45
         self.run_player_task(
             player,
             self.execute_death_location_teleport,
-            delay=45,
+            delay=delay,
         )
 
-        player.send_message(self.language_manager.GetText('TELEPORT_TO_DEATH_LOCATION_COUNTDOWN'))
+        self._send_teleport_countdown_titles(
+            player,
+            self.language_manager.GetText('TELEPORT_TO_DEATH_LOCATION_COUNTDOWN'),
+            delay,
+        )
 
     def execute_death_location_teleport(self, player: Player):
         """执行死亡地点传送"""
@@ -9894,14 +9920,17 @@ class ARCCorePlugin(Plugin):
                 )
                 return
         
-        # 发送倒计时消息
-        player.send_message(self.language_manager.GetText('RANDOM_TELEPORT_COUNTDOWN'))
-        
-        # 延迟执行传送
+        # title 倒计时提示 + 延迟执行传送
+        delay = 45
+        self._send_teleport_countdown_titles(
+            player,
+            self.language_manager.GetText('RANDOM_TELEPORT_COUNTDOWN'),
+            delay,
+        )
         self.run_player_task(
             player,
             self.execute_random_teleport,
-            delay=45,
+            delay=delay,
         )
     
     def execute_random_teleport(self, player: Player):

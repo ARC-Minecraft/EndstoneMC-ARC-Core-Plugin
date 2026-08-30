@@ -3,7 +3,7 @@
 # EndStone ARC Core Plugin / EndStone弧光核心
 
 [![Codacy Grade](https://app.codacy.com/project/badge/Grade/2f830615baf347258558dcc2a5ab85a1)](https://app.codacy.com/gh/DEVILENMO/EndstoneMC-ARC-Core-Plugin/dashboard?utm_source=gh&utm_medium=referral&utm_content=&utm_campaign=Badge_grade)
-[![Version](https://img.shields.io/badge/version-v0.9.38-blue)](https://github.com/ARC-Minecraft/EndstoneMC-ARC-Core-Plugin)
+[![Version](https://img.shields.io/badge/version-v0.9.41-blue)](https://github.com/ARC-Minecraft/EndstoneMC-ARC-Core-Plugin)
 [![Python](https://img.shields.io/badge/python-3.13+-blue?logo=python&logoColor=white)](https://www.python.org/)
 [![EndStone API](https://img.shields.io/badge/EndStone_API-0.7+-black)](https://github.com/EndstoneMC/endstone)
 [![License](https://img.shields.io/github/license/ARC-Minecraft/EndstoneMC-ARC-Core-Plugin)](LICENSE)
@@ -803,7 +803,15 @@ arc.api_sidebar_set_values(
 
 ## 📋 近期更新日志
 
-### v0.9.38（当前版本）
+### v0.9.41（当前版本）
+
+- ✅ **传送倒计时改用屏幕 title**：Home / Warp / TPA / 死亡回归 / 随机传送倒计时改为屏幕中央大数字 + 字幕提示，不再刷聊天栏
+
+### v0.9.40
+
+- ✅ **修复同步主线程假死**：关服侧边栏不再写失效 Player
+
+### v0.9.38
 
 - ✅ **修复定时任务 purecall 崩服**：新增 `run_player_task` / `run_two_player_task` / `_resolve_online_player`；传送倒计时（45 tick）、进服延迟任务、领地边界粒子分批任务均改为闭包只存 xuid/name、回调时重取在线玩家；玩家退出时取消未完成的粒子任务
 
