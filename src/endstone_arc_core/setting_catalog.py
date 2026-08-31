@@ -1,5 +1,11 @@
 # -*- coding: utf-8 -*-
-"""core_setting.yml 的 OP 面板目录：类型、分组、选项。"""
+"""core_setting.yml 的 OP 面板目录：类型、分组、选项。
+
+跨服配置分层（与 dist/ARCCore/core_setting.yml 注释、[全服]/[本服] 标记一致）：
+- 数据表：SYNC_CLIENT_SYNC_PLAYER / _ECONOMY / _TITLE / _GUILD（见 sync_config.SYNC_CATEGORY_TABLES）
+- [全服] 规则：sync_config.ALL_SHARED_SETTING_KEYS（仅同步中心可改，从服只读）
+- [本服] 玩法：目录中其余键（签到、传送、领地、邀请奖励等），各服 yml 独立
+"""
 from typing import Dict, List, Optional, Tuple
 
 # stype: bool | choice | int | float | string | csv_list | json_triples
@@ -76,7 +82,7 @@ SETTING_GROUPS: List[Dict[str, object]] = [
         "id": "sync",
         "title": "跨服同步",
         "items": [
-            _s("DATABASE_PATH", "主数据库文件名", "string", placeholder="ARCCore.db", restart=True),
+            _s("DATABASE_PATH", "主数据库文件名（[本服]）", "string", placeholder="ARCCore.db", restart=True),
             _s("ENABLE_SYNC_SERVER", "启用同步中心", "bool", choices=BOOL_CHOICES, restart=True),
             _s("SYNC_SERVER_PORT", "同步中心端口", "int", placeholder="19999", restart=True),
             _s("SYNC_SERVER_AUTH_KEY", "同步中心密钥", "string", placeholder="", restart=True),
@@ -87,13 +93,13 @@ SETTING_GROUPS: List[Dict[str, object]] = [
             _s("SYNC_CLIENT_SERVER_NAME", "本服名称", "string", placeholder="服务器01", restart=True),
             _s("SYNC_CLIENT_AUTH_KEY", "同步客户端密钥", "string", placeholder="", restart=True),
             _s("SYNC_CLIENT_RECONNECT_INTERVAL", "重连间隔（秒）", "int", placeholder="10"),
-            _s("SYNC_CLIENT_SYNC_PLAYER", "同步玩家数据", "bool", choices=BOOL_CHOICES, restart=True),
-            _s("SYNC_CLIENT_SYNC_ECONOMY", "同步经济数据", "bool", choices=BOOL_CHOICES, restart=True),
+            _s("SYNC_CLIENT_SYNC_PLAYER", "同步玩家账号数据", "bool", choices=BOOL_CHOICES, restart=True),
+            _s("SYNC_CLIENT_SYNC_ECONOMY", "同步银行存款数据", "bool", choices=BOOL_CHOICES, restart=True),
             _s("SYNC_CLIENT_SYNC_TITLE", "同步头衔数据", "bool", choices=BOOL_CHOICES, restart=True),
             _s("SYNC_CLIENT_SYNC_GUILD", "同步公会数据", "bool", choices=BOOL_CHOICES, restart=True),
             _s(
                 "CONDITIONAL_TITLE_AUTHORITY",
-                "条件头衔权威服",
+                "条件头衔权威服（[本服] 身份）",
                 "bool",
                 choices=BOOL_CHOICES,
                 restart=True,
@@ -104,9 +110,9 @@ SETTING_GROUPS: List[Dict[str, object]] = [
         "id": "economy",
         "title": "经济",
         "items": [
-            _s("PLAYER_INIT_MONEY_NUM", "新玩家初始存款", "float", placeholder="2000"),
-            _s("HIDE_OP_IN_MONEY_RANKING", "排行榜隐藏 OP", "bool", choices=BOOL_CHOICES),
-            _s("RICHEST_TITLE_NAME", "首富头衔名", "string", placeholder="首富"),
+            _s("PLAYER_INIT_MONEY_NUM", "[全服] 新玩家初始存款", "float", placeholder="2000"),
+            _s("HIDE_OP_IN_MONEY_RANKING", "[全服] 排行榜隐藏 OP", "bool", choices=BOOL_CHOICES),
+            _s("RICHEST_TITLE_NAME", "[全服] 首富头衔名", "string", placeholder="首富"),
         ],
     },
     {
@@ -219,8 +225,8 @@ SETTING_GROUPS: List[Dict[str, object]] = [
         "id": "title",
         "title": "头衔",
         "items": [
-            _s("DEFAULT_TITLE", "默认头衔（列表）", "csv_list", placeholder="见习冒险家"),
-            _s("OP_TITLE", "OP 专属头衔", "string", placeholder="管理员"),
+            _s("DEFAULT_TITLE", "[全服] 默认头衔（列表）", "csv_list", placeholder="见习冒险家"),
+            _s("OP_TITLE", "[全服] OP 专属头衔", "string", placeholder="管理员"),
         ],
     },
     {
@@ -236,15 +242,15 @@ SETTING_GROUPS: List[Dict[str, object]] = [
         "id": "guild",
         "title": "公会",
         "items": [
-            _s("GUILD_CREATE_COST", "创建公会费用", "float", placeholder="100000"),
-            _s("GUILD_SIZE_SMALL_MAX", "小型公会人数上限", "int", placeholder="10"),
-            _s("GUILD_SIZE_MEDIUM_MAX", "中型公会人数上限", "int", placeholder="20"),
-            _s("GUILD_SIZE_LARGE_MAX", "大型公会人数上限", "int", placeholder="40"),
-            _s("GUILD_UPGRADE_TO_MEDIUM_COST", "升级中型消耗贡献", "int", placeholder="10000"),
-            _s("GUILD_UPGRADE_TO_LARGE_COST", "升级大型消耗贡献", "int", placeholder="100000"),
-            _s("GUILD_RENAME_COST", "公会改名费用", "float", placeholder="0"),
-            _s("GUILD_LAND_TELEPORT_CONTRIB_COST", "公会领地传送贡献消耗", "int", placeholder="10"),
-            _s("KILL_REWARD_GUILD_CONTRIB_RATIO", "击杀金钱转贡献比例", "float", placeholder="0.5"),
+            _s("GUILD_CREATE_COST", "[全服] 创建公会费用", "float", placeholder="100000"),
+            _s("GUILD_SIZE_SMALL_MAX", "[全服] 小型公会人数上限", "int", placeholder="10"),
+            _s("GUILD_SIZE_MEDIUM_MAX", "[全服] 中型公会人数上限", "int", placeholder="20"),
+            _s("GUILD_SIZE_LARGE_MAX", "[全服] 大型公会人数上限", "int", placeholder="40"),
+            _s("GUILD_UPGRADE_TO_MEDIUM_COST", "[全服] 升级中型消耗贡献", "int", placeholder="10000"),
+            _s("GUILD_UPGRADE_TO_LARGE_COST", "[全服] 升级大型消耗贡献", "int", placeholder="100000"),
+            _s("GUILD_RENAME_COST", "[全服] 公会改名费用", "float", placeholder="0"),
+            _s("GUILD_LAND_TELEPORT_CONTRIB_COST", "[本服] 公会领地传送贡献消耗", "int", placeholder="10"),
+            _s("KILL_REWARD_GUILD_CONTRIB_RATIO", "[本服] 击杀金钱转贡献比例", "float", placeholder="0.5"),
         ],
     },
     {

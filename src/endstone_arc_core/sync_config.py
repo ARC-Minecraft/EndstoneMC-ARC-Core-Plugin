@@ -24,41 +24,18 @@ SYNC_CATEGORY_TABLES: Dict[str, List[str]] = {
     "guild": ["guilds", "guild_members", "guild_invites"],
 }
 
-# 同步类别 -> 须以同步中心为准的玩法配置（不含本机路径/端口/身份）
+# 同步类别 -> 全服统一规则（仅同步中心维护；从服只读，随对应数据开关下发）
+# 会改写跨服共享资产/体验的规则；签到、传送、领地、邀请奖励等不在此列（各服本地 yml）
 SYNC_CATEGORY_SHARED_SETTINGS: Dict[str, Tuple[str, ...]] = {
-    "player": (
-        "INVITE_REWARD_ITEM_NAME",
-        "INVITE_REWARD_ITEM_COUNT",
-        "INVITE_REWARD_MONEY",
-        "INVITE_REWARD_FREE_LAND_BLOCKS",
-    ),
+    "player": (),
     "economy": (
         "PLAYER_INIT_MONEY_NUM",
         "HIDE_OP_IN_MONEY_RANKING",
         "RICHEST_TITLE_NAME",
-        "SMALL_HORN_PRICE_PER_HOUR",
-        "CHECKIN_DAILY_MONEY",
-        "CHECKIN_TOP_RANK_LIMIT",
-        "CHECKIN_TOP_RANK_BONUS_ITEM_COUNT",
-        "CHECKIN_TOP_RANK_BONUS_MONEY_STEP",
-        "CHECKIN_CONTINUOUS_DAYS_MONEY_INCREMENT",
-        "CHECKIN_REWARD_PICK_MIN",
-        "CHECKIN_REWARD_PICK_MAX",
-        "CHECKIN_REWARD_LIST",
-        "TELEPORT_COST_PUBLIC_WARP",
-        "TELEPORT_COST_HOME",
-        "TELEPORT_COST_LAND",
-        "TELEPORT_COST_DEATH_LOCATION",
-        "TELEPORT_COST_RANDOM",
-        "TELEPORT_COST_PLAYER",
-        "LAND_PRICE",
-        "LAND_SELL_REFUND_COEFFICIENT",
-        "LAND_SALE_VAT_RATE",
     ),
     "title": (
         "DEFAULT_TITLE",
         "OP_TITLE",
-        "RICHEST_TITLE_NAME",
     ),
     "guild": (
         "GUILD_CREATE_COST",
@@ -68,9 +45,6 @@ SYNC_CATEGORY_SHARED_SETTINGS: Dict[str, Tuple[str, ...]] = {
         "GUILD_UPGRADE_TO_MEDIUM_COST",
         "GUILD_UPGRADE_TO_LARGE_COST",
         "GUILD_RENAME_COST",
-        "GUILD_LAND_TELEPORT_CONTRIB_COST",
-        "KILL_REWARD_GUILD_CONTRIB_RATIO",
-        "CHECKIN_GUILD_CONTRIBUTION_POINTS",
     ),
 }
 
@@ -87,6 +61,10 @@ SYNC_TABLE_TO_CATEGORY: Dict[str, str] = {
 }
 
 
+def is_hub_rule_setting(key: str) -> bool:
+    return str(key) in ALL_SHARED_SETTING_KEYS
+
+
 def setting_bool(setting_manager, key: str, default: bool = False) -> bool:
     raw = setting_manager.GetSetting(key)
     if raw is None:
@@ -94,11 +72,26 @@ def setting_bool(setting_manager, key: str, default: bool = False) -> bool:
     return str(raw).strip().lower() in ("true", "1", "yes")
 
 
+def is_sync_hub_enabled(setting_manager) -> bool:
+    return setting_bool(setting_manager, "ENABLE_SYNC_SERVER")
+
+
 def resolve_sync_consumer_mode(setting_manager) -> SyncConsumerMode:
     """解析游戏服跨服消费方式：远程客户端 / 无。"""
     if setting_bool(setting_manager, "ENABLE_SYNC_CLIENT"):
         return "client"
     return "none"
+
+
+def can_edit_setting_key(setting_manager, key: str) -> bool:
+    """从服上的全服规则只读；同步中心与未开同步的本服均可改本地玩法。"""
+    if not is_hub_rule_setting(key):
+        return True
+    if is_sync_hub_enabled(setting_manager):
+        return True
+    if resolve_sync_consumer_mode(setting_manager) == "client":
+        return False
+    return True
 
 
 def get_client_sync_tables(setting_manager) -> Set[str]:
@@ -131,7 +124,7 @@ def shared_setting_keys_for_categories(categories: Iterable[str]) -> Set[str]:
 
 
 def snapshot_shared_settings(setting_manager, categories: Iterable[str]) -> Dict[str, str]:
-    """从同步中心配置快照指定类别的玩法键；缺失的键不发送。"""
+    """从同步中心配置快照指定类别的全服规则；缺失的键不发送。"""
     out: Dict[str, str] = {}
     getter = getattr(setting_manager, "get_existing", None)
     for key in shared_setting_keys_for_categories(categories):
@@ -151,7 +144,7 @@ def snapshot_shared_settings(setting_manager, categories: Iterable[str]) -> Dict
 def filter_incoming_settings(
     raw: Optional[Dict], categories: Iterable[str]
 ) -> Dict[str, str]:
-    """只保留本机已启用同步类别、且在白名单内的配置键。"""
+    """只保留本机已启用同步类别、且在白名单内的全服规则键。"""
     if not isinstance(raw, dict):
         return {}
     allowed = shared_setting_keys_for_categories(categories)

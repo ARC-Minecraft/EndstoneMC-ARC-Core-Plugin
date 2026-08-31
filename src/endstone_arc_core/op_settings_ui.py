@@ -13,6 +13,7 @@ from endstone_arc_core.setting_catalog import (
     get_group,
     get_spec,
 )
+from endstone_arc_core.sync_config import can_edit_setting_key, is_hub_rule_setting
 
 
 class OpSettingsUi:
@@ -36,7 +37,29 @@ class OpSettingsUi:
             return text[:maxlen] + "…"
         return text
 
+    def _scope_prefix(self, key: str) -> str:
+        if is_hub_rule_setting(key):
+            return self._text("OP_CORE_SETTINGS_SCOPE_HUB")
+        return self._text("OP_CORE_SETTINGS_SCOPE_LOCAL")
+
+    def _can_edit(self, key: str) -> bool:
+        return can_edit_setting_key(self.plugin.setting_manager, key)
+
+    def _group_scope_note(self, group_id: str) -> str:
+        if not getattr(self.plugin, "_sync_consumer_mode", "none") == "client":
+            return ""
+        group = get_group(group_id)
+        if not group:
+            return ""
+        has_hub = any(is_hub_rule_setting(str(item["key"])) for item in group["items"])
+        if not has_hub:
+            return ""
+        return "\n" + self._text("OP_CORE_SETTINGS_GROUP_HUB_NOTE")
+
     def _save(self, player: Player, key: str, value: str, restart: bool = False) -> None:
+        if not self._can_edit(key):
+            player.send_message(self._text("OP_CORE_SETTINGS_HUB_READONLY"))
+            return
         self.plugin.setting_manager.SetSetting(key, value)
         try:
             self.plugin._reapply_cached_settings()
@@ -119,7 +142,8 @@ class OpSettingsUi:
             title=self._text("OP_CORE_SETTINGS_GROUP_TITLE").format(group["title"]),
             content=self._text("OP_CORE_SETTINGS_GROUP_CONTENT").format(
                 group["title"], page + 1, total_pages
-            ),
+            )
+            + self._group_scope_note(group_id),
             on_close=None,
         )
         for spec in chunk:
@@ -127,11 +151,14 @@ class OpSettingsUi:
             title = str(spec["title"])
             raw = self._raw(key)
             stype = str(spec["stype"])
+            prefix = self._scope_prefix(key)
             if stype in ("csv_list", "json_triples"):
                 count = len(self._parse_list(spec, raw))
-                label = f"{title} ({count})"
+                label = f"{prefix}{title} ({count})"
             else:
-                label = f"{title}: {self._preview(raw)}"
+                label = f"{prefix}{title}: {self._preview(raw)}"
+            if is_hub_rule_setting(key) and not self._can_edit(key):
+                label = f"{label} {self._text('OP_CORE_SETTINGS_READONLY_TAG')}"
             panel.add_button(
                 label,
                 on_click=lambda p, g=group_id, k=key, pg=page: self.open_setting(
@@ -165,6 +192,9 @@ class OpSettingsUi:
         if not spec:
             self.show_group(player, group_id, page)
             return
+        if not self._can_edit(key):
+            self._show_readonly(player, group_id, spec, page)
+            return
         stype = str(spec["stype"])
         if stype in ("bool", "choice"):
             self._show_choice(player, group_id, spec, page)
@@ -173,6 +203,42 @@ class OpSettingsUi:
             self.show_list(player, group_id, key, 0, page)
             return
         self._show_text_edit(player, group_id, spec, page)
+
+    def _show_readonly(self, player: Player, group_id: str, spec: dict, page: int) -> None:
+        key = str(spec["key"])
+        stype = str(spec["stype"])
+        raw = self._raw(key)
+        if stype in ("csv_list", "json_triples"):
+            items = self._parse_list(spec, raw)
+            if stype == "csv_list":
+                body = "、".join(str(x) for x in items) if items else self._text("OP_CORE_SETTINGS_EMPTY")
+            else:
+                body = (
+                    "\n".join(
+                        self._list_item_label(spec, item, idx) for idx, item in enumerate(items)
+                    )
+                    if items
+                    else self._text("OP_CORE_SETTINGS_ITEM_EMPTY")
+                )
+        else:
+            body = raw.strip() or self._text("OP_CORE_SETTINGS_EMPTY")
+        panel = ActionForm(
+            title=str(spec["title"]),
+            content=(
+                self._text("OP_CORE_SETTINGS_HUB_READONLY")
+                + "\n\n"
+                + self._scope_prefix(key)
+                + str(spec["title"])
+                + "\n"
+                + body
+            ),
+            on_close=None,
+        )
+        panel.add_button(
+            self._text("RETURN_BUTTON_TEXT"),
+            on_click=lambda p, g=group_id, pg=page: self.show_group(p, g, pg),
+        )
+        player.send_form(panel)
 
     def _show_choice(self, player: Player, group_id: str, spec: dict, page: int) -> None:
         key = str(spec["key"])
@@ -323,12 +389,13 @@ class OpSettingsUi:
             content=content,
             on_close=None,
         )
-        panel.add_button(
-            self._text("OP_CORE_SETTINGS_ADD"),
-            on_click=lambda p, g=group_id, k=key, lp=list_page, gp=group_page: self.show_list_add(
-                p, g, k, lp, gp
-            ),
-        )
+        if self._can_edit(key):
+            panel.add_button(
+                self._text("OP_CORE_SETTINGS_ADD"),
+                on_click=lambda p, g=group_id, k=key, lp=list_page, gp=group_page: self.show_list_add(
+                    p, g, k, lp, gp
+                ),
+            )
         for idx in chunk_idx:
             label = self._list_item_label(spec, items[idx], idx)
             panel.add_button(
@@ -387,12 +454,13 @@ class OpSettingsUi:
             content=self._text("OP_CORE_SETTINGS_ITEM_CONTENT").format(label),
             on_close=None,
         )
-        panel.add_button(
-            self._text("OP_CORE_SETTINGS_DELETE"),
-            on_click=lambda p, g=group_id, k=key, i=index, lp=list_page, gp=group_page: self._delete_list_item(
-                p, g, k, i, lp, gp
-            ),
-        )
+        if self._can_edit(key):
+            panel.add_button(
+                self._text("OP_CORE_SETTINGS_DELETE"),
+                on_click=lambda p, g=group_id, k=key, i=index, lp=list_page, gp=group_page: self._delete_list_item(
+                    p, g, k, i, lp, gp
+                ),
+            )
         panel.add_button(
             self._text("RETURN_BUTTON_TEXT"),
             on_click=lambda p, g=group_id, k=key, lp=list_page, gp=group_page: self.show_list(
