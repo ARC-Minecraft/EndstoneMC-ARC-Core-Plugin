@@ -4677,14 +4677,23 @@ class ARCCorePlugin(Plugin):
         arc_menu = ActionForm(
             title=self.language_manager.GetText('MAIN_MENU_TITLE'),
         )
+        # 枪战插件存在时置顶「枪战游戏」入口
+        if self.server.plugin_manager.get_plugin('arc_shooter_game'):
+            arc_menu.add_button(
+                self.language_manager.GetText('SHOOTER_GAME_MENU_NAME'),
+                on_click=self.show_arc_shooter_game_menu,
+            )
         if checkin_first:
             arc_menu.add_button(
                 self.language_manager.GetText('CHECKIN_MENU_BUTTON'),
                 on_click=self.show_daily_checkin_panel,
             )
         arc_menu.add_button(self.language_manager.GetText('NEWBIE_GUIDE_BUTTON'), on_click=self.show_newbie_welcome_panel)
-        arc_menu.add_button(self.language_manager.GetText('TELEPORT_MENU_NAME'), on_click=self.show_teleport_menu)
-        arc_menu.add_button(self.language_manager.GetText('LAND_MENU_NAME'), on_click=self.show_land_main_menu)
+        if self._teleport_menu_has_any_feature():
+            arc_menu.add_button(self.language_manager.GetText('TELEPORT_MENU_NAME'), on_click=self.show_teleport_menu)
+        # 领地系统关闭或不允许圈地时，不显示领地面板入口
+        if self._is_land_system_enabled() and self._is_land_claim_allowed():
+            arc_menu.add_button(self.language_manager.GetText('LAND_MENU_NAME'), on_click=self.show_land_main_menu)
         arc_menu.add_button(self.language_manager.GetText('BANK_MENU_NAME'), on_click=self.show_bank_main_menu)
         arc_menu.add_button(self.language_manager.GetText('GUILD_MENU_NAME'), on_click=self.show_guild_main_menu)
         if not checkin_first:
@@ -9259,6 +9268,24 @@ class ARCCorePlugin(Plugin):
     def show_arc_pvp_kd_menu(self, player: Player):
         """委托弧光 PvP KD 排行榜插件打开 KD 榜单。"""
         player.perform_command('kd')
+
+    def show_arc_shooter_game_menu(self, player: Player):
+        """委托枪战游戏插件打开 /gs 主面板。"""
+        player.perform_command('gs')
+
+    def _teleport_menu_has_any_feature(self) -> bool:
+        """主菜单是否显示传送入口：至少有一项传送子功能开启。"""
+        ts = getattr(self, "teleport_system", None)
+        if ts is None:
+            return False
+        return bool(
+            getattr(ts, "enable_teleport_public_warp", False)
+            or getattr(ts, "enable_teleport_home", False)
+            or getattr(ts, "enable_random_teleport", False)
+            or getattr(ts, "enable_teleport_death_location", False)
+            or getattr(ts, "enable_teleport_player", False)
+            or getattr(ts, "enable_teleport_cross_server", False)
+        )
 
     def show_arc_achievement_op_menu(self, player: Player):
         """委托弧光成就插件打开 OP 成就管理。"""
