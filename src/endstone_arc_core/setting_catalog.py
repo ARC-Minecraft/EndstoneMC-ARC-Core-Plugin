@@ -98,10 +98,6 @@ SETTING_GROUPS: List[Dict[str, object]] = [
                 choices=BOOL_CHOICES,
                 restart=True,
             ),
-            _s("PLAYER_DATABASE_PATH", "玩家库路径", "string", placeholder="", restart=True),
-            _s("PLAYER_ECONOMY_DATABASE_PATH", "经济库路径", "string", placeholder="", restart=True),
-            _s("PLAYER_TITLE_DATABASE_PATH", "头衔库路径", "string", placeholder="", restart=True),
-            _s("GUILD_DATABASE_PATH", "公会库路径", "string", placeholder="", restart=True),
         ],
     },
     {

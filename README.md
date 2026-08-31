@@ -3,7 +3,7 @@
 # EndStone ARC Core Plugin / EndStone弧光核心
 
 [![Codacy Grade](https://app.codacy.com/project/badge/Grade/2f830615baf347258558dcc2a5ab85a1)](https://app.codacy.com/gh/DEVILENMO/EndstoneMC-ARC-Core-Plugin/dashboard?utm_source=gh&utm_medium=referral&utm_content=&utm_campaign=Badge_grade)
-[![Version](https://img.shields.io/badge/version-v0.9.41-blue)](https://github.com/ARC-Minecraft/EndstoneMC-ARC-Core-Plugin)
+[![Version](https://img.shields.io/badge/version-v0.9.42-blue)](https://github.com/ARC-Minecraft/EndstoneMC-ARC-Core-Plugin)
 [![Python](https://img.shields.io/badge/python-3.13+-blue?logo=python&logoColor=white)](https://www.python.org/)
 [![EndStone API](https://img.shields.io/badge/EndStone_API-0.7+-black)](https://github.com/EndstoneMC/endstone)
 [![License](https://img.shields.io/github/license/ARC-Minecraft/EndstoneMC-ARC-Core-Plugin)](LICENSE)
@@ -52,7 +52,7 @@ EndStone ARC Core 是一个功能完整的 EndStone (Minecraft 基岩版服务�
 - 玩家数据持久化存储（跨服账号：`player_basic_info`；本服档案：`player_local_info`）
 - 在线状态实时管理
 - 玩家加入/离开消息提示
-- **免费领地格子**、**OP 标记**、**签到** 均为本服数据，不随 `PLAYER_DATABASE_PATH` / 同步中心跨服覆盖
+- **免费领地格子**、**OP 标记**、**签到** 均为本服数据，不随同步中心跨服覆盖
 - **游戏时长 / 进服次数** 写在跨服表 `player_basic_info`，随同步中心或共享库跨服累计
 
 ### 👁️ 天眼系统（Sky Eye，v0.8.8）
@@ -251,24 +251,21 @@ EndStone ARC Core 是一个功能完整的 EndStone (Minecraft 基岩版服务�
   - **对外插件接口（查询 + 发放）**：按玩家名可继续用 `api_get_player_guild_info`、`api_add_guild_contribution`（私人与公共同时 +points）。按公会 id 请用 **`api_get_player_guild_id`**、**`api_get_guild_info`**、**`api_get_guild_total_contribution`** / **`api_change_guild_total_contribution`**、**`api_get_member_guild_contribution`** / **`api_change_member_guild_contribution`**（私人点单独增减）、**`api_list_guild_members`**。详见下方「公会系统 API」
   - **底层消费接口**：`GuildSystem.consume_guild_contribution(guild_id, points)`（仅扣减公共值，不影响私人值），供领地等系统消耗公共贡献点
 - **全部公会浏览与入会（v0.7.3）**：主菜单 **公会 → 查看全部公会** — 列表按 **规模等级降序、同规模按公共贡献点降序**；支持 **按名称搜索**、分页；点选公会仅 **预览**（名称、简介、规模、人数/上限、公共贡献、入会说明）；**无公会** 玩家可 **申请加入 / 加入**（取决于 **入会审核**）；**已是本会成员** 仅提供 **我的公会** 跳转。会长 / 管理者在 **我的公会 → 入会审核设置** 中开关审核，在 **入会申请** 中处理待审。相关数据表：`guild_join_requests`、`guilds.join_requires_approval`
-- **跨服同步**：与 **`ENABLE_SYNC_CLIENT`** 互斥。文件方式下在 `core_setting.yml` 配置 **`GUILD_DATABASE_PATH`** 为各服可访问的 **同一 SQLite 文件路径**（留空则使用 `DATABASE_PATH` 主库）；远程客户端方式下通过 **`SYNC_CLIENT_SYNC_GUILD`** 控制是否同步公会数据
+- **跨服同步**：远程客户端模式下通过 **`SYNC_CLIENT_SYNC_GUILD`** 控制是否同步公会数据
 - **展示名统一**：聊天、玩家头顶 **`name_tag`**、`get_player_name_by_xuid(..., return_with_title=True)` 等为 **`[公会前缀][头衔]玩家名`**：有公会时前缀为带 MC 颜色码的 **`[公会名]`**（与「普通」稀有度头衔同色）；无公会时为 **`§f[无公会]§r`**（白色），再接头衔段与游戏名
 - **数据库平滑升级**：插件加载时若旧库 `guilds` / `guild_members` 缺少 `size_tier` / `total_contribution` / `contribution` 列，会自动 `ALTER TABLE` 补齐（默认值：`size_tier='small'`、其余为 `0`），无需手动迁移
 
-### 🔄 跨服数据同步（v0.8 / v0.9.14）
+### 🔄 跨服数据同步（v0.8 / v0.9.42）
 - **用途**：在多服架构下，让玩家账号级数据、经济、头衔、公会等在多个 ARC Core 实例之间保持一致
-- **游戏服二选一（互斥）**：
-  - **推荐 · 纯网络**：主服 **`ENABLE_SYNC_SERVER=True`** + **`ENABLE_SYNC_CLIENT=False`**，子服 **`ENABLE_SYNC_CLIENT=True`**，两台都把四个 **`*_DATABASE_PATH` 留空**
-  - **方式 A · 远程客户端**：**`ENABLE_SYNC_CLIENT=True`**，连接同步中心（**`SYNC_SERVER_IP`** + **`SYNC_CLIENT_PORT`**），首次连接全量拉取、之后接收 **`PUSH_NOTIFY`** 推送；本地写库经 **`sync_outbox`** 可靠上行（断线不丢，重连后重放，协议 v3 带 seq ack）
-  - **方式 B · 共享文件**：**`ENABLE_SYNC_CLIENT=False`**，通过 **`PLAYER_DATABASE_PATH`**、**`PLAYER_ECONOMY_DATABASE_PATH`**、**`PLAYER_TITLE_DATABASE_PATH`**、**`GUILD_DATABASE_PATH`** 指向同一 SQLite 文件
-- **旧共享库一次性导入（v0.9.21）**：主服配置 **`LEGACY_IMPORT_DATABASE_PATHS`**（逗号分隔旧 `.db` 路径），启动时若未见 `plugins/ARCCore/.legacy_import_done` 则把经济/头衔/公会等导回主库，并用天眼重建 **`player_basic_info`**（密码需玩家重设）。从服远程客户端模式会跳过。若同时开了客户端与文件路径，会打 WARN 并忽略文件路径
-- **同步中心（可选）**：某一实例可设 **`ENABLE_SYNC_SERVER=True`** 监听 **`SYNC_SERVER_PORT`**（部署上常与 FRP **19135** 对应），供其他游戏服以客户端连接；与上述 A/B 消费方式独立
-- **分项同步开关（仅远程客户端）**：**`SYNC_CLIENT_SYNC_PLAYER`**、**`SYNC_CLIENT_SYNC_ECONOMY`**、**`SYNC_CLIENT_SYNC_TITLE`**、**`SYNC_CLIENT_SYNC_GUILD`** 可单独开关；关闭的类别不会拉取全量数据，也不会接收推送。若 A 与 B 同时配置，插件 **以远程客户端为准** 并忽略文件路径
-- **条件头衔权威服（v0.9.14）**：**`CONDITIONAL_TITLE_AUTHORITY`** 显式指定是否由本机计算首富等条件头衔；留空则自动推断（远程客户端 / 仅文件共享的子服不计算，避免双算）
-- **玩法配置以同步中心为准（v0.8.5，仅方式 A）**：开启对应分项后，从服连接同步中心时会拉取并覆盖该类别的玩法配置（写入本机 `core_setting.yml`）。例如同步经济则统一 **初始金钱 / 签到存款 / 传送与圈地价格**；同步公会则统一 **创建费用 / 规模上限 / 升级贡献点**。主服 OP 改配置或重载后会推送给已连接从服。本机路径、端口、`SYNC_CLIENT_*`、清道夫、出生点保护等仍各服独立。**方式 B（共享文件）不会自动同步配置文件**，需自行保证各服一致，或改用远程客户端
+- **拓扑（纯网络）**：
+  - **主服 / 同步中心**：**`ENABLE_SYNC_SERVER=True`** + **`ENABLE_SYNC_CLIENT=False`**，监听 **`SYNC_SERVER_PORT`**
+  - **子服**：**`ENABLE_SYNC_CLIENT=True`**，连接同步中心（**`SYNC_SERVER_IP`** + **`SYNC_CLIENT_PORT`**），首次连接全量拉取、之后接收 **`PUSH_NOTIFY`** 推送；本地写库经 **`sync_outbox`** 可靠上行（断线不丢，重连后重放，协议 v3 带 seq ack）
+- **分项同步开关（仅远程客户端）**：**`SYNC_CLIENT_SYNC_PLAYER`**、**`SYNC_CLIENT_SYNC_ECONOMY`**、**`SYNC_CLIENT_SYNC_TITLE`**、**`SYNC_CLIENT_SYNC_GUILD`** 可单独开关；关闭的类别不会拉取全量数据，也不会接收推送
+- **条件头衔权威服（v0.9.14）**：**`CONDITIONAL_TITLE_AUTHORITY`** 显式指定是否由本机计算首富等条件头衔；留空则自动推断（远程客户端不计算，避免双算）
+- **玩法配置以同步中心为准（v0.8.5）**：开启对应分项后，从服连接同步中心时会拉取并覆盖该类别的玩法配置（写入本机 `core_setting.yml`）。例如同步经济则统一 **初始金钱 / 签到存款 / 传送与圈地价格**；同步公会则统一 **创建费用 / 规模上限 / 升级贡献点**。主服 OP 改配置或重载后会推送给已连接从服。本机路径、端口、`SYNC_CLIENT_*`、清道夫、出生点保护等仍各服独立
 - **模块**：`sync_protocol.py`、`sync_server.py`、`sync_client.py`、`sync_config.py`、`sync_outbox.py`
 - **可同步数据表**：跨服玩家账号信息（`player_basic_info`，含 **`once_op` 粘性列**：任意服以 OP 登录过即永久排除排行）、经济（`player_economy`）、头衔（`title_definitions` / `player_title_unlock_time` / `player_title_equipped`）、公会（`guilds` / `guild_members` / `guild_invites`）
-- **本服本地表（不同步）**：**`player_local_info`** — 本服 `is_op`、剩余免费领地格、**签到**（每服独立）。始终写在本服 **`DATABASE_PATH`**，即使配置了 `PLAYER_DATABASE_PATH` 也不会进共享库；跨服排行 OP 排除读 **`player_basic_info.once_op`**（不再用本服 `is_op` 镜像）
+- **本服本地表（不同步）**：**`player_local_info`** — 本服 `is_op`、剩余免费领地格、**签到**（每服独立）。始终写在本服 **`DATABASE_PATH`**；跨服排行 OP 排除读 **`player_basic_info.once_op`**（不再用本服 `is_op` 镜像）
 - **OP 面板**：点「跨服同步」即发起全面对账并显示运行状态；每次连上同步中心也会自动拉全量并上行本地已启用表
 - **QQ 群消息**：跨服 QQ 互通由 **AstrBot 弧光 EndStone 消息中枢** + **endstone-arc-qq-sync-astrbot** 负责；ARCCore **不再**经 SyncServer 做 QQ 事件中继。死亡播报调用本机 QQ Sync 的 `api_send_event("death", …)`；成就等可用 `custom`
 - **群聊死亡播报模式（v0.9.12）**：`QQ_DEATH_BROADCAST_MODE` = `off`（不播报）/ `pvp`（仅 PvP）/ `all`（全部，默认）；仅影响群聊，游戏内死亡播报仍始终发送
@@ -415,7 +412,7 @@ PUBLIC_LAND_BLOCK_ACTOR_SPAWN_LIST=
 DEFAULT_TITLE=创始玩家, 核心成员, ARC Player
 OP_TITLE=管理员
 
-# 公会系统 (v0.7.0)；跨服共享库路径见下方「跨服数据同步 → 方式 B」
+# 公会系统 (v0.7.0)
 GUILD_CREATE_COST=100000
 # 公会规模 (v0.7.2)：每个公会有 small / medium / large 三档；下列三个值为各档成员人数上限（含会长）
 GUILD_SIZE_SMALL_MAX=10
@@ -427,18 +424,15 @@ GUILD_UPGRADE_TO_LARGE_COST=100000
 # 会长改名公会需支付的金钱（0 表示免费）
 GUILD_RENAME_COST=0
 
-# 跨服数据同步（v0.8）
-# 游戏服在以下两种方式中择一（互斥）：
-#   A. 远程同步 — ENABLE_SYNC_CLIENT=True
-#   B. 文件同步 — ENABLE_SYNC_CLIENT=False，填写下方共享 SQLite 路径
-# 另：某一实例可设 ENABLE_SYNC_SERVER=True 作为同步中心
+# 跨服数据同步（v0.9.42+）
+# 主服 ENABLE_SYNC_SERVER=True；子服 ENABLE_SYNC_CLIENT=True 连接同步中心
 
 # ----- 同步中心（可选） -----
 ENABLE_SYNC_SERVER=False
 SYNC_SERVER_PORT=19999
 SYNC_SERVER_AUTH_KEY=
 
-# ----- 方式 A：远程客户端（与文件路径互斥） -----
+# ----- 远程客户端（子服） -----
 ENABLE_SYNC_CLIENT=False
 SYNC_SERVER_IP=127.0.0.1
 SYNC_CLIENT_PORT=19999
@@ -450,14 +444,6 @@ SYNC_CLIENT_SYNC_ECONOMY=True
 SYNC_CLIENT_SYNC_TITLE=True
 SYNC_CLIENT_SYNC_GUILD=True
 # 开启某类别时，该类别相关玩法配置也以同步中心为准（初始金钱、公会升级消耗等）
-
-# ----- 方式 B：共享数据库文件路径（与远程客户端互斥） -----
-PLAYER_DATABASE_PATH=
-PLAYER_ECONOMY_DATABASE_PATH=
-PLAYER_TITLE_DATABASE_PATH=
-GUILD_DATABASE_PATH=
-# 一次性把旧共享库导回主库（仅主服；见 LEGACY_IMPORT_DATABASE_PATHS）
-LEGACY_IMPORT_DATABASE_PATHS=
 ```
 
 ### broadcast.txt - 公告消息文件
@@ -803,7 +789,11 @@ arc.api_sidebar_set_values(
 
 ## 📋 近期更新日志
 
-### v0.9.41（当前版本）
+### v0.9.42（当前版本）
+
+- ✅ **移除共享文件跨服同步**：删除 `*_DATABASE_PATH` 配置与 `legacy_recovery` 一次性导入；跨服仅支持 SyncServer + SyncClient 网络后端
+
+### v0.9.41
 
 - ✅ **传送倒计时改用屏幕 title**：Home / Warp / TPA / 死亡回归 / 随机传送倒计时改为屏幕中央大数字 + 字幕提示，不再刷聊天栏
 

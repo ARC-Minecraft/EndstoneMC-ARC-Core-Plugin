@@ -47,15 +47,13 @@ from endstone_arc_core.arc_error_log import append_arc_error_log, format_context
 from endstone_arc_core.sky_eye_log import SkyEyeStore, format_sky_eye_records, prune_sky_eye_logs
 from endstone_arc_core.sync_server import SyncServer
 from endstone_arc_core.sync_client import SyncClient
-from endstone_arc_core.sync_config import ALL_SHARED_SETTING_KEYS, has_file_path_sync, resolve_sync_consumer_mode
+from endstone_arc_core.sync_config import ALL_SHARED_SETTING_KEYS, resolve_sync_consumer_mode
 from endstone_arc_core.SidebarSystem import SidebarSystem
 from endstone_arc_core import bedrock_glyphs
-from endstone_arc_core.legacy_recovery import (
-    RECOVERED_UUID_PREFIX,
-    maybe_run_legacy_recovery,
-)
 
 MAIN_PATH = 'plugins/ARCCore'
+# 旧版一次性导入占位 uuid 前缀（进服时覆写为真实 unique_id）
+RECOVERED_UUID_PREFIX = "recovered-"
 # 天眼系统：独立 SQLite + 兼容清理旧按日 txt
 SKY_EYE_LOG_DIR_NAME = 'sky_eye'
 SKY_EYE_DB_NAME = 'skyeye.db'
@@ -169,24 +167,8 @@ class ARCCorePlugin(Plugin):
         self._sky_eye_hand_cache: dict[str, str] = {}
         self._sky_eye_land_meta: dict[int, tuple] = {}
 
-        # 跨服数据消费方式：远程客户端 与 共享文件路径 互斥
-        self._sync_consumer_mode, self._sync_mode_conflict = resolve_sync_consumer_mode(self.setting_manager)
-        if self._sync_consumer_mode == "file":
-            player_db_path = self.setting_manager.GetSetting('PLAYER_DATABASE_PATH')
-            economy_db_path = self.setting_manager.GetSetting('PLAYER_ECONOMY_DATABASE_PATH')
-            title_db_path = self.setting_manager.GetSetting('PLAYER_TITLE_DATABASE_PATH')
-            if player_db_path:
-                self.database_manager.add_route('player_basic_info', player_db_path)
-            if economy_db_path:
-                self.database_manager.add_route('player_economy', economy_db_path)
-            if title_db_path:
-                for t in ('title_definitions', 'player_title_unlock_time', 'player_title_equipped'):
-                    self.database_manager.add_route(t, title_db_path)
-
-            guild_db_path = self.setting_manager.GetSetting('GUILD_DATABASE_PATH')
-            if guild_db_path:
-                for t in ('guilds', 'guild_members', 'guild_invites'):
-                    self.database_manager.add_route(t, guild_db_path)
+        # 跨服数据消费方式：远程客户端 / 无
+        self._sync_consumer_mode = resolve_sync_consumer_mode(self.setting_manager)
 
         self.economy = Economy(self.database_manager, self.setting_manager)
         self.teleport_system = TeleportSystem(self.database_manager, self.setting_manager)
@@ -490,29 +472,6 @@ class ARCCorePlugin(Plugin):
     def on_enable(self) -> None:
         self.register_events(self)
         self.logger.info(f"{ColorFormat.YELLOW}[ARC Core]Plugin enabled!")
-        if self._sync_mode_conflict:
-            self.logger.warning(
-                "[ARC Core] ENABLE_SYNC_CLIENT 与共享数据库路径同时配置，"
-                "已忽略文件路径方式，仅使用远程客户端同步。"
-                "请将旧共享库路径改填 LEGACY_IMPORT_DATABASE_PATHS，并清空四个 *_DATABASE_PATH。"
-            )
-        elif has_file_path_sync(self.setting_manager):
-            self.logger.warning(
-                "[ARC Core] 仍配置了 *_DATABASE_PATH。"
-                "推荐主服开同步中心、子服 ENABLE_SYNC_CLIENT，两台都清空共享路径；"
-                "旧共享库文件请填进 LEGACY_IMPORT_DATABASE_PATHS。"
-            )
-        try:
-            maybe_run_legacy_recovery(
-                database_manager=self.database_manager,
-                setting_manager=self.setting_manager,
-                data_dir=Path(MAIN_PATH),
-                sky_eye_db=Path(MAIN_PATH) / SKY_EYE_LOG_DIR_NAME / SKY_EYE_DB_NAME,
-                log=self._safe_log,
-                is_sync_client=self._sync_consumer_mode == "client",
-            )
-        except Exception as e:
-            self.logger.error(f"[ARC Core]Legacy recovery error: {e}")
         self._init_sync_service()
         self.economy.set_logger(self.logger)
 
@@ -3469,7 +3428,6 @@ class ARCCorePlugin(Plugin):
 
         显式 CONDITIONAL_TITLE_AUTHORITY 优先；未配置时：
         - 远程客户端模式不计算；
-        - 文件模式且本机未开同步中心不计算（避免与主服双算）；
         - 其余（同步中心 / 单机）计算。
         """
         from endstone_arc_core.sync_config import setting_bool
@@ -3480,10 +3438,6 @@ class ARCCorePlugin(Plugin):
 
         mode = getattr(self, "_sync_consumer_mode", "none")
         if mode == "client":
-            return False
-        if mode == "file" and not setting_bool(
-            self.setting_manager, "ENABLE_SYNC_SERVER", False
-        ):
             return False
         return True
 
@@ -3710,7 +3664,7 @@ class ARCCorePlugin(Plugin):
             'last_checkin_at': 'TEXT',
             'continuous_checkin_days': 'INTEGER DEFAULT 0',
         }
-        # Always on default DATABASE_PATH (never routed to shared PLAYER_DATABASE_PATH).
+        # Always on default DATABASE_PATH (never synced cross-server).
         ok = self.database_manager.create_table('player_local_info', fields)
         # Legacy local tables may lack OP / check-in cols.
         for col, decl in (
@@ -17762,7 +17716,6 @@ class ARCCorePlugin(Plugin):
         mode = getattr(self, "_sync_consumer_mode", "none")
         mode_label = {
             "client": "远程客户端",
-            "file": "共享文件",
             "none": "未启用消费",
         }.get(mode, str(mode))
         lines = [
@@ -17811,7 +17764,7 @@ class ARCCorePlugin(Plugin):
         return "\n".join(lines)
 
     def run_sync_reconcile(self) -> dict:
-        """OP / 连接：触发已启用同步表全面对账（远程重连自动拉+推；文件模式合并残留）。"""
+        """OP / 连接：触发已启用同步表全面对账（远程重连自动拉+推）。"""
         mode = getattr(self, "_sync_consumer_mode", "none")
         if mode == "client" and self.sync_client is not None:
             if not getattr(self.sync_client, "is_active", lambda: False)():
@@ -17827,56 +17780,10 @@ class ARCCorePlugin(Plugin):
                     f"重连后自动拉全量并上行；当前 outbox={result.get('outbox_pending', 0)}"
                 ),
             }
-        if mode == "file":
-            merged = self._reconcile_file_mode_title_residuals()
-            return {
-                "mode": "file",
-                "detail": f"已从本机残留库合并头衔行 {merged} 条到共享库",
-            }
         return {
             "mode": mode or "none",
-            "detail": "当前不是远程客户端或文件同步模式，无需对账",
+            "detail": "当前不是远程客户端模式，无需对账",
         }
-
-    def _reconcile_file_mode_title_residuals(self) -> int:
-        """文件模式：把默认 DATABASE_PATH 里残留的头衔表行 upsert 进已路由的共享库。"""
-        import sqlite3
-        from pathlib import Path
-
-        local_path = Path(self.database_manager.db_path)
-        if not local_path.exists():
-            return 0
-        title_tables = (
-            "title_definitions",
-            "player_title_unlock_time",
-            "player_title_equipped",
-        )
-        merged = 0
-        try:
-            conn = sqlite3.connect(str(local_path))
-            conn.row_factory = sqlite3.Row
-            try:
-                for table in title_tables:
-                    try:
-                        cur = conn.execute(f"SELECT * FROM {table}")
-                    except sqlite3.Error:
-                        continue
-                    rows = [dict(r) for r in cur.fetchall()]
-                    for row in rows:
-                        if not row:
-                            continue
-                        # upsert 走路由后的共享库；suppress 避免无意义 TCP 广播
-                        with self.database_manager.suppress_write_notify():
-                            if self.database_manager.upsert(table, row):
-                                merged += 1
-            finally:
-                conn.close()
-        except Exception as e:
-            try:
-                self.logger.error(f"[ARC Core] File-mode title reconcile error: {e}")
-            except Exception:
-                pass
-        return merged
 
 
     def _notify_qqsync(self, event_type: str, display_name: str,

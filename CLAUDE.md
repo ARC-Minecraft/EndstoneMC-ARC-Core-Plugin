@@ -48,7 +48,7 @@ There are **no tests** in this repository — no test runner, no test files.
 
 1. **Single monolith + satellite modules**: `arc_core_plugin.py` is the hub. Event handlers, UI forms, and command logic live there. Satellite modules (`LandSystem`, `GuildSystem`, etc.) encapsulate domain logic. Achievements are a separate plugin (`arc_achievement`).
 
-2. **Database routing**: `DatabaseManager` supports per-table routing to different SQLite files via `add_route(table_name, db_path)`. This enables cross-server data sharing (e.g., `PLAYER_DATABASE_PATH`, `GUILD_DATABASE_PATH` config keys).
+2. **Database routing**: `DatabaseManager` supports optional per-table routing to different SQLite files via `add_route(table_name, db_path)` (internal infrastructure; cross-server sync uses SyncServer/SyncClient only).
 
 3. **Config files** (in `plugins/ARCCore/`):
    - `core_setting.yml` — `KEY=VALUE` pairs (not real YAML; parsed line-by-line)
@@ -73,7 +73,7 @@ All block coordinate calculations use `math.floor()` to handle negative coordina
 
 ### Cross-Server Support
 
-Multiple config keys (`PLAYER_DATABASE_PATH`, `PLAYER_ECONOMY_DATABASE_PATH`, `PLAYER_TITLE_DATABASE_PATH`, `GUILD_DATABASE_PATH`) route specific tables to shared SQLite files, enabling data sharing across server instances.
+Cross-server data uses **SyncServer** (hub) + **SyncClient** (remote). Enable `ENABLE_SYNC_SERVER` on the main instance and `ENABLE_SYNC_CLIENT` on child servers. Category toggles: `SYNC_CLIENT_SYNC_PLAYER`, `_ECONOMY`, `_TITLE`, `_GUILD`.
 
 ## Configuration
 
